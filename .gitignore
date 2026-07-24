@@ -1,0 +1,18 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# QEMU / Build files if any fall outside target
+*.iso
+*.img
+*.bin

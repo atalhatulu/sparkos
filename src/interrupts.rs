@@ -1,0 +1,281 @@
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::instructions::port::Port;
+use crate::serial_println;
+use spin::Mutex;
+
+pub static IDT: Mutex<Option<InterruptDescriptorTable>> = Mutex::new(None);
+
+pub const PIC_IRQ_BASE: u8 = 32;
+
+pub fn init_idt() {
+    let mut idt = InterruptDescriptorTable::new();
+    
+    // Exceptions WITHOUT error code (HandlerFunc)
+    idt.divide_error.set_handler_fn(divide_error_handler);
+    idt.debug.set_handler_fn(debug_handler);
+    idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
+    idt.breakpoint.set_handler_fn(breakpoint_handler);
+    idt.overflow.set_handler_fn(overflow_handler);
+    idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
+    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+    idt.device_not_available.set_handler_fn(device_not_available_handler);
+    
+    // Exceptions WITH error code (HandlerFuncWithErrCode)
+    idt.invalid_tss.set_handler_fn(invalid_tss_handler);
+    idt.segment_not_present.set_handler_fn(segment_not_present_handler);
+    idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
+    idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+    idt.alignment_check.set_handler_fn(alignment_check_handler);
+    
+    // Diverging (returns !)
+    unsafe {
+        idt.double_fault.set_handler_fn(double_fault_handler)
+            .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+    }
+    
+    // Syscall (Ring 3 accessible)
+    idt[0x80].set_handler_fn(syscall_handler)
+        .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+    
+    // Page fault (special error code type)
+    idt.page_fault.set_handler_fn(page_fault_handler);
+    
+    // Hardware IRQs
+    idt[PIC_IRQ_BASE + 0].set_handler_fn(timer_handler);
+    idt[PIC_IRQ_BASE + 1].set_handler_fn(keyboard_handler);
+    idt[PIC_IRQ_BASE + 12].set_handler_fn(mouse_handler);
+    idt[PIC_IRQ_BASE + 14].set_handler_fn(ata1_handler);
+    idt[PIC_IRQ_BASE + 15].set_handler_fn(ata2_handler);
+    
+    // Store in static, then load into IDTR
+    *IDT.lock() = Some(idt);
+    let guard = IDT.lock();
+    let idt_ref = guard.as_ref().unwrap();
+    let idt_static: &'static InterruptDescriptorTable = unsafe {
+        &*(idt_ref as *const InterruptDescriptorTable)
+    };
+    idt_static.load();
+    
+    serial_println!("[interrupts] IDT loaded");
+}
+
+pub fn init_pic() {
+    let mut cmd_master = Port::new(0x20u16);
+    let mut data_master = Port::new(0x21u16);
+    let mut cmd_slave = Port::new(0xA0u16);
+    let mut data_slave = Port::new(0xA1u16);
+    
+    unsafe {
+        cmd_master.write(0x11u8);
+        cmd_slave.write(0x11u8);
+        data_master.write(PIC_IRQ_BASE);
+        data_slave.write(PIC_IRQ_BASE + 8);
+        data_master.write(4u8);
+        data_slave.write(2u8);
+        data_master.write(0x01u8);
+        data_slave.write(0x01u8);
+        data_master.write(0u8);
+        data_slave.write(0u8);
+    }
+    
+    serial_println!("[interrupts] PIC remapped to IRQ base {}", PIC_IRQ_BASE);
+}
+
+pub fn init_timer() {
+    let divisor: u16 = (1193182u32 / 1000) as u16;
+    let mut cmd: Port<u8> = Port::new(0x43u16);
+    let mut data: Port<u8> = Port::new(0x40u16);
+    
+    unsafe {
+        cmd.write(0x36u8);
+        data.write((divisor & 0xFF) as u8);
+        data.write((divisor >> 8) as u8);
+    }
+    
+    serial_println!("[interrupts] PIT timer: 1000 Hz (divisor={})", divisor);
+}
+
+// ========== Exception Handlers (no error code) ==========
+
+extern "x86-interrupt" fn divide_error_handler(_stack: InterruptStackFrame) {
+    serial_println!("[PANIC] Divide-by-zero");
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn debug_handler(_stack: InterruptStackFrame) {
+    serial_println!("[DEBUG] Trap");
+}
+
+extern "x86-interrupt" fn nmi_handler(_stack: InterruptStackFrame) {
+    serial_println!("[DEBUG] NMI");
+}
+
+extern "x86-interrupt" fn breakpoint_handler(_stack: InterruptStackFrame) {
+    serial_println!("[DEBUG] Breakpoint");
+}
+
+extern "x86-interrupt" fn overflow_handler(_stack: InterruptStackFrame) {
+    serial_println!("[PANIC] Overflow");
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn bound_range_handler(_stack: InterruptStackFrame) {
+    serial_println!("[PANIC] Bound range");
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(_stack: InterruptStackFrame) {
+    serial_println!("[PANIC] Invalid opcode");
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn device_not_available_handler(_stack: InterruptStackFrame) {
+    serial_println!("[PANIC] Device not available (no FPU/SSE)");
+    loop { x86_64::instructions::hlt(); }
+}
+
+// ========== Exception Handlers WITH error code ==========
+
+extern "x86-interrupt" fn invalid_tss_handler(
+    _stack: InterruptStackFrame,
+    _error_code: u64,
+) {
+    serial_println!("[PANIC] Invalid TSS (error={:#x})", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn segment_not_present_handler(
+    _stack: InterruptStackFrame,
+    _error_code: u64,
+) {
+    serial_println!("[PANIC] Segment not present (error={:#x})", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn stack_segment_handler(
+    _stack: InterruptStackFrame,
+    _error_code: u64,
+) {
+    serial_println!("[PANIC] Stack segment fault (error={:#x})", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn general_protection_fault_handler(
+    _stack: InterruptStackFrame,
+    _error_code: u64,
+) {
+    serial_println!("[PANIC] GPF (error={:#x})", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+extern "x86-interrupt" fn alignment_check_handler(
+    _stack: InterruptStackFrame,
+    _error_code: u64,
+) {
+    serial_println!("[PANIC] Alignment check (error={:#x})", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+// ========== Diverging handlers ==========
+
+extern "x86-interrupt" fn double_fault_handler(
+    _stack: InterruptStackFrame,
+    _error_code: u64,
+) -> ! {
+    serial_println!("[FATAL] Double fault (error={:#x})", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+// ========== Syscall Handler ==========
+
+extern "x86-interrupt" fn syscall_handler(_stack: InterruptStackFrame) {
+    serial_println!("[SYSCALL] Ring 3'ten (User Mode) tetiklendi!");
+    
+    // Test: Ekrana Ring 3'ten geldigini yaz.
+    // Gercek bir syscall rax, rdi gibi registerlari okur.
+    let mut w = crate::vga_buffer::WRITE_LOCK.lock();
+    w.set_color(crate::vga_buffer::Color::LightRed, crate::vga_buffer::Color::Black);
+    core::fmt::Write::write_str(&mut *w, "\n[KULLANICI MODU] Kernel'e basariyla ulasildi! (Syscall)\n").unwrap();
+    w.set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Black);
+}
+
+// ========== Page fault ==========
+
+extern "x86-interrupt" fn page_fault_handler(
+    _stack: InterruptStackFrame,
+    _error_code: PageFaultErrorCode,
+) {
+    let addr = x86_64::registers::control::Cr2::read_raw();
+    serial_println!(
+        "[PANIC] Page Fault at {:#x}, access={:#x}",
+        _stack.instruction_pointer,
+        addr,
+    );
+    serial_println!("  Error code: {:?}", _error_code);
+    loop { x86_64::instructions::hlt(); }
+}
+
+// ========== IRQ Handlers ==========
+
+static TICK: Mutex<u64> = Mutex::new(0);
+
+extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
+    let mut tick = TICK.lock();
+    *tick += 1;
+    
+    // Tick çıktısı kaldırıldı — debug için serial_println vardı
+    
+    unsafe {
+        let mut eoi = Port::new(0x20u16);
+        eoi.write(0x20u8);
+    }
+}
+
+pub fn get_tick() -> u64 {
+    *TICK.lock()
+}
+
+extern "x86-interrupt" fn keyboard_handler(_stack: InterruptStackFrame) {
+    use x86_64::instructions::port::PortReadOnly;
+    
+    let mut data: PortReadOnly<u8> = PortReadOnly::new(0x60u16);
+    
+    unsafe {
+        let scancode = data.read();
+        crate::task::keyboard::add_scancode(scancode);
+    }
+    
+    // EOI
+    unsafe {
+        let mut eoi = Port::new(0x20u16);
+        eoi.write(0x20u8);
+    }
+}
+
+extern "x86-interrupt" fn ata1_handler(_stack: InterruptStackFrame) {
+    unsafe {
+        let mut eoi_slave = Port::new(0xA0u16);
+        eoi_slave.write(0x20u8);
+        let mut eoi_master = Port::new(0x20u16);
+        eoi_master.write(0x20u8);
+    }
+}
+
+extern "x86-interrupt" fn ata2_handler(_stack: InterruptStackFrame) {
+    unsafe {
+        let mut eoi_slave = Port::new(0xA0u16);
+        eoi_slave.write(0x20u8);
+        let mut eoi_master = Port::new(0x20u16);
+        eoi_master.write(0x20u8);
+    }
+}
+
+extern "x86-interrupt" fn mouse_handler(_stack: InterruptStackFrame) {
+    crate::mouse::handle_interrupt();
+    unsafe {
+        let mut eoi_slave = Port::new(0xA0u16);
+        eoi_slave.write(0x20u8);
+        let mut eoi_master = Port::new(0x20u16);
+        eoi_master.write(0x20u8);
+    }
+}
