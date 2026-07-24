@@ -93,8 +93,9 @@ pub fn handle_interrupt() {
     let mut state = MOUSE.lock();
     match state.cycle {
         0 => {
-            // First byte must have bit 3 set
-            if (data & 0x08) != 0 {
+            // First byte must have bit 3 set, and overflow bits (6 and 7) should usually be 0 
+            // to help prevent false sync with movement bytes.
+            if (data & 0x08) != 0 && (data & 0xC0) == 0 {
                 state.packet[0] = data;
                 state.cycle = 1;
             }
@@ -145,7 +146,9 @@ pub async fn mouse_task() {
         let cy = MOUSE_Y.load(Ordering::Relaxed);
         let click = MOUSE_LEFT_CLICK.load(Ordering::Relaxed);
         
-        if cx != last_x || cy != last_y {
+        let moved = cx != last_x || cy != last_y;
+        
+        if moved {
             crate::gui::update_cursor(last_x, last_y, cx, cy);
             last_x = cx;
             last_y = cy;
@@ -236,7 +239,7 @@ pub async fn mouse_task() {
             let mut drag = DRAG_STATE.lock();
             drag.mode = 0;
         } 
-        else if click && last_click && (cx != last_x || cy != last_y) {
+        else if click && last_click && moved {
             let drag = DRAG_STATE.lock();
             if drag.mode != 0 {
                 crate::gui::erase_cursor(last_x, last_y);
