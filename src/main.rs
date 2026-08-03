@@ -27,14 +27,33 @@ pub mod mouse;
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     serial::SerialWriter::force_write("KERNEL PANIC: ");
-    if let Some(msg) = info.message().as_str() {
-        serial::SerialWriter::force_write(msg);
-    }
-    serial::SerialWriter::force_write("\n");
+    
+    crate::serial_println!("{}", info);
+    
     loop { x86_64::instructions::hlt(); }
 }
 
 entry_point!(kernel_main);
+
+async fn clock_task() {
+    loop {
+        let current_tick = crate::interrupts::get_tick();
+        let seconds = current_tick / 1000;
+        
+        let mut time_str = alloc::string::String::new();
+        core::fmt::write(&mut time_str, format_args!(" UP: {:04}s ", seconds)).unwrap();
+        
+        {
+            let mut w = crate::vga_buffer::WRITE_LOCK.lock();
+            w.write_at(0, 69, &time_str, crate::vga_buffer::Color::Yellow, crate::vga_buffer::Color::Blue);
+        }
+        
+        let target = current_tick + 1000;
+        while crate::interrupts::get_tick() < target {
+            crate::task::yield_now().await;
+        }
+    }
+}
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::SerialWriter::init();
@@ -44,24 +63,24 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         gui::PHYS_OFFSET = boot_info.physical_memory_offset;
     }
     
-    // Boot directly into GUI
-    serial_println!("[OK] Switching to GUI Pixel Mode...");
-    gui::init();
-    gui::draw_desktop_and_window(100, 100, 800, 500, false);
-    
-    use core::fmt::Write;
+    // Heap (GUI buffer için önce heap başlatılmalı)
+    allocator::init_heap(boot_info.physical_memory_offset, &boot_info.memory_map);
+
+    // VGA çıktı
+    vga_buffer::WRITE_LOCK.lock().clear();
     {
-        let mut w = gui::WRITER.lock();
-        writeln!(w, "SparkOS GUI Mode Initialized!").unwrap();
-        writeln!(w, "Physical memory offset: {:#x}", boot_info.physical_memory_offset).unwrap();
+        let mut w = vga_buffer::WRITE_LOCK.lock();
+        w.set_color(vga_buffer::Color::Cyan, vga_buffer::Color::Black);
+        writeln!(w, " SparkOS v0.1 - Rust x86_64                        ").unwrap();
+        w.set_color(vga_buffer::Color::White, vga_buffer::Color::Black);
+        writeln!(w, "=====================================================").unwrap();
     }
     
     // VGA uncacheable map (No longer strictly needed for text, but keeping it for structure)
     memory::map_vga_uc(boot_info.recursive_page_table_addr, boot_info.physical_memory_offset);
     serial_println!("[OK] VGA mapped as UC");
     
-    // Heap
-    allocator::init_heap(boot_info.physical_memory_offset, &boot_info.memory_map);
+    // Heap artık daha erken başlatılıyor.
     
     // VGA çıktı
     vga_buffer::WRITE_LOCK.lock().clear();
@@ -118,10 +137,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialize async keyboard scancode queue
     task::keyboard::init();
     
-    core::fmt::Write::write_str(&mut *gui::WRITER.lock(), "\n[OK] Loading filesystem from ATA disk...\n").unwrap();
+    core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "\n[OK] Loading filesystem from ATA disk...\n").unwrap();
     fs::load_from_disk();
     
-    core::fmt::Write::write_str(&mut *gui::WRITER.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
+    core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
     
     let mut executor = task::simple_executor::SimpleExecutor::new();
     
@@ -130,7 +149,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         shell.run().await;
     }));
     
-    executor.spawn(task::Task::new(mouse::mouse_task()));
+    // Arka plan saati görevini başlat (Multitasking Gösterimi)
+    executor.spawn(task::Task::new(clock_task()));
+    
+    // executor.spawn(task::Task::new(mouse::mouse_task())); // GUI deaktif olduğu için mouse görevi bekletiliyor
     
     executor.run();
     

@@ -7,12 +7,14 @@ pub struct Vesa {
 }
 
 pub static mut VESA: Vesa = Vesa {
-    width: 1280,
-    height: 720,
+    width: 1920,
+    height: 1080,
     framebuffer: core::ptr::null_mut(),
 };
 
 pub static mut PHYS_OFFSET: u64 = 0;
+pub static mut BACKBUFFER: *mut u32 = core::ptr::null_mut();
+pub static START_MENU_OPEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn init() {
     let mut index_port: Port<u16> = Port::new(0x01CE);
@@ -25,11 +27,11 @@ pub fn init() {
         
         // Genişlik = 1280
         index_port.write(1);
-        data_port.write(1280);
+        data_port.write(1920);
         
         // Yükseklik = 720
         index_port.write(2);
-        data_port.write(720);
+        data_port.write(1080);
         
         // Renk Derinliği = 32 BPP (Bits Per Pixel)
         index_port.write(3);
@@ -41,17 +43,29 @@ pub fn init() {
         
         // QEMU (Bochs) VBE LFB adresi genelde 0xFD000000'dır.
         VESA.framebuffer = (PHYS_OFFSET + 0xFD000000) as *mut u32;
+        let mut buf = alloc::vec::Vec::<u32>::with_capacity(1920 * 1080);
+        buf.resize(1920 * 1080, 0);
+        BACKBUFFER = buf.as_mut_ptr();
+        core::mem::forget(buf);
     }
 }
 
+pub fn swap_buffers() {
+    unsafe {
+        if BACKBUFFER.is_null() || BACKBUFFER.is_null() { return; }
+        core::ptr::copy_nonoverlapping(BACKBUFFER, VESA.framebuffer, 1920 * 1080);
+    }
+}
+
+
 pub fn draw_rect(x: u16, y: u16, w: u16, h: u16, color: u32) {
     unsafe {
-        if VESA.framebuffer.is_null() { return; }
+        if BACKBUFFER.is_null() { return; }
         for i in y..(y + h) {
             for j in x..(x + w) {
                 if i >= VESA.height || j >= VESA.width { continue; }
                 let offset = (i as usize) * (VESA.width as usize) + (j as usize);
-                core::ptr::write_volatile(VESA.framebuffer.add(offset), color);
+                core::ptr::write_volatile(BACKBUFFER.add(offset), color);
             }
         }
     }
@@ -133,25 +147,60 @@ pub fn draw_desktop() {
     
     // Masaustu Ikonlari
     draw_icon(20, 20, "Terminal");
+    draw_icon(20, 80, "Files");
+    draw_icon(20, 140, "Notepad");
+    draw_icon(20, 200, "TaskMgr");
     
     // Alt Gorev Cubugu (Taskbar) 3D efektli
-    draw_3d_rect(0, 720 - 34, 1280, 34, 0x00C0C0C0, false);
+    draw_3d_rect(0, 1080 - 34, 1280, 34, 0x00C0C0C0, false);
     
     // Start Butonu (3D Efektli)
-    draw_3d_rect(4, 720 - 30, 70, 26, 0x00C0C0C0, false);
+    draw_3d_rect(4, 1080 - 30, 70, 26, 0x00C0C0C0, false);
     let start_text = "Start";
     let mut px = 20;
     for c in start_text.chars() {
-        draw_char(px, 720 - 20, c, 0x00000000, 0x00C0C0C0);
+        draw_char(px, 1080 - 20, c, 0x00000000, 0x00C0C0C0);
+        px += 8;
+    }
+    
+    // Files (Dolphin) Butonu (3D Efektli)
+    draw_3d_rect(78, 1080 - 30, 70, 26, 0x00C0C0C0, false);
+    let files_text = "Files";
+    let mut px = 94;
+    for c in files_text.chars() {
+        draw_char(px, 1080 - 20, c, 0x00000000, 0x00C0C0C0);
         px += 8;
     }
     
     // Sag alt koseye Saat / Logo alani (3D iceri cokuk efekt)
-    draw_3d_rect(1280 - 100, 720 - 30, 96, 26, 0x00C0C0C0, true);
+    draw_3d_rect(1920 - 100, 1080 - 30, 96, 26, 0x00C0C0C0, true);
     let logo_text = "SparkOS";
-    let mut px = 1280 - 85;
+    let mut px = 1920 - 85;
     for c in logo_text.chars() {
-        draw_char(px, 720 - 20, c, 0x00000000, 0x00C0C0C0);
+        draw_char(px, 1080 - 20, c, 0x00000000, 0x00C0C0C0);
+        px += 8;
+    }
+    
+    if START_MENU_OPEN.load(core::sync::atomic::Ordering::Relaxed) {
+        draw_start_menu();
+    }
+}
+
+pub fn draw_start_menu() {
+    // Menu Kutusu: Sol alt köşe, Start butonunun üstü (x: 4, y: 1080 - 30 - 80, w: 150, h: 80)
+    draw_3d_rect(4, 970, 150, 80, 0x00C0C0C0, false);
+    
+    // Restart Seçeneği (y: 620)
+    let mut px = 12;
+    for c in "Restart".chars() {
+        draw_char(px, 985, c, 0x00000000, 0x00C0C0C0);
+        px += 8;
+    }
+    
+    // Shutdown Seçeneği (y: 660)
+    let mut px = 12;
+    for c in "Shutdown".chars() {
+        draw_char(px, 1025, c, 0x00000000, 0x00C0C0C0);
         px += 8;
     }
 }
@@ -165,9 +214,9 @@ pub fn draw_desktop_and_window(win_x: u16, win_y: u16, win_w: u16, win_h: u16, v
 
 pub fn draw_background(color: u32) {
     unsafe {
-        if VESA.framebuffer.is_null() { return; }
+        if BACKBUFFER.is_null() { return; }
         for i in 0..(VESA.width as usize * VESA.height as usize) {
-            core::ptr::write_volatile(VESA.framebuffer.add(i), color);
+            core::ptr::write_volatile(BACKBUFFER.add(i), color);
         }
     }
 }
@@ -177,7 +226,7 @@ pub fn draw_char(x: u16, y: u16, c: char, fg: u32, bg: u32) {
     let glyph = crate::font::FONT[c as usize];
     
     unsafe {
-        if VESA.framebuffer.is_null() { return; }
+        if BACKBUFFER.is_null() { return; }
         for (row_idx, &row) in glyph.iter().enumerate() {
             let py = y + row_idx as u16;
             for col_idx in 0..8 {
@@ -189,7 +238,7 @@ pub fn draw_char(x: u16, y: u16, c: char, fg: u32, bg: u32) {
                 let color = if bit_set { fg } else { bg };
                 
                 if bit_set || bg != 0x00000000 { // Don't draw background if it's transparent (hacky)
-                    core::ptr::write_volatile(VESA.framebuffer.add(offset), color);
+                    core::ptr::write_volatile(BACKBUFFER.add(offset), color);
                 }
             }
         }
@@ -224,8 +273,8 @@ impl GuiWriter {
                 for j in 0..content_w {
                     let src_offset = ((content_y + i) as usize) * (VESA.width as usize) + ((self.win_x + 4 + j) as usize);
                     let dst_offset = ((content_y + i - 8) as usize) * (VESA.width as usize) + ((self.win_x + 4 + j) as usize);
-                    let px = core::ptr::read_volatile(VESA.framebuffer.add(src_offset));
-                    core::ptr::write_volatile(VESA.framebuffer.add(dst_offset), px);
+                    let px = core::ptr::read_volatile(BACKBUFFER.add(src_offset));
+                    core::ptr::write_volatile(BACKBUFFER.add(dst_offset), px);
                 }
             }
         }
@@ -307,7 +356,7 @@ pub fn draw_cursor(x: u16, y: u16) {
     ];
 
     unsafe {
-        if VESA.framebuffer.is_null() { return; }
+        if BACKBUFFER.is_null() { return; }
         
         let mut idx = 0;
         for i in 0..19 {
@@ -321,14 +370,14 @@ pub fn draw_cursor(x: u16, y: u16) {
                 }
                 
                 let offset = (py as usize) * (VESA.width as usize) + (px as usize);
-                CURSOR_BG[idx] = core::ptr::read_volatile(VESA.framebuffer.add(offset));
+                CURSOR_BG[idx] = core::ptr::read_volatile(BACKBUFFER.add(offset));
                 idx += 1;
                 
                 let c = cursor_map[i as usize][j as usize];
                 if c == b'*' {
-                    core::ptr::write_volatile(VESA.framebuffer.add(offset), 0x00000000); // Siyah dis kenarlik
+                    core::ptr::write_volatile(BACKBUFFER.add(offset), 0x00000000); // Siyah dis kenarlik
                 } else if c == b'.' {
-                    core::ptr::write_volatile(VESA.framebuffer.add(offset), 0x00FFFFFF); // Beyaz ic
+                    core::ptr::write_volatile(BACKBUFFER.add(offset), 0x00FFFFFF); // Beyaz ic
                 }
             }
         }
@@ -337,7 +386,7 @@ pub fn draw_cursor(x: u16, y: u16) {
 
 pub fn erase_cursor(x: u16, y: u16) {
     unsafe {
-        if VESA.framebuffer.is_null() { return; }
+        if BACKBUFFER.is_null() { return; }
         
         let mut idx = 0;
         for i in 0..19 {
@@ -351,7 +400,7 @@ pub fn erase_cursor(x: u16, y: u16) {
                 }
                 
                 let offset = (py as usize) * (VESA.width as usize) + (px as usize);
-                core::ptr::write_volatile(VESA.framebuffer.add(offset), CURSOR_BG[idx]);
+                core::ptr::write_volatile(BACKBUFFER.add(offset), CURSOR_BG[idx]);
                 idx += 1;
             }
         }

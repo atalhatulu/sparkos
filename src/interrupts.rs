@@ -2,6 +2,7 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 use x86_64::instructions::port::Port;
 use crate::serial_println;
 use spin::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub static IDT: Mutex<Option<InterruptDescriptorTable>> = Mutex::new(None);
 
@@ -217,11 +218,10 @@ extern "x86-interrupt" fn page_fault_handler(
 
 // ========== IRQ Handlers ==========
 
-static TICK: Mutex<u64> = Mutex::new(0);
+static TICK: AtomicU64 = AtomicU64::new(0);
 
 extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
-    let mut tick = TICK.lock();
-    *tick += 1;
+    TICK.fetch_add(1, Ordering::Relaxed);
     
     // Tick çıktısı kaldırıldı — debug için serial_println vardı
     
@@ -232,7 +232,7 @@ extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
 }
 
 pub fn get_tick() -> u64 {
-    *TICK.lock()
+    TICK.load(Ordering::Relaxed)
 }
 
 extern "x86-interrupt" fn keyboard_handler(_stack: InterruptStackFrame) {

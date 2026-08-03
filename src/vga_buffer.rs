@@ -59,6 +59,24 @@ impl VgaWriter {
         self.color = ColorCode::new(fg, bg);
     }
 
+    pub fn write_at(&mut self, row: usize, col: usize, text: &str, fg: Color, bg: Color) {
+        let color_code = ColorCode::new(fg, bg);
+        let mut current_col = col;
+        for byte in text.bytes() {
+            if current_col >= BUFFER_WIDTH { break; }
+            unsafe {
+                core::ptr::write_volatile(
+                    &mut self.buffer.chars[row][current_col],
+                    ScreenChar {
+                        ascii_character: byte,
+                        color_code,
+                    }
+                );
+            }
+            current_col += 1;
+        }
+    }
+
     pub fn clear(&mut self) {
         let blank = ScreenChar {
             ascii_character: b' ',
@@ -73,6 +91,19 @@ impl VgaWriter {
         }
         self.column = 0;
         self.row = 0;
+        self.update_cursor();
+    }
+
+    fn update_cursor(&self) {
+        let pos = self.row * BUFFER_WIDTH + self.column;
+        let mut port_3d4 = x86_64::instructions::port::Port::new(0x3D4);
+        let mut port_3d5 = x86_64::instructions::port::Port::new(0x3D5);
+        unsafe {
+            port_3d4.write(14u8);
+            port_3d5.write((pos >> 8) as u8);
+            port_3d4.write(15u8);
+            port_3d5.write((pos & 0xFF) as u8);
+        }
     }
 
     pub fn write_byte(&mut self, byte: u8) {
@@ -108,6 +139,7 @@ impl VgaWriter {
                 self.column += 1;
             }
         }
+        self.update_cursor();
     }
 
     fn new_line(&mut self) {

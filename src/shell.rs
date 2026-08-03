@@ -3,25 +3,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use crate::fs;
 use crate::task::keyboard;
-
-pub struct Color;
-impl Color {
-    pub const Black: u32 = 0x00000000;
-    pub const White: u32 = 0x00FFFFFF;
-    pub const Red: u32 = 0x00FF0000;
-    pub const Green: u32 = 0x0000FF00;
-    pub const LightBlue: u32 = 0x0000AAFF;
-    pub const Yellow: u32 = 0x00FFFF00;
-    pub const Cyan: u32 = 0x0000FFFF;
-    pub const Magenta: u32 = 0x00FF00FF;
-}
+use crate::vga_buffer::{Color, WRITE_LOCK};
 
 const CMD_BUF: usize = 256;
 
 pub struct Shell {
     buf: [u8; CMD_BUF],
     len: usize,
-    text_color: u32,
+    text_color: Color,
     cwd: String,
 }
 
@@ -31,6 +20,10 @@ impl Shell {
     }
 
     pub async fn run(&mut self) {
+        // Ekranı temizle
+        WRITE_LOCK.lock().clear();
+        writeln!(WRITE_LOCK.lock(), "SparkOS CLI Modu Baslatildi.").unwrap();
+        
         loop {
             self.prompt();
             self.read_line().await;
@@ -39,7 +32,7 @@ impl Shell {
     }
 
     pub fn prompt(&self) {
-        let mut w = crate::gui::WRITER.lock();
+        let mut w = WRITE_LOCK.lock();
         w.set_color(Color::Green, Color::Black);
         core::fmt::Write::write_str(&mut *w, "sparkos ").unwrap();
         w.set_color(self.text_color, Color::Black);
@@ -56,42 +49,26 @@ impl Shell {
                         if self.len < CMD_BUF {
                             self.buf[self.len] = c as u8;
                             self.len += 1;
-                            let mut w = crate::gui::WRITER.lock();
+                            let mut w = WRITE_LOCK.lock();
                             core::fmt::Write::write_char(&mut *w, c as char).unwrap();
                         }
                     }
                     Key::Backspace => {
                         if self.len > 0 {
                             self.len -= 1;
-                            let mut w = crate::gui::WRITER.lock();
-                            if w.col >= 8 {
-                                w.col -= 8;
-                                let px = w.win_x + 4 + w.col;
-                                let py = w.win_y + 28 + w.row;
-                                crate::gui::draw_rect(px, py, 8, 8, w.bg_color); // Tamamen sil
-                            } else if w.row >= 8 {
-                                w.row -= 8;
-                                w.col = w.win_w - 16;
-                                let px = w.win_x + 4 + w.col;
-                                let py = w.win_y + 28 + w.row;
-                                crate::gui::draw_rect(px, py, 8, 8, w.bg_color); // Tamamen sil
-                            }
+                            let mut w = WRITE_LOCK.lock();
+                            w.write_byte(b'\x08'); // vga_buffer backspace
                         }
                     }
                     Key::Enter => {
-                        let mut w = crate::gui::WRITER.lock();
+                        let mut w = WRITE_LOCK.lock();
                         core::fmt::Write::write_str(&mut *w, "\n").unwrap();
                         return;
                     }
-                    Key::Delete => {}
-                    Key::Left | Key::Right | Key::Home | Key::End => {}
                     Key::Escape => {
-                        let mut w = crate::gui::WRITER.lock();
+                        let mut w = WRITE_LOCK.lock();
                         for _ in 0..self.len {
-                            if w.col >= 8 {
-                                w.col -= 8;
-                                crate::gui::draw_char(w.col, w.row, ' ', w.fg_color, w.bg_color);
-                            }
+                            w.write_byte(b'\x08');
                         }
                         self.len = 0;
                     }
@@ -109,7 +86,7 @@ impl Shell {
 
     fn exec(&mut self) {
         let cmd = self.cmd().trim();
-        let mut w = crate::gui::WRITER.lock();
+        let mut w = WRITE_LOCK.lock();
         match cmd {
             "" => {}
             "help" | "yardim" => {
@@ -127,24 +104,22 @@ impl Shell {
                 writeln!(w, "  ls       - dosyalari ve dizinleri listele").unwrap();
                 writeln!(w, "  mkdir    - yeni bir dizin olustur").unwrap();
                 writeln!(w, "  write    - yeni bir dosya olustur veya icerigini degistir").unwrap();
+                writeln!(w, "  rm       - dosya veya dizin sil").unwrap();
                 writeln!(w, "  cat      - dosyanin icerigini oku").unwrap();
                 writeln!(w, "  disk_write - diskin belirli sektorune yaz").unwrap();
                 writeln!(w, "  disk_read  - diskin belirli sektorunu oku").unwrap();
-                writeln!(w, "  gui      - piksellerle masaustu (GUI) moduna gec").unwrap();
                 writeln!(w, "  reboot   - sistemi yeniden baslat").unwrap();
                 writeln!(w, "  shutdown - sistemi kapat (QEMU)").unwrap();
                 writeln!(w, "  panic    - kernel panic testi (sistemi dondurur)").unwrap();
             }
             "clear" => {
-                crate::gui::draw_rect(w.win_x + 4, w.win_y + 28, w.win_w - 8, w.win_h - 32, w.bg_color);
-                w.col = 0;
-                w.row = 0;
+                w.clear();
                 return;
             }
             "info" => {
                 writeln!(w, "SparkOS v0.1 - Rust x86_64").unwrap();
-                writeln!(w, "Bellek: 249 MB").unwrap();
                 writeln!(w, "Timer: 1000 Hz").unwrap();
+                writeln!(w, "Mod: CLI (VGA Text Mode)").unwrap();
             }
             "tick" => {
                 writeln!(w, "Tick: {}", crate::interrupts::get_tick()).unwrap();
@@ -169,12 +144,11 @@ impl Shell {
                 writeln!(w, "Sistem kapatiliyor...").unwrap();
                 crate::serial_println!("[shell] shutdown");
                 unsafe {
-                    // QEMU/Bochs ACPI kapatma portu
+                    // QEMU ACPI kapatma portu
                     let mut p: x86_64::instructions::port::Port<u16> =
-                        x86_64::instructions::port::Port::new(0xB004);
+                        x86_64::instructions::port::Port::new(0x604);
                     p.write(0x2000);
                 }
-                // Port kapanmazsa diye bekle
                 loop { x86_64::instructions::hlt(); }
             }
             "pwd" => {
@@ -188,7 +162,6 @@ impl Shell {
                 } else {
                     w.set_color(Color::Red, Color::Black);
                     writeln!(w, "Hata: {} bir dizin degil veya bulunamadi", path).unwrap();
-                    w.set_color(self.text_color, Color::Black);
                 }
             }
             _ if cmd == "ls" || cmd.starts_with("ls ") => {
@@ -209,13 +182,11 @@ impl Shell {
                                 }
                             }
                             writeln!(w).unwrap();
-                            w.set_color(self.text_color, Color::Black);
                         }
                     }
                     Err(e) => {
                         w.set_color(Color::Red, Color::Black);
                         writeln!(w, "Hata: {}", e).unwrap();
-                        w.set_color(self.text_color, Color::Black);
                     }
                 }
             }
@@ -227,7 +198,6 @@ impl Shell {
                     Err(e) => {
                         w.set_color(Color::Red, Color::Black);
                         writeln!(w, "Hata: {}", e).unwrap();
-                        w.set_color(self.text_color, Color::Black);
                     }
                 }
             }
@@ -239,7 +209,6 @@ impl Shell {
                     Err(e) => {
                         w.set_color(Color::Red, Color::Black);
                         writeln!(w, "Hata: {}", e).unwrap();
-                        w.set_color(self.text_color, Color::Black);
                     }
                 }
             }
@@ -254,13 +223,22 @@ impl Shell {
                         Err(e) => {
                             w.set_color(Color::Red, Color::Black);
                             writeln!(w, "Hata: {}", e).unwrap();
-                            w.set_color(self.text_color, Color::Black);
                         }
                     }
                 } else {
                     w.set_color(Color::Red, Color::Black);
                     writeln!(w, "Kullanim: write <dosya_adi> <icerik>").unwrap();
-                    w.set_color(self.text_color, Color::Black);
+                }
+            }
+            _ if cmd.starts_with("rm ") => {
+                let target = &cmd[3..].trim();
+                let resolved = crate::fs::resolve_path(&self.cwd, target);
+                match crate::fs::remove(&resolved) {
+                    Ok(_) => writeln!(w, "Silindi: {}", target).unwrap(),
+                    Err(e) => {
+                        w.set_color(Color::Red, Color::Black);
+                        writeln!(w, "Hata: {}", e).unwrap();
+                    }
                 }
             }
             _ if cmd.starts_with("disk_write ") => {
@@ -279,18 +257,15 @@ impl Shell {
                             Err(e) => {
                                 w.set_color(Color::Red, Color::Black);
                                 writeln!(w, "Hata: {}", e).unwrap();
-                                w.set_color(self.text_color, Color::Black);
                             }
                         }
                     } else {
                         w.set_color(Color::Red, Color::Black);
                         writeln!(w, "Hata: Gecersiz LBA (Sektor) numarasi").unwrap();
-                        w.set_color(self.text_color, Color::Black);
                     }
                 } else {
                     w.set_color(Color::Red, Color::Black);
                     writeln!(w, "Kullanim: disk_write <sektor_no> <metin>").unwrap();
-                    w.set_color(self.text_color, Color::Black);
                 }
             }
             _ if cmd.starts_with("disk_read ") => {
@@ -299,28 +274,21 @@ impl Shell {
                     let mut buf = [0u8; 512];
                     match crate::ata::DATA_DRIVE.lock().read_sector(lba, &mut buf) {
                         Ok(_) => {
-                            // Trim trailing null bytes for display
                             let mut end = 512;
                             while end > 0 && buf[end - 1] == 0 { end -= 1; }
                             let s = core::str::from_utf8(&buf[..end]).unwrap_or("<Gecersiz UTF-8 verisi>");
                             w.set_color(Color::Cyan, Color::Black);
                             writeln!(w, "LBA {} Icerigi: {}", lba, s).unwrap();
-                            w.set_color(self.text_color, Color::Black);
                         }
                         Err(e) => {
                             w.set_color(Color::Red, Color::Black);
                             writeln!(w, "Hata: {}", e).unwrap();
-                            w.set_color(self.text_color, Color::Black);
                         }
                     }
                 } else {
                     w.set_color(Color::Red, Color::Black);
                     writeln!(w, "Hata: Gecersiz LBA (Sektor) numarasi").unwrap();
-                    w.set_color(self.text_color, Color::Black);
                 }
-            }
-            "gui" => {
-                core::fmt::Write::write_str(&mut *w, "Zaten GUI modundayiz!\n").unwrap();
             }
             _ if cmd.starts_with("color ") => {
                 let color_name = &cmd[6..];

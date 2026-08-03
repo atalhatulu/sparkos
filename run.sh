@@ -36,11 +36,10 @@ echo ""
 echo "    Serial cikti:"
 echo ""
 
-qemu-system-x86_64 \
+timeout --foreground 60 qemu-system-x86_64 \
     -drive format=raw,file="$BIN",index=0,media=disk \
     -drive format=raw,file=disk.img,index=1,media=disk \
     -serial stdio \
     -vga std \
     -m 256M \
-    -enable-kvm \
     $VNC_PORT

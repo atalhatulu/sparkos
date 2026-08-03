@@ -18,13 +18,27 @@ impl SimpleExecutor {
     }
 
     pub fn run(&mut self) {
-        while let Some(mut task) = self.task_queue.pop_front() {
-            let waker = dummy_waker();
-            let mut context = Context::from_waker(&waker);
-            match task.poll(&mut context) {
-                Poll::Ready(()) => {} // Gorev bitti
-                Poll::Pending => self.task_queue.push_back(task), // Gorev bekliyor, kuyruga geri ekle
+        loop {
+            if self.task_queue.is_empty() {
+                x86_64::instructions::hlt();
+                continue;
             }
+
+            let queue_len = self.task_queue.len();
+            for _ in 0..queue_len {
+                if let Some(mut task) = self.task_queue.pop_front() {
+                    let waker = dummy_waker();
+                    let mut context = Context::from_waker(&waker);
+                    match task.poll(&mut context) {
+                        Poll::Ready(()) => {} // Gorev bitti
+                        Poll::Pending => self.task_queue.push_back(task), // Gorev bekliyor, kuyruga geri ekle
+                    }
+                }
+            }
+
+            // Bir turu tamamladik. Eger hala bekleyen gorevler varsa, 
+            // bir sonraki donanim kesmesine (interrupt) kadar islemciyi uyut.
+            x86_64::instructions::hlt();
         }
     }
 }

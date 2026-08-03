@@ -93,7 +93,7 @@ fn deserialize(data: &[u8], offset: &mut usize) -> Option<FsNode> {
     }
 }
 
-pub fn sync_to_disk() {
+pub fn sync_to_disk() -> Result<(), &'static str> {
     let mut buf = Vec::new();
     {
         let root = VFS.lock();
@@ -106,15 +106,17 @@ pub fn sync_to_disk() {
     header[4..8].copy_from_slice(b"SPFS"); // SPark File System
     
     let mut drive = crate::ata::DATA_DRIVE.lock();
-    let _ = drive.write_sector(0, &header);
+    drive.write_sector(0, &header)?;
     
     let mut lba = 1;
     for chunk in buf.chunks(512) {
         let mut sec = [0u8; 512];
         sec[..chunk.len()].copy_from_slice(chunk);
-        let _ = drive.write_sector(lba, &sec);
+        drive.write_sector(lba, &sec)?;
         lba += 1;
     }
+    
+    Ok(())
 }
 
 pub fn load_from_disk() {
@@ -276,7 +278,7 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
     } else {
         return Err("Ust dizin bulunamadi");
     }
-    sync_to_disk();
+    sync_to_disk()?;
     Ok(())
 }
 
@@ -305,7 +307,7 @@ pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
                 if let FsNode::File { content: ref mut content_str, .. } = child {
                     *content_str = content.to_string();
                     drop(root);
-                    sync_to_disk();
+                    sync_to_disk()?;
                     return Ok(());
                 } else {
                     return Err("Bu bir dizin, dosya degil!");
@@ -319,7 +321,48 @@ pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
     } else {
         return Err("Ust dizin bulunamadi");
     }
-    sync_to_disk();
+    sync_to_disk()?;
+    Ok(())
+}
+
+pub fn remove(path: &str) -> Result<(), &'static str> {
+    if path == "/" { return Err("Root dizini silinemez"); }
+    
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return Err("Gecersiz yol"); }
+    
+    let name = parts.last().unwrap();
+    let parent_path = if parts.len() == 1 {
+        "/".to_string()
+    } else {
+        let mut p = String::new();
+        for i in 0..parts.len() - 1 {
+            p.push('/');
+            p.push_str(parts[i]);
+        }
+        p
+    };
+
+    let mut root = VFS.lock();
+    if let Some(children) = find_dir(&mut root, &parent_path) {
+        let mut idx_to_remove = None;
+        for (i, child) in children.iter().enumerate() {
+            if child.name() == *name {
+                idx_to_remove = Some(i);
+                break;
+            }
+        }
+        
+        if let Some(idx) = idx_to_remove {
+            children.remove(idx);
+        } else {
+            return Err("Dosya veya dizin bulunamadi");
+        }
+    } else {
+        return Err("Ust dizin bulunamadi");
+    }
+    
+    sync_to_disk()?;
     Ok(())
 }
 
