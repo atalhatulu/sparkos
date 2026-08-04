@@ -68,7 +68,7 @@ impl Shell {
                         if self.len > 0 {
                             self.len -= 1;
                             let mut w = WRITE_LOCK.lock();
-                            w.write_byte(b'\x08'); // vga_buffer backspace
+                            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
                         }
                     }
                     Key::Enter => {
@@ -90,7 +90,7 @@ impl Shell {
                     Key::Escape => {
                         let mut w = WRITE_LOCK.lock();
                         for _ in 0..self.len {
-                            w.write_byte(b'\x08');
+                            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
                         }
                         self.len = 0;
                     }
@@ -126,7 +126,7 @@ impl Shell {
     fn load_history(&mut self) {
         let mut w = WRITE_LOCK.lock();
         for _ in 0..self.len {
-            w.write_byte(b'\x08');
+            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
         }
         
         if self.history_idx < self.history.len() {
@@ -146,7 +146,7 @@ impl Shell {
     fn auto_complete(&mut self, prefix: &str, replace_start: usize) {
         let mut matches = Vec::new();
         if replace_start == 0 {
-            let commands = ["help", "clear", "info", "tick", "uptime", "color", "echo", "pwd", "cd", "ls", "mkdir", "write", "rm", "cat", "reboot", "shutdown", "edit", "ps", "kill", "lspci", "ifconfig", "ping"];
+            let commands = ["help", "clear", "info", "tick", "uptime", "color", "echo", "pwd", "cd", "ls", "mkdir", "write", "rm", "cat", "reboot", "shutdown", "edit", "ps", "kill", "lspci", "ifconfig", "ping", "run_app", "host", "gui"];
             for c in commands.iter() {
                 if c.starts_with(prefix) {
                     matches.push(c.to_string());
@@ -166,7 +166,7 @@ impl Shell {
             let completion = &matches[0];
             let mut w = WRITE_LOCK.lock();
             for _ in 0..prefix.len() {
-                w.write_byte(b'\x08');
+                core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
             }
             let bytes = completion.as_bytes();
             let mut i = 0;
@@ -220,6 +220,9 @@ impl Shell {
                 writeln!(w, "  lspci      - PCI donanimlarini tara ve listele").unwrap();
                 writeln!(w, "  ifconfig   - Ag karti ve MAC adresini goster").unwrap();
                 writeln!(w, "  ping       - Google (8.8.8.8) adresine ICMP paketi yolla").unwrap();
+                writeln!(w, "  host <dom> - Domain ismini (DNS) IP adresine cevir (UDP)").unwrap();
+                writeln!(w, "  run_app    - Ring 3 (User Mode) ortaminda test makine kodunu calistir").unwrap();
+                writeln!(w, "  gui        - Grafik Kullanici Arayuzunu (Desktop & Window) baslat").unwrap();
                 writeln!(w, "  disk_write - diskin belirli sektorune yaz").unwrap();
                 writeln!(w, "  disk_read  - diskin belirli sektorunu oku").unwrap();
                 writeln!(w, "  reboot     - sistemi yeniden baslat").unwrap();
@@ -250,8 +253,8 @@ impl Shell {
             "reboot" => {
                 core::fmt::Write::write_str(&mut *w, "Yeniden baslatiliyor...\n").unwrap();
                 unsafe {
-                    let mut p: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(0x2000u16);
-                    p.write(0x04u8);
+                    let mut p: x86_64::instructions::port::Port<u8> = x86_64::instructions::port::Port::new(0x64);
+                    p.write(0xFE);
                 }
             }
             "shutdown" => {
@@ -366,6 +369,81 @@ impl Shell {
                 
                 // Rust Borrow Checker icin w kilidini geri al (cunku scope sonunda kullaniliyor)
                 w = WRITE_LOCK.lock();
+            }
+            "run_app" => {
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "User Mode (Ring 3) gecis hazirligi yapiliyor...").unwrap();
+                writeln!(w, "Not: Bu islemden sonra shell kilitlenecektir cunku cikis sys_exit cagirisi mevcut degil.").unwrap();
+                drop(w);
+                crate::user::execute_ring3_app();
+                // Buraya asla ulasilmayacak.
+                w = WRITE_LOCK.lock();
+            }
+            _ if cmd.starts_with("host ") => {
+                let domain = &cmd[5..].trim();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "{} adresi icin DNS sorgusu yapiliyor (8.8.8.8:53)...", domain).unwrap();
+                drop(w); // Kilidi birak, donanim bekleyecegiz
+                
+                let tx_id = (crate::interrupts::get_tick() & 0xFFFF) as u16;
+                let mut success = false;
+                
+                unsafe {
+                    if let Some(ref mut dev) = crate::rtl8139::RTL8139_DEV {
+                        let mac = dev.get_mac_address();
+                        let packet = crate::net::create_dns_query_packet(mac, domain, tx_id);
+                        dev.send_packet(&packet);
+                        
+                        let start_tick = crate::interrupts::get_tick();
+                        // 3 saniye timeout
+                        while crate::interrupts::get_tick() < start_tick + 3000 {
+                            if let Some(rx_packet) = dev.poll_rx() {
+                                if let Some(ips) = crate::net::parse_dns_response(&rx_packet, tx_id) {
+                                    let mut w = WRITE_LOCK.lock();
+                                    if ips.is_empty() {
+                                        w.set_color(Color::Yellow, Color::Black);
+                                        writeln!(w, "DNS Yaniti: Kayit bulunamadi.").unwrap();
+                                    } else {
+                                        w.set_color(Color::LightGreen, Color::Black);
+                                        for ip in ips {
+                                            writeln!(w, "{} has address {}.{}.{}.{}", domain, ip[0], ip[1], ip[2], ip[3]).unwrap();
+                                        }
+                                    }
+                                    success = true;
+                                    break;
+                                }
+                            }
+                            crate::task::yield_now().await;
+                        }
+                    }
+                }
+                
+                w = WRITE_LOCK.lock(); // Kilidi geri al
+                if !success {
+                    w.set_color(Color::LightRed, Color::Black);
+                    writeln!(w, "Zaman asimi (Timeout). DNS sunucusundan yanit alinamadi.").unwrap();
+                }
+            }
+            _ if cmd.starts_with("gui") => {
+                crate::gui::init();
+                {
+                    let mut gw_arr = crate::gui::WRITERS.lock();
+                    let mut gw = &mut gw_arr[0];
+                    gw.visible = true;
+                    let (wx, wy, ww, wh) = (gw.win_x, gw.win_y, gw.win_w, gw.win_h);
+                    let visible = gw.visible;
+                    let minimized = gw.minimized;
+                    drop(gw_arr);
+                    crate::gui::redraw_all();
+                    crate::gui::flush_rect(0, 0, 1920, 1080);
+                }
+                crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
+                
+                // Artık sonraki komutların outputu doğrudan GUI üzerine çizilecek
+                // Not: w (WRITE_LOCK) halen var ve bir defa daha kullanılabilir, ancak GUI_MODE true olduğu için
+                // VgaWriter içerisindeki write_str onu GUI'ye yönlendirecek!
+                w.set_color(Color::LightGreen, Color::Black);
+                writeln!(w, "GUI Moduna gecildi. Masaustune hosgeldiniz!").unwrap();
             }
             _ if cmd.starts_with("kill ") => {
                 let id_str = &cmd[5..].trim();

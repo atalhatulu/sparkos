@@ -47,6 +47,8 @@ struct Buffer {
     chars: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
+pub static GUI_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub struct VgaWriter {
     column: usize,
     row: usize,
@@ -78,6 +80,19 @@ impl VgaWriter {
     }
 
     pub fn clear(&mut self) {
+        if GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+            let mut gw_arr = crate::gui::WRITERS.lock();
+            let gw = &mut gw_arr[0];
+            gw.clear();
+            let wx = gw.win_x;
+            let wy = gw.win_y;
+            let ww = gw.win_w;
+            let wh = gw.win_h;
+            drop(gw_arr);
+            crate::gui::flush_rect(wx, wy, ww, wh);
+            return;
+        }
+        
         let blank = ScreenChar {
             ascii_character: b' ',
             color_code: self.color,
@@ -170,6 +185,36 @@ impl VgaWriter {
 
 impl fmt::Write for VgaWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        if GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+            let fg_u32 = match (self.color.0 & 0x0F) {
+                0 => 0x00000000, 1 => 0x000000AA, 2 => 0x0000AA00, 3 => 0x0000AAAA,
+                4 => 0x00AA0000, 5 => 0x00AA00AA, 6 => 0x00AA5500, 7 => 0x00AAAAAA,
+                8 => 0x00555555, 9 => 0x005555FF, 10 => 0x0055FF55, 11 => 0x0055FFFF,
+                12 => 0x00FF5555, 13 => 0x00FF55FF, 14 => 0x00FFFF55, 15 => 0x00FFFFFF,
+                _ => 0x00FFFFFF,
+            };
+            let bg_u32 = match (self.color.0 >> 4) {
+                0 => 0x001E1E1E, // Siyah yerine terminal gri
+                1 => 0x000000AA, 2 => 0x0000AA00, 3 => 0x0000AAAA,
+                4 => 0x00AA0000, 5 => 0x00AA00AA, 6 => 0x00AA5500, 7 => 0x00AAAAAA,
+                8 => 0x00555555, 9 => 0x005555FF, 10 => 0x0055FF55, 11 => 0x0055FFFF,
+                12 => 0x00FF5555, 13 => 0x00FF55FF, 14 => 0x00FFFF55, 15 => 0x00FFFFFF,
+                _ => 0x001E1E1E,
+            };
+            
+            let mut gw_arr = crate::gui::WRITERS.lock();
+            let gw = &mut gw_arr[0];
+            gw.set_color(fg_u32, bg_u32);
+            let _ = core::fmt::Write::write_str(&mut *gw, s);
+            let wx = gw.win_x;
+            let wy = gw.win_y;
+            let ww = gw.win_w;
+            let wh = gw.win_h;
+            drop(gw_arr); // Kilidi birak!
+            crate::gui::flush_rect(wx, wy, ww, wh); // Sadece pencere alanini guncelle
+            return Ok(());
+        }
+        
         for byte in s.bytes() {
             self.write_byte(byte);
         }

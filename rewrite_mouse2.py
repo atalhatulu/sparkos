@@ -1,142 +1,10 @@
-use x86_64::instructions::port::Port;
-use spin::Mutex;
-use core::sync::atomic::{AtomicU16, AtomicBool, Ordering};
+with open("old_mouse.rs", "r") as f:
+    old = f.read()
 
-pub static MOUSE_X: AtomicU16 = AtomicU16::new(400);
-pub static MOUSE_Y: AtomicU16 = AtomicU16::new(300);
-pub static MOUSE_LEFT_CLICK: AtomicBool = AtomicBool::new(false);
+# get the top part up to "pub async fn mouse_task()"
+top = old.split("pub async fn mouse_task()")[0]
 
-pub struct DragState {
-    pub mode: u8, // 0=None, 1=Move, 2=Right, 3=Bottom, 4=BottomRight
-    pub start_x: u16,
-    pub start_y: u16,
-    pub win_start_w: u16,
-    pub win_start_h: u16,
-    pub app_id: u8,
-}
-pub static DRAG_STATE: Mutex<DragState> = Mutex::new(DragState { mode: 0, start_x: 0, start_y: 0, win_start_w: 0, win_start_h: 0, app_id: 255 });
-
-#[derive(Debug)]
-struct MouseState {
-    cycle: u8,
-    packet: [u8; 3],
-}
-
-pub static MOUSE: Mutex<MouseState> = Mutex::new(MouseState {
-    cycle: 0,
-    packet: [0; 3],
-});
-
-fn mouse_wait(type_val: u8) {
-    let mut port64: Port<u8> = Port::new(0x64);
-    for _ in 0..100000 {
-        let status = unsafe { port64.read() };
-        if type_val == 0 {
-            if (status & 1) == 1 { return; } // Data available
-        } else {
-            if (status & 2) == 0 { return; } // Command port ready
-        }
-    }
-}
-
-fn mouse_write(data: u8) {
-    let mut port64: Port<u8> = Port::new(0x64);
-    let mut port60: Port<u8> = Port::new(0x60);
-    mouse_wait(1);
-    unsafe { port64.write(0xD4); }
-    mouse_wait(1);
-    unsafe { port60.write(data); }
-}
-
-fn mouse_read() -> u8 {
-    let mut port60: Port<u8> = Port::new(0x60);
-    mouse_wait(0);
-    unsafe { port60.read() }
-}
-
-pub fn init() {
-    let mut port64: Port<u8> = Port::new(0x64);
-    let mut port60: Port<u8> = Port::new(0x60);
-    
-    unsafe {
-        // Enable auxiliary mouse device
-        mouse_wait(1);
-        port64.write(0xA8);
-        
-        // Read configuration byte
-        mouse_wait(1);
-        port64.write(0x20);
-        let mut status = mouse_read();
-        
-        // Enable IRQ12 (bit 1)
-        status |= 1 << 1;
-        
-        // Write configuration byte
-        mouse_wait(1);
-        port64.write(0x60);
-        mouse_wait(1);
-        port60.write(status);
-        
-        // Set defaults
-        mouse_write(0xF6);
-        mouse_read(); // ACK
-        
-        // Enable packet streaming
-        mouse_write(0xF4);
-        mouse_read(); // ACK
-    }
-}
-
-pub fn handle_interrupt() {
-    let mut port60: Port<u8> = Port::new(0x60);
-    let data = unsafe { port60.read() };
-    
-    let mut state = MOUSE.lock();
-    match state.cycle {
-        0 => {
-            // First byte must have bit 3 set, and overflow bits (6 and 7) should usually be 0 
-            // to help prevent false sync with movement bytes.
-            if (data & 0x08) != 0 && (data & 0xC0) == 0 {
-                state.packet[0] = data;
-                state.cycle = 1;
-            }
-        }
-        1 => {
-            state.packet[1] = data;
-            state.cycle = 2;
-        }
-        2 => {
-            state.packet[2] = data;
-            state.cycle = 0;
-            
-            // Y ekseni değişimi (Yukari pozitif olduğu için ters ceviriyoruz)
-            let mut dy = state.packet[2] as i16;
-            if (state.packet[0] & 0x20) != 0 { dy -= 256; }
-            dy = -dy;
-            
-            // X ekseni değişimi
-            let mut dx = state.packet[1] as i16;
-            if (state.packet[0] & 0x10) != 0 { dx -= 256; }
-            
-            let left_click = (state.packet[0] & 1) != 0;
-            MOUSE_LEFT_CLICK.store(left_click, Ordering::Relaxed);
-            
-            let mut x = MOUSE_X.load(Ordering::Relaxed) as i16 + dx;
-            let mut y = MOUSE_Y.load(Ordering::Relaxed) as i16 + dy;
-            
-            if x < 0 { x = 0; }
-            if y < 0 { y = 0; }
-            if x >= 1920 { x = 1919; }
-            if y >= 1080 { y = 1079; }
-            
-            MOUSE_X.store(x as u16, Ordering::Relaxed);
-            MOUSE_Y.store(y as u16, Ordering::Relaxed);
-        }
-        _ => state.cycle = 0,
-    }
-}
-
-
+new_task = """
 pub async fn mouse_task() {
     let mut last_x = 400;
     let mut last_y = 300;
@@ -166,9 +34,6 @@ pub async fn mouse_task() {
             if cx <= 74 && cy >= 1046 {
                 let is_open = crate::gui::START_MENU_OPEN.load(Ordering::Relaxed);
                 crate::gui::START_MENU_OPEN.store(!is_open, Ordering::Relaxed);
-                drop(writers);
-                drop(z_order);
-                drop(drag);
                 crate::gui::redraw_all();
                 crate::gui::draw_cursor(cx, cy);
                 last_click = click;
@@ -180,21 +45,15 @@ pub async fn mouse_task() {
             if crate::gui::START_MENU_OPEN.load(Ordering::Relaxed) {
                 if cx >= 4 && cx <= 204 {
                     if cy >= 1000 && cy <= 1040 {
-                        unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0x64).write(0xFE); }
+                        unsafe { crate::pci::outb(0x64, 0xFE); } // Reboot
                     }
                     if cy >= 950 && cy <= 990 {
-                        unsafe { x86_64::instructions::port::PortWriteOnly::<u16>::new(0x604).write(0x2000); }
+                        unsafe { crate::pci::outw(0x604, 0x2000); } // Shutdown
                     }
                 }
                 crate::gui::START_MENU_OPEN.store(false, Ordering::Relaxed);
-                drop(writers);
-                drop(z_order);
-                drop(drag);
                 crate::gui::redraw_all();
                 crate::gui::draw_cursor(cx, cy);
-                last_click = click;
-                crate::task::yield_now().await;
-                continue;
             }
 
             let mut hit_app = 255;
@@ -302,9 +161,6 @@ pub async fn mouse_task() {
                         drop(z_order);
                         crate::gui::redraw_all();
                         crate::gui::draw_cursor(cx, cy);
-                        last_click = click;
-                        crate::task::yield_now().await;
-                        continue;
                     }
                 }
                 
@@ -382,3 +238,10 @@ pub async fn mouse_task() {
         crate::task::yield_now().await;
     }
 }
+"""
+
+with open("src/mouse.rs", "w") as f:
+    # Need to replace the app_id in DragState
+    top = top.replace("pub win_start_h: u16,\n}", "pub win_start_h: u16,\n    pub app_id: u8,\n}")
+    top = top.replace("win_start_h: 0 });", "win_start_h: 0, app_id: 255 });")
+    f.write(top + new_task)

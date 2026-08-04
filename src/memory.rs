@@ -11,6 +11,21 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
 
+pub unsafe fn set_user_accessible(start_virt: u64, size: usize) {
+    let phys_offset = VirtAddr::new(crate::gui::PHYS_OFFSET);
+    let mut mapper = init(phys_offset);
+    
+    let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(start_virt));
+    let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(start_virt + size as u64 - 1));
+
+    for page in Page::range_inclusive(start_page, end_page) {
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        if let Ok(flush) = mapper.update_flags(page, flags) {
+            flush.flush();
+        }
+    }
+}
+
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
     use x86_64::registers::control::Cr3;
     let (level_4_table_frame, _) = Cr3::read();

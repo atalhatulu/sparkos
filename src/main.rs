@@ -27,6 +27,7 @@ pub mod editor;
 pub mod pci;
 pub mod rtl8139;
 pub mod net;
+pub mod user;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -47,12 +48,21 @@ async fn clock_task() {
         let mut time_str = alloc::string::String::new();
         core::fmt::write(&mut time_str, format_args!(" UP: {:04}s ", seconds)).unwrap();
         
-        {
+        if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+            let mut px = 1920 - 95;
+            for c in time_str.chars() {
+                crate::gui::draw_char(px, 1080 - 20, c, 0x00000000, 0x00C0C0C0);
+                px += 8;
+            }
+            crate::gui::flush_rect(1920 - 100, 1080 - 30, 96, 26);
+        } else {
             let mut w = crate::vga_buffer::WRITE_LOCK.lock();
             w.write_at(0, 69, &time_str, crate::vga_buffer::Color::Yellow, crate::vga_buffer::Color::Blue);
         }
         
-        let target = current_tick + 1000;
+        // 24 FPS hissi ve saat guncellemesi (1000ms / 24 ~ 41ms ama saniye basi guncellesek de yeter. User 24fps dedigi icin
+        // ~41 ms bekleyebiliriz ya da saat oldugu icin 1 saniye bekleriz. Ama arayuz animasyonu istediyse 41 ms yapalim)
+        let target = current_tick + 41; // ~24 FPS refresh rate
         while crate::interrupts::get_tick() < target {
             crate::task::yield_now().await;
         }
@@ -175,7 +185,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Arka plan saati görevini başlat (Multitasking Gösterimi)
     executor.spawn(task::Task::new("clock", clock_task()));
     
-    // executor.spawn(task::Task::new(mouse::mouse_task())); // GUI deaktif olduğu için mouse görevi bekletiliyor
+    executor.spawn(task::Task::new("mouse", mouse::mouse_task())); // Mouse ve GUI Task aktif!
+    
+    // Otomatik olarak GUI modunda baslat!
+    crate::gui::init();
+    crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
+    {
+        let mut gw_arr = crate::gui::WRITERS.lock();
+        gw_arr[0].visible = true; // Ilk olarak terminal penceresi acik gelsin
+    }
+    crate::gui::redraw_all();
     
     executor.run();
     
