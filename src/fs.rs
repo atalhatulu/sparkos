@@ -119,15 +119,31 @@ pub fn sync_to_disk() -> Result<(), &'static str> {
     Ok(())
 }
 
+pub fn init_default_fs() {
+    let _ = mkdir("/bin");
+    let _ = mkdir("/etc");
+    let _ = mkdir("/home");
+    let _ = mkdir("/sys");
+}
+
 pub fn load_from_disk() {
     let mut drive = crate::ata::DATA_DRIVE.lock();
     let mut header = [0u8; 512];
-    if drive.read_sector(0, &mut header).is_err() { return; }
+    if drive.read_sector(0, &mut header).is_err() { 
+        init_default_fs();
+        return; 
+    }
     
-    if &header[4..8] != b"SPFS" { return; } // Bos veya formati farkli
+    if &header[4..8] != b"SPFS" { 
+        init_default_fs();
+        return; 
+    }
     
     let size = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-    if size == 0 || size > 10 * 1024 * 1024 { return; } // Güvenlik siniri
+    if size == 0 || size > 10 * 1024 * 1024 { 
+        init_default_fs();
+        return; 
+    }
     
     let num_sectors = (size + 511) / 512;
     let mut data = alloc::vec![0u8; num_sectors * 512];
@@ -278,6 +294,7 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
     } else {
         return Err("Ust dizin bulunamadi");
     }
+    drop(root);
     sync_to_disk()?;
     Ok(())
 }
@@ -321,6 +338,7 @@ pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
     } else {
         return Err("Ust dizin bulunamadi");
     }
+    drop(root);
     sync_to_disk()?;
     Ok(())
 }
@@ -362,6 +380,7 @@ pub fn remove(path: &str) -> Result<(), &'static str> {
         return Err("Ust dizin bulunamadi");
     }
     
+    drop(root);
     sync_to_disk()?;
     Ok(())
 }

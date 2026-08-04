@@ -1,57 +1,84 @@
-use x86_64::structures::paging::{PageTable, PageTableFlags, PhysFrame, Size4KiB, Mapper};
-use x86_64::PhysAddr;
-use x86_64::VirtAddr;
+use x86_64::{
+    structures::paging::{FrameAllocator, Mapper, OffsetPageTable, PageTable, PhysFrame, Size4KiB, PageTableFlags, Page},
+    PhysAddr, VirtAddr,
+};
+use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 
 pub static mut VGA_VIRT_ADDR: u64 = 0;
 
-/// VGA buffer'ını Uncacheable (UC) olarak 0xB8000 adresine identity-map et
-///
-/// Bootloader fiziksel belleği Write-Back cache ile map ediyor.
-/// VGA buffer'ı cache'te kalıp ekrana gitmediği için görüntü gelmiyor.
-/// Bu fonksiyon 0xB8000'i UC (Uncacheable) olarak yeniden map eder.
-pub fn map_vga_uc(recursive_addr: u64, _phys_offset: u64) {
-    use x86_64::structures::paging::Page;
-    
-    let rec_virt = VirtAddr::new(recursive_addr);
-    let page_table = unsafe { &mut *rec_virt.as_mut_ptr::<PageTable>() };
-    let mut rec_page_table = 
-        x86_64::structures::paging::RecursivePageTable::new(page_table)
-            .expect("recursive page table creation failed");
-    
-    // VGA'yı 0xB8000'e identity-map et (fiziksel = sanal)
-    let vga_phys = PhysAddr::new(0xB8000);
-    let vga_virt = VirtAddr::new(0xB8000);
-    
-    let vga_page = Page::<Size4KiB>::containing_address(vga_virt);
-    let vga_frame = PhysFrame::<Size4KiB>::containing_address(vga_phys);
-    
-    // UC flags: PRESENT | WRITABLE | NO_CACHE | WRITE_THROUGH
-    let flags = PageTableFlags::PRESENT 
-        | PageTableFlags::WRITABLE 
-        | PageTableFlags::NO_CACHE 
-        | PageTableFlags::WRITE_THROUGH;
-    
-    unsafe {
-        match rec_page_table.map_to(vga_page, vga_frame, flags, &mut IgnoreAllocator) {
-            Ok(flush) => flush.flush(),
-            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
-                if let Ok(flush) = rec_page_table.update_flags(vga_page, flags) {
-                    flush.flush();
-                }
-            }
-            Err(_) => {}
+pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+    let level_4_table = active_level_4_table(physical_memory_offset);
+    OffsetPageTable::new(level_4_table, physical_memory_offset)
+}
+
+unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut PageTable {
+    use x86_64::registers::control::Cr3;
+    let (level_4_table_frame, _) = Cr3::read();
+    let phys = level_4_table_frame.start_address();
+    let virt = physical_memory_offset + phys.as_u64();
+    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+    &mut *page_table_ptr
+}
+
+pub struct BootInfoFrameAllocator {
+    memory_map: &'static MemoryMap,
+    next: usize,
+}
+
+impl BootInfoFrameAllocator {
+    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+        BootInfoFrameAllocator {
+            memory_map,
+            next: 0,
         }
     }
-    
-    unsafe {
-        VGA_VIRT_ADDR = 0xB8000;
+
+    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
+        let regions = self.memory_map.iter();
+        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+        let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
+        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
+        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 }
 
-struct IgnoreAllocator;
+unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
+    fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        let frame = self.usable_frames().nth(self.next);
+        self.next += 1;
+        frame
+    }
+}
 
-unsafe impl x86_64::structures::paging::FrameAllocator<Size4KiB> for IgnoreAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        None
+/// Creates an example mapping for a specific virtual page.
+pub fn create_example_mapping(
+    page: Page,
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<(), &'static str> {
+    let frame = frame_allocator.allocate_frame().ok_or("Bellek doldu, cerceve bulunamadi")?;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    unsafe {
+        match mapper.map_to(page, frame, flags, frame_allocator) {
+            Ok(tlb) => {
+                tlb.flush();
+                Ok(())
+            }
+            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
+                Ok(())
+            }
+            Err(e) => {
+                crate::serial_println!("Mapper Error: {:?}", e);
+                Err("Sayfa tablosuna yazilamadi")
+            },
+        }
+    }
+}
+
+// Eski VGA mapping (geriye donuk uyumluluk)
+pub fn map_vga_uc(recursive_addr: u64, _phys_offset: u64) {
+    unsafe {
+        VGA_VIRT_ADDR = 0xB8000;
     }
 }

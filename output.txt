@@ -1,0 +1,124 @@
+==> Building SparkOS...
+WARNING: `CARGO_MANIFEST_DIR` env variable not set
+Building kernel
+warning: unused import: `crate::fs`
+ --> src/shell.rs:4:5
+  |
+4 | use crate::fs;
+  |     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::task::keyboard`
+ --> src/shell.rs:5:5
+  |
+5 | use crate::task::keyboard;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/shell.rs:288:25
+    |
+288 |                     let mut list = crate::task::PROCESS_LIST.lock();
+    |                         ----^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> src/editor.rs:11:9
+   |
+11 |     let mut content = crate::fs::read_file(path).unwrap_or_else(|_| Stri...
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `recursive_addr`
+  --> src/memory.rs:80:19
+   |
+80 | pub fn map_vga_uc(recursive_addr: u64, _phys_offset: u64) {
+   |                   ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_recursive_addr`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `MouseState` is more private than the item `MOUSE`
+  --> src/mouse.rs:24:1
+   |
+24 | pub static MOUSE: Mutex<MouseState> = Mutex::new(MouseState {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ static `MOUSE` is reachable at visibility `pub`
+   |
+note: but type `MouseState` is only usable at visibility `pub(self)`
+  --> src/mouse.rs:19:1
+   |
+19 | struct MouseState {
+   | ^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: field `error` is never read
+ --> src/ata.rs:6:5
+  |
+4 | pub struct AtaDrive {
+  |            -------- field in this struct
+5 |     data: Port<u16>,
+6 |     error: PortReadOnly<u8>,
+  |     ^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a shared reference to mutable static
+  --> src/gdt.rs:18:55
+   |
+18 |         let stack_start = VirtAddr::from_ptr(unsafe { &DF_STACK });
+   |                                                       ^^^^^^^^^ shared reference to mutable static
+   |
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+   = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+help: use `&raw const` instead to create a raw pointer
+   |
+18 |         let stack_start = VirtAddr::from_ptr(unsafe { &raw const DF_STACK });
+   |                                                        +++++++++
+
+warning: creating a shared reference to mutable static
+  --> src/gdt.rs:25:55
+   |
+25 |         let stack_start = VirtAddr::from_ptr(unsafe { &KERNEL_STACK });
+   |                                                       ^^^^^^^^^^^^^ shared reference to mutable static
+   |
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+help: use `&raw const` instead to create a raw pointer
+   |
+25 |         let stack_start = VirtAddr::from_ptr(unsafe { &raw const KERNEL_STACK });
+   |                                                        +++++++++
+
+warning: `sparkos` (bin "sparkos") generated 9 warnings (run `cargo fix --bin "sparkos" -p sparkos` to apply 5 suggestions)
+Building bootloader
+Created bootimage for `sparkos` at `/home/teha/Documents/GitHub/sparkos/target/x86_64-unknown-none/debug/bootimage-sparkos.bin`
+==> QEMU'da baslatiliyor...
+    VNC :0'da yayin
+
+    Serial cikti:
+
+[OK] Serial port ready
+[OK] Phys mem offset: 0x18000000000
+[OK] Modern Memory Allocator Init: 0x180008ff000 - 0x180088ff000 (128 MB)
+[OK] Virtual Memory (Paging) Initialized
+[OK] Paging Test: Virtual Address 0x1000 successfully mapped to a physical frame!
+[OK] VGA mapped
+[OK] Memory: 248 MB usable
+[OK] Initializing GDT/TSS...
+[OK] Initializing IDT...
+[interrupts] IDT loaded
+[OK] IDT loaded
+[OK] Initializing PIC...
+[interrupts] PIC remapped to IRQ base 32
+[OK] PIC remapped
+[OK] Initializing PS/2 Mouse...
+[OK] Initializing timer...
+[interrupts] PIT timer: 1000 Hz (divisor=1193)
+[OK] Timer (1000 Hz) ready
+[OK] Enabling interrupts...
+WARNING: scancode queue uninitialized
+WARNING: scancode queue uninitialized
+[OK] Interrupts enabled

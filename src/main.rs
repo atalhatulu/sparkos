@@ -23,6 +23,10 @@ pub mod gdt;
 pub mod font;
 pub mod gui;
 pub mod mouse;
+pub mod editor;
+pub mod pci;
+pub mod rtl8139;
+pub mod net;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -76,10 +80,29 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         writeln!(w, "=====================================================").unwrap();
     }
     
-    // VGA uncacheable map (No longer strictly needed for text, but keeping it for structure)
-    memory::map_vga_uc(boot_info.recursive_page_table_addr, boot_info.physical_memory_offset);
-    serial_println!("[OK] VGA mapped as UC");
+    // Paging ve Memory Protection Baslatiliyor
+    let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    serial_println!("[OK] Virtual Memory (Paging) Initialized");
     
+    // Paging test: 0x1000 sanal adresini boş bir fiziksel çerçeveye haritala (Map)
+    let page = x86_64::structures::paging::Page::containing_address(x86_64::VirtAddr::new(0x1000));
+    match memory::create_example_mapping(page, &mut mapper, &mut frame_allocator) {
+        Ok(_) => serial_println!("[OK] Paging Test: Virtual Address 0x1000 successfully mapped to a physical frame!"),
+        Err(e) => serial_println!("[FAIL] Paging Test Error: {}", e),
+    }
+
+    // Eski sistem geriye dönük uyumluluk
+    memory::map_vga_uc(boot_info.recursive_page_table_addr, boot_info.physical_memory_offset);
+    serial_println!("[OK] VGA mapped");
+    
+    // Ag Kartini (RTL8139) Baslat
+    match rtl8139::init_network() {
+        Ok(_) => serial_println!("[OK] RTL8139 Network Card Initialized"),
+        Err(e) => serial_println!("[FAIL] Network Init Error: {}", e),
+    }
+
     // Heap artık daha erken başlatılıyor.
     
     // VGA çıktı
@@ -145,12 +168,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut executor = task::simple_executor::SimpleExecutor::new();
     
     let mut shell = shell::Shell::new();
-    executor.spawn(task::Task::new(async move {
+    executor.spawn(task::Task::new("shell", async move {
         shell.run().await;
     }));
     
     // Arka plan saati görevini başlat (Multitasking Gösterimi)
-    executor.spawn(task::Task::new(clock_task()));
+    executor.spawn(task::Task::new("clock", clock_task()));
     
     // executor.spawn(task::Task::new(mouse::mouse_task())); // GUI deaktif olduğu için mouse görevi bekletiliyor
     

@@ -42,4 +42,6 @@ timeout --foreground 60 qemu-system-x86_64 \
     -serial stdio \
     -vga std \
     -m 256M \
+    -netdev user,id=net0 \
+    -device rtl8139,netdev=net0 \
     $VNC_PORT

@@ -27,11 +27,24 @@ impl SimpleExecutor {
             let queue_len = self.task_queue.len();
             for _ in 0..queue_len {
                 if let Some(mut task) = self.task_queue.pop_front() {
+                    let task_id = task.id.0;
+                    
+                    {
+                        let mut killed = super::KILLED_PROCESSES.lock();
+                        if let Some(pos) = killed.iter().position(|&id| id == task_id) {
+                            killed.remove(pos);
+                            super::PROCESS_LIST.lock().remove(&task_id);
+                            continue; // Görev iptal edildi (kill), çalıştırma
+                        }
+                    }
+
                     let waker = dummy_waker();
                     let mut context = Context::from_waker(&waker);
                     match task.poll(&mut context) {
-                        Poll::Ready(()) => {} // Gorev bitti
-                        Poll::Pending => self.task_queue.push_back(task), // Gorev bekliyor, kuyruga geri ekle
+                        Poll::Ready(()) => {
+                            super::PROCESS_LIST.lock().remove(&task_id);
+                        }
+                        Poll::Pending => self.task_queue.push_back(task), 
                     }
                 }
             }
