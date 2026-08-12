@@ -202,16 +202,13 @@ extern "C" fn syscall_entry() {
             "push r15",
             
             // SysV ABI: arg1=rdi, arg2=rsi, arg3=rdx, arg4=rcx, arg5=r8, arg6=r9
-            // Linux Syscall: num=rax, arg1=rdi, arg2=rsi, arg3=rdx, arg4=r10, arg5=r8, arg6=r9
-            // So we need to map:
-            // rdi (arg1) = rax (syscall num)
-            // rsi (arg2) = rdi (user arg1)
-            // rdx (arg3) = rsi (user arg2)
-            // rcx (arg4) = rdx (user arg3)
-            "mov rcx, rdx",
-            "mov rdx, rsi",
-            "mov rsi, rdi",
-            "mov rdi, rax",
+            // Linux Syscall: num=rax, arg1=rdi, arg2=rsi, arg3=rdx, arg4=r10, arg5=r8
+            "mov r9, r8",   // arg5 -> r9 (C arg6)
+            "mov r8, r10",  // arg4 -> r8 (C arg5)
+            "mov rcx, rdx", // arg3 -> rcx (C arg4)
+            "mov rdx, rsi", // arg2 -> rdx (C arg3)
+            "mov rsi, rdi", // arg1 -> rsi (C arg2)
+            "mov rdi, rax", // num  -> rdi (C arg1)
             
             "call syscall_handler_inner",
             "pop r15",
@@ -226,39 +223,8 @@ extern "C" fn syscall_entry() {
 }
 
 #[no_mangle]
-extern "C" fn syscall_handler_inner(rax: u64, rdi: u64, rsi: u64, rdx: u64) -> u64 {
-    crate::serial_println!("[SYSCALL] Ring 3'ten tetiklendi! eax={}", rax);
-    
-    if rax == 1 { // sys_exit
-        crate::serial_println!("[SYSCALL] Uygulama sys_exit cagrisi yapti.");
-        // Return to KERNEL_RIP
-        unsafe {
-            core::arch::asm!(
-                "cli",
-                "mov rsp, {kernel_rsp}",
-                "jmp {kernel_rip}",
-                kernel_rsp = in(reg) crate::user::KERNEL_RSP,
-                kernel_rip = in(reg) crate::user::KERNEL_RIP,
-                options(noreturn)
-            );
-        }
-    } else if rax == 4 { // sys_write (stdout = 1)
-        if rdi == 1 {
-            // rsi = str_ptr, rdx = len
-            // We assume it's valid mapped memory for now (simplification)
-            let bytes = unsafe { core::slice::from_raw_parts(rsi as *const u8, rdx as usize) };
-            if let Ok(s) = core::str::from_utf8(bytes) {
-                let mut w = x86_64::instructions::interrupts::without_interrupts(|| crate::vga_buffer::WRITE_LOCK.lock());
-                w.set_color(crate::vga_buffer::Color::LightGreen, crate::vga_buffer::Color::Black);
-                core::fmt::Write::write_str(&mut *w, s).unwrap();
-                w.set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Black);
-                crate::serial_println!("[USER PRINT]: {}", s);
-                return rdx; // return bytes written
-            }
-        }
-    }
-    
-    0
+extern "C" fn syscall_handler_inner(num: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
+    crate::syscall::syscall_dispatcher(num, arg1, arg2, arg3, arg4, arg5)
 }
 
 // ========== Page fault ==========
