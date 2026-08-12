@@ -30,6 +30,7 @@ pub mod rtl8139;
 pub mod net;
 pub mod user;
 pub mod elf;
+pub mod syscall;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -148,6 +149,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("[OK] Initializing IDT...");
     interrupts::init_idt();
     serial_println!("[OK] IDT loaded");
+    
+    // Syscall dispatcher (Linux/SysV ABI, int 0x80 üzerinden)
+    syscall::init();
     
     serial_println!("[OK] Initializing PIC...");
     interrupts::init_pic();
