@@ -35,8 +35,10 @@ pub fn init_idt() {
     }
     
     // Syscall (Ring 3 accessible)
-    idt[0x80].set_handler_fn(syscall_handler)
-        .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+    unsafe {
+        idt[0x80].set_handler_addr(x86_64::VirtAddr::new(syscall_entry as u64))
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+    }
     
     // Page fault (special error code type)
     idt.page_fault.set_handler_fn(page_fault_handler);
@@ -187,17 +189,76 @@ extern "x86-interrupt" fn double_fault_handler(
     loop { x86_64::instructions::hlt(); }
 }
 
-// ========== Syscall Handler ==========
+#[unsafe(naked)]
+extern "C" fn syscall_entry() {
+    unsafe {
+        core::arch::naked_asm!(
+            "push rbp",
+            "mov rbp, rsp",
+            "push rbx",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+            
+            // SysV ABI: arg1=rdi, arg2=rsi, arg3=rdx, arg4=rcx, arg5=r8, arg6=r9
+            // Linux Syscall: num=rax, arg1=rdi, arg2=rsi, arg3=rdx, arg4=r10, arg5=r8, arg6=r9
+            // So we need to map:
+            // rdi (arg1) = rax (syscall num)
+            // rsi (arg2) = rdi (user arg1)
+            // rdx (arg3) = rsi (user arg2)
+            // rcx (arg4) = rdx (user arg3)
+            "mov rcx, rdx",
+            "mov rdx, rsi",
+            "mov rsi, rdi",
+            "mov rdi, rax",
+            
+            "call syscall_handler_inner",
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+            "iretq",
+        )
+    }
+}
 
-extern "x86-interrupt" fn syscall_handler(_stack: InterruptStackFrame) {
-    serial_println!("[SYSCALL] Ring 3'ten (User Mode) tetiklendi!");
+#[no_mangle]
+extern "C" fn syscall_handler_inner(rax: u64, rdi: u64, rsi: u64, rdx: u64) -> u64 {
+    crate::serial_println!("[SYSCALL] Ring 3'ten tetiklendi! eax={}", rax);
     
-    // Test: Ekrana Ring 3'ten geldigini yaz.
-    // Gercek bir syscall rax, rdi gibi registerlari okur.
-    let mut w = crate::vga_buffer::WRITE_LOCK.lock();
-    w.set_color(crate::vga_buffer::Color::LightRed, crate::vga_buffer::Color::Black);
-    core::fmt::Write::write_str(&mut *w, "\n[KULLANICI MODU] Kernel'e basariyla ulasildi! (Syscall)\n").unwrap();
-    w.set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Black);
+    if rax == 1 { // sys_exit
+        crate::serial_println!("[SYSCALL] Uygulama sys_exit cagrisi yapti.");
+        // Return to KERNEL_RIP
+        unsafe {
+            core::arch::asm!(
+                "cli",
+                "mov rsp, {kernel_rsp}",
+                "jmp {kernel_rip}",
+                kernel_rsp = in(reg) crate::user::KERNEL_RSP,
+                kernel_rip = in(reg) crate::user::KERNEL_RIP,
+                options(noreturn)
+            );
+        }
+    } else if rax == 4 { // sys_write (stdout = 1)
+        if rdi == 1 {
+            // rsi = str_ptr, rdx = len
+            // We assume it's valid mapped memory for now (simplification)
+            let bytes = unsafe { core::slice::from_raw_parts(rsi as *const u8, rdx as usize) };
+            if let Ok(s) = core::str::from_utf8(bytes) {
+                let mut w = x86_64::instructions::interrupts::without_interrupts(|| crate::vga_buffer::WRITE_LOCK.lock());
+                w.set_color(crate::vga_buffer::Color::LightGreen, crate::vga_buffer::Color::Black);
+                core::fmt::Write::write_str(&mut *w, s).unwrap();
+                w.set_color(crate::vga_buffer::Color::White, crate::vga_buffer::Color::Black);
+                crate::serial_println!("[USER PRINT]: {}", s);
+                return rdx; // return bytes written
+            }
+        }
+    }
+    
+    0
 }
 
 // ========== Page fault ==========

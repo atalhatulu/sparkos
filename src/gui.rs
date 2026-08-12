@@ -17,7 +17,38 @@ pub static mut BACKBUFFER: *mut u32 = core::ptr::null_mut();
 pub static ACTIVE_APP: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 pub static START_MENU_OPEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-pub fn init() {
+pub static mut CLIP_RECT: Option<(u16, u16, u16, u16)> = None;
+
+pub fn set_clip(rect: Option<(u16, u16, u16, u16)>) {
+    unsafe { CLIP_RECT = rect; }
+}
+
+fn union_rect(x1: u16, y1: u16, w1: u16, h1: u16, x2: u16, y2: u16, w2: u16, h2: u16) -> (u16, u16, u16, u16) {
+    let ix1 = x1.min(x2);
+    let iy1 = y1.min(y2);
+    let ix2 = (x1 + w1).max(x2 + w2);
+    let iy2 = (y1 + h1).max(y2 + h2);
+    // Include shadow size + margin
+    let bx1 = ix1.saturating_sub(10);
+    let by1 = iy1.saturating_sub(10);
+    let bx2 = ix2 + 15;
+    let by2 = iy2 + 15;
+    (bx1, by1, bx2 - bx1, by2 - by1)
+}
+fn intersect_rect(x1: u16, y1: u16, w1: u16, h1: u16, x2: u16, y2: u16, w2: u16, h2: u16) -> Option<(u16, u16, u16, u16)> {
+    let ix1 = x1.max(x2);
+    let iy1 = y1.max(y2);
+    let ix2 = (x1 + w1).min(x2 + w2);
+    let iy2 = (y1 + h1).min(y2 + h2);
+    if ix1 < ix2 && iy1 < iy2 {
+        Some((ix1, iy1, ix2 - ix1, iy2 - iy1))
+    } else {
+        None
+    }
+}
+
+
+pub fn init(backbuffer_ptr: Option<u64>) {
     let mut index_port: Port<u16> = Port::new(0x01CE);
     let mut data_port: Port<u16> = Port::new(0x01CF);
     
@@ -44,11 +75,10 @@ pub fn init() {
         
         // QEMU (Bochs) VBE LFB adresi genelde 0xFD000000'dır.
         VESA.framebuffer = (PHYS_OFFSET + 0xFD000000) as *mut u32;
-        // BACKBUFFER icin 2 ekranlik (16 MB) yer ayiriyoruz (ilk yarisi cizim, ikinci yarisi off-screen cache)
-        let mut buf = alloc::vec::Vec::<u32>::with_capacity(1920 * 1080 * 2);
-        buf.resize(1920 * 1080 * 2, 0);
-        BACKBUFFER = buf.as_mut_ptr();
-        core::mem::forget(buf);
+        
+        if let Some(ptr) = backbuffer_ptr {
+            BACKBUFFER = ptr as *mut u32;
+        }
     }
 }
 
@@ -84,10 +114,18 @@ pub fn draw_rect(x: u16, y: u16, w: u16, h: u16, color: u32) {
     unsafe {
         if BACKBUFFER.is_null() { return; }
         
-        let start_y = core::cmp::min(y, VESA.height);
-        let end_y = core::cmp::min(y + h, VESA.height);
-        let start_x = core::cmp::min(x, VESA.width);
-        let copy_width = core::cmp::min(w, VESA.width - start_x);
+        let (cx, cy, cw, ch) = match CLIP_RECT {
+            Some(r) => match intersect_rect(x, y, w, h, r.0, r.1, r.2, r.3) {
+                Some(cr) => cr,
+                None => return,
+            },
+            None => (x, y, w, h),
+        };
+        
+        let start_y = core::cmp::min(cy, VESA.height);
+        let end_y = core::cmp::min(cy + ch, VESA.height);
+        let start_x = core::cmp::min(cx, VESA.width);
+        let copy_width = core::cmp::min(cw, VESA.width - start_x);
         
         if copy_width == 0 { return; }
         
@@ -95,6 +133,54 @@ pub fn draw_rect(x: u16, y: u16, w: u16, h: u16, color: u32) {
             let offset = (row as usize) * (VESA.width as usize) + (start_x as usize);
             let slice = core::slice::from_raw_parts_mut(BACKBUFFER.add(offset), copy_width as usize);
             slice.fill(color);
+        }
+    }
+}
+
+pub fn alpha_blend(bg: u32, fg: u32, alpha: u8) -> u32 {
+    let a = alpha as u32;
+    let inv_a = 255 - a;
+
+    let br = (bg >> 16) & 0xFF;
+    let bg_g = (bg >> 8) & 0xFF;
+    let bb = bg & 0xFF;
+
+    let fr = (fg >> 16) & 0xFF;
+    let fg_g = (fg >> 8) & 0xFF;
+    let fb = fg & 0xFF;
+
+    let r = ((fr * a) + (br * inv_a)) / 255;
+    let g = ((fg_g * a) + (bg_g * inv_a)) / 255;
+    let b = ((fb * a) + (bb * inv_a)) / 255;
+
+    (r << 16) | (g << 8) | b
+}
+
+pub fn draw_rect_alpha(x: u16, y: u16, w: u16, h: u16, color: u32, alpha: u8) {
+    unsafe {
+        if BACKBUFFER.is_null() { return; }
+        
+        let (cx, cy, cw, ch) = match CLIP_RECT {
+            Some(r) => match intersect_rect(x, y, w, h, r.0, r.1, r.2, r.3) {
+                Some(cr) => cr,
+                None => return,
+            },
+            None => (x, y, w, h),
+        };
+        
+        let start_y = core::cmp::min(cy, VESA.height);
+        let end_y = core::cmp::min(cy + ch, VESA.height);
+        let start_x = core::cmp::min(cx, VESA.width);
+        let copy_width = core::cmp::min(cw, VESA.width - start_x);
+        
+        if copy_width == 0 { return; }
+        
+        for row in start_y..end_y {
+            let offset = (row as usize) * (VESA.width as usize) + (start_x as usize);
+            let slice = core::slice::from_raw_parts_mut(BACKBUFFER.add(offset), copy_width as usize);
+            for pixel in slice.iter_mut() {
+                *pixel = alpha_blend(*pixel, color, alpha);
+            }
         }
     }
 }
@@ -118,8 +204,8 @@ pub fn draw_3d_rect(x: u16, y: u16, w: u16, h: u16, bg_color: u32, pushed: bool)
 }
 
 pub fn draw_window(x: u16, y: u16, w: u16, h: u16, title: &str) {
-    // Window Gölgesi (Basit bir siyah katman sağ alta)
-    draw_rect(x + 5, y + 5, w, h, 0x000A0A0A);
+    // Window Gölgesi (Yumuşak Yarı Saydam Siyah Katman)
+    draw_rect_alpha(x + 5, y + 5, w, h, 0x00000000, 100);
     
     // Modern Kenarlık ve Arkaplan (Çok ince)
     draw_rect(x, y, w, h, 0x00333333); // Dış border
@@ -178,8 +264,8 @@ pub fn draw_icon(x: u16, y: u16, text: &str) {
 }
 
 pub fn draw_desktop(terminal_visible: bool, terminal_minimized: bool) {
-    // Premium Koyu Okyanus Arka Plan
-    draw_background(0x001A2421); // Koyu yesil/lacivert karisimi
+    // Premium Koyu Okyanus Arka Plan (Gradient)
+    draw_background(0x000F2027, 0x00203A43);
     
     // Masaustu Ikonlari
     draw_icon(20, 20, "Terminal");
@@ -187,17 +273,17 @@ pub fn draw_desktop(terminal_visible: bool, terminal_minimized: bool) {
     draw_icon(20, 140, "Notepad");
     draw_icon(20, 200, "TaskMgr");
     
-    // Alt Gorev Cubugu (Taskbar) Modern Koyu Gri
-    draw_rect(0, 1080 - 34, 1920, 34, 0x002D2D2D);
+    // Alt Gorev Cubugu (Taskbar) Modern Koyu Gri Glassmorphism
+    draw_rect_alpha(0, 1080 - 34, 1920, 34, 0x001E293B, 200); // 200 alpha
     // Taskbar Ust Ince Cizgisi
-    draw_rect(0, 1080 - 34, 1920, 1, 0x004A4A4A);
+    draw_rect_alpha(0, 1080 - 34, 1920, 1, 0x00334155, 200);
     
-    // Start Butonu (Modern Kutu)
-    draw_rect(4, 1080 - 30, 70, 26, 0x003A3A3A);
+    // Start Butonu (Modern Kutu, Glassmorphism)
+    draw_rect_alpha(4, 1080 - 30, 70, 26, 0x002563EB, 220); // Koyu mavi buton
     let start_text = "Start";
     let mut px = 20;
     for c in start_text.chars() {
-        draw_char(px, 1080 - 21, c, 0x00E0E0E0, 0x003A3A3A);
+        draw_char(px, 1080 - 21, c, 0x00FFFFFF, 0x00000000); // Transparent arka plan
         px += 8;
     }
     
@@ -247,22 +333,22 @@ pub fn draw_desktop(terminal_visible: bool, terminal_minimized: bool) {
 }
 
 pub fn draw_start_menu() {
-    // Menu Kutusu: Modern Koyu Gri
-    draw_rect(4, 970, 150, 76, 0x00333333);
-    draw_rect(4, 970, 150, 1, 0x00555555); // border top
-    draw_rect(4, 970, 1, 76, 0x00555555); // border left
+    // Menu Kutusu: Modern Koyu Gri Glassmorphism
+    draw_rect_alpha(4, 970, 150, 76, 0x001E293B, 220);
+    draw_rect_alpha(4, 970, 150, 1, 0x00334155, 220); // border top
+    draw_rect_alpha(4, 970, 1, 76, 0x00334155, 220); // border left
     
     // Restart Seçeneği
     let mut px = 12;
     for c in "Restart".chars() {
-        draw_char(px, 985, c, 0x00E0E0E0, 0x00333333);
+        draw_char(px, 985, c, 0x00E0E0E0, 0x00000000);
         px += 8;
     }
     
     // Shutdown Seçeneği
     let mut px = 12;
     for c in "Shutdown".chars() {
-        draw_char(px, 1025, c, 0x00E0E0E0, 0x00333333);
+        draw_char(px, 1025, c, 0x00E0E0E0, 0x00000000);
         px += 8;
     }
 }
@@ -299,19 +385,7 @@ pub fn draw_notepad_ui(x: u16, y: u16, w: u16, h: u16) {
     // White-ish background for notepad
     draw_rect(x + 2, y + 30, w.saturating_sub(4), h.saturating_sub(32), 0x00F0F0F0);
     // Menu bar
-    draw_rect(x + 2, y + 30, w.saturating_sub(4), 24, 0x00E0E0E0);
-    let mut px = x + 10;
-    for c in "File   Edit   View".chars() {
-        draw_char(px, y + 38, c, 0x00000000, 0x00E0E0E0);
-        px += 8;
-    }
-    // Some text
-    let text = "Hello from SparkOS Notepad!";
-    px = x + 10;
-    for c in text.chars() {
-        draw_char(px, y + 70, c, 0x00000000, 0x00F0F0F0);
-        px += 8;
-    }
+    draw_rect(x + 2, y + 30, w.saturating_sub(4), 30, 0x00E0E0E0);
 }
 
 pub fn draw_taskmgr_ui(x: u16, y: u16, w: u16, h: u16) {
@@ -340,20 +414,23 @@ pub fn draw_taskmgr_ui(x: u16, y: u16, w: u16, h: u16) {
     for c in "SparkOS Kernel      2      1%     24 MB".chars() { draw_char(px, y + 130, c, 0x00E0E0E0, 0x00141414); px += 8; }
 }
 
-pub fn redraw_all() {
+pub fn redraw_all(clip: Option<(u16, u16, u16, u16)>) {
+    set_clip(clip);
     let writers = WRITERS.lock();
     let z = Z_ORDER.lock();
     
-    draw_background(0x001A2421);
+    draw_background(0x000F2027, 0x00203A43);
     draw_icon(20, 20, "Terminal");
     draw_icon(20, 80, "Files");
     draw_icon(20, 140, "Notepad");
     draw_icon(20, 200, "TaskMgr");
     
-    draw_rect(0, 1080 - 34, 1920, 34, 0x002D2D2D);
-    draw_rect(0, 1080 - 34, 1920, 1, 0x004A4A4A);
-    draw_rect(4, 1080 - 30, 70, 26, 0x003A3A3A);
-    let mut px = 20; for c in "Start".chars() { draw_char(px, 1080 - 21, c, 0x00E0E0E0, 0x003A3A3A); px += 8; }
+    // Alt Gorev Cubugu (Taskbar) Modern Koyu Gri Glassmorphism
+    draw_rect_alpha(0, 1080 - 34, 1920, 34, 0x001E293B, 200); // 200 alpha
+    draw_rect_alpha(0, 1080 - 34, 1920, 1, 0x00334155, 200);
+    
+    draw_rect_alpha(4, 1080 - 30, 70, 26, 0x002563EB, 220); // Koyu mavi buton
+    let mut px = 20; for c in "Start".chars() { draw_char(px, 1080 - 21, c, 0x00FFFFFF, 0x00000000); px += 8; }
     
     let mut taskbar_x = 78;
     for &id in z.iter() {
@@ -379,6 +456,11 @@ pub fn redraw_all() {
             } else if w.app_id == 1 { draw_files_ui(w.win_x, w.win_y, w.win_w, w.win_h); }
             else if w.app_id == 2 { draw_notepad_ui(w.win_x, w.win_y, w.win_w, w.win_h); }
             else if w.app_id == 3 { draw_taskmgr_ui(w.win_x, w.win_y, w.win_w, w.win_h); }
+
+            // Draw object-oriented widgets
+            for widget in &w.widgets {
+                widget.draw(w.win_x, w.win_y);
+            }
         }
     }
     
@@ -386,7 +468,12 @@ pub fn redraw_all() {
         draw_start_menu();
     }
     
-    flush_rect(0, 0, 1920, 1080);
+    if let Some((cx, cy, cw, ch)) = clip {
+        flush_rect(cx, cy, cw, ch);
+    } else {
+        flush_rect(0, 0, 1920, 1080);
+    }
+    set_clip(None);
 }
 
 // Pencere icerigini (yazilari) off-screen buffera kaydet
@@ -443,11 +530,43 @@ pub fn restore_window_content(app_id: u8, x: u16, y: u16, w: u16, h: u16, old_w:
     }
 }
 
-pub fn draw_background(color: u32) {
+pub fn draw_background(start_color: u32, end_color: u32) {
     unsafe {
         if BACKBUFFER.is_null() { return; }
-        let slice = core::slice::from_raw_parts_mut(BACKBUFFER, (VESA.width as usize) * (VESA.height as usize));
-        slice.fill(color);
+        
+        let (cx, cy, cw, ch) = match CLIP_RECT {
+            Some(r) => r,
+            None => (0, 0, VESA.width, VESA.height),
+        };
+        
+        let start_y = core::cmp::min(cy, VESA.height) as usize;
+        let end_y = core::cmp::min(cy + ch, VESA.height) as usize;
+        let start_x = core::cmp::min(cx, VESA.width) as usize;
+        let copy_width = core::cmp::min(cw, VESA.width - cx) as usize;
+        let width = VESA.width as usize;
+        
+        let sr = (start_color >> 16) & 0xFF;
+        let sg = (start_color >> 8) & 0xFF;
+        let sb = start_color & 0xFF;
+
+        let er = (end_color >> 16) & 0xFF;
+        let eg = (end_color >> 8) & 0xFF;
+        let eb = end_color & 0xFF;
+
+        for y in start_y..end_y {
+            let ratio = (y as u32 * 255) / (VESA.height as u32);
+            let inv_ratio = 255 - ratio;
+            
+            let r = ((er * ratio) + (sr * inv_ratio)) / 255;
+            let g = ((eg * ratio) + (sg * inv_ratio)) / 255;
+            let b = ((eb * ratio) + (sb * inv_ratio)) / 255;
+            
+            let color = (r << 16) | (g << 8) | b;
+            
+            let offset = y * width + start_x;
+            let slice = core::slice::from_raw_parts_mut(BACKBUFFER.add(offset), copy_width);
+            slice.fill(color);
+        }
     }
 }
 
@@ -457,17 +576,25 @@ pub fn draw_char(x: u16, y: u16, c: char, fg: u32, bg: u32) {
     
     unsafe {
         if BACKBUFFER.is_null() { return; }
+        let (cx, cy, cw, ch) = match CLIP_RECT {
+            Some(r) => r,
+            None => (0, 0, VESA.width, VESA.height),
+        };
+        let cx2 = cx + cw;
+        let cy2 = cy + ch;
+        
         for (row_idx, &row) in glyph.iter().enumerate() {
             let py = y + row_idx as u16;
+            if py < cy || py >= cy2 || py >= VESA.height { continue; }
             for col_idx in 0..8 {
                 let px = x + col_idx as u16;
-                if py >= VESA.height || px >= VESA.width { continue; }
+                if px < cx || px >= cx2 || px >= VESA.width { continue; }
                 
                 let offset = (py as usize) * (VESA.width as usize) + (px as usize);
                 let bit_set = (row & (1 << col_idx)) != 0;
                 let color = if bit_set { fg } else { bg };
                 
-                if bit_set || bg != 0x00000000 { // Don't draw background if it's transparent (hacky)
+                if bit_set || bg != 0x00000000 {
                     core::ptr::write_volatile(BACKBUFFER.add(offset), color);
                 }
             }
@@ -488,6 +615,7 @@ pub struct GuiWriter {
     pub row: u16,
     pub fg_color: u32,
     pub bg_color: u32,
+    pub widgets: alloc::vec::Vec<alloc::boxed::Box<dyn crate::ui::Widget>>,
 }
 
 impl GuiWriter {
@@ -575,10 +703,10 @@ impl core::fmt::Write for GuiWriter {
 use spin::Mutex;
 
 pub static WRITERS: Mutex<[GuiWriter; 4]> = Mutex::new([
-    GuiWriter { app_id: 0, offscreen_offset: 0, win_x: 150, win_y: 150, win_w: 900, win_h: 600, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414 },
-    GuiWriter { app_id: 1, offscreen_offset: 0, win_x: 200, win_y: 200, win_w: 800, win_h: 500, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414 },
-    GuiWriter { app_id: 2, offscreen_offset: 0, win_x: 250, win_y: 250, win_w: 800, win_h: 600, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414 },
-    GuiWriter { app_id: 3, offscreen_offset: 0, win_x: 300, win_y: 300, win_w: 700, win_h: 500, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414 },
+    GuiWriter { app_id: 0, offscreen_offset: 0, win_x: 150, win_y: 150, win_w: 900, win_h: 600, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414, widgets: alloc::vec::Vec::new() },
+    GuiWriter { app_id: 1, offscreen_offset: 0, win_x: 200, win_y: 200, win_w: 800, win_h: 500, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414, widgets: alloc::vec::Vec::new() },
+    GuiWriter { app_id: 2, offscreen_offset: 0, win_x: 250, win_y: 250, win_w: 800, win_h: 600, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414, widgets: alloc::vec::Vec::new() },
+    GuiWriter { app_id: 3, offscreen_offset: 0, win_x: 300, win_y: 300, win_w: 700, win_h: 500, visible: false, minimized: false, col: 0, row: 0, fg_color: 0x00E0E0E0, bg_color: 0x00141414, widgets: alloc::vec::Vec::new() },
 ]);
 pub static Z_ORDER: Mutex<[usize; 4]> = Mutex::new([0, 1, 2, 3]);
 
@@ -675,4 +803,261 @@ pub fn update_cursor(old_x: u16, old_y: u16, new_x: u16, new_y: u16) {
     // Yalnizca eski ve yeni imlecin kapladigi alani onbellekten asil ekrana gonder
     flush_rect(old_x, old_y, 12, 19);
     flush_rect(new_x, new_y, 12, 19);
+}
+
+use core::sync::atomic::Ordering;
+
+pub struct DragState {
+    pub mode: u8, // 0=None, 1=Move, 2=Right, 3=Bottom, 4=BottomRight
+    pub start_x: u16,
+    pub start_y: u16,
+    pub win_start_w: u16,
+    pub win_start_h: u16,
+    pub app_id: u8,
+}
+pub static DRAG_STATE: Mutex<DragState> = Mutex::new(DragState { mode: 0, start_x: 0, start_y: 0, win_start_w: 0, win_start_h: 0, app_id: 255 });
+
+pub fn process_mouse_event(cx: u16, cy: u16, click: bool, last_click: bool, moved: bool) {
+    if click && !last_click {
+        // MOUSE DOWN
+        let mut drag = DRAG_STATE.lock();
+        let mut writers = WRITERS.lock();
+        let mut z_order = Z_ORDER.lock();
+
+        // Taskbar Start Menu Click
+        if cx <= 74 && cy >= 1046 {
+            let is_open = START_MENU_OPEN.load(Ordering::Relaxed);
+            START_MENU_OPEN.store(!is_open, Ordering::Relaxed);
+            drop(writers);
+            drop(z_order);
+            drop(drag);
+            redraw_all(None);
+            draw_cursor(cx, cy);
+            return;
+        }
+
+        // Start Menu Buttons
+        if START_MENU_OPEN.load(Ordering::Relaxed) {
+            if cx >= 4 && cx <= 204 {
+                if cy >= 1000 && cy <= 1040 {
+                    unsafe { x86_64::instructions::port::PortWriteOnly::<u8>::new(0x64).write(0xFE); }
+                }
+                if cy >= 950 && cy <= 990 {
+                    unsafe { x86_64::instructions::port::PortWriteOnly::<u16>::new(0x604).write(0x2000); }
+                }
+            }
+            START_MENU_OPEN.store(false, Ordering::Relaxed);
+            drop(writers);
+            drop(z_order);
+            drop(drag);
+            redraw_all(None);
+            draw_cursor(cx, cy);
+            return;
+        }
+
+        let mut hit_app = 255;
+        
+        // 1. Check windows from Top to Bottom
+        for i in (0..4).rev() {
+            let app_id = z_order[i] as u8;
+            let w = &writers[app_id as usize];
+            if w.visible && !w.minimized {
+                if cx >= w.win_x && cx <= w.win_x + w.win_w && cy >= w.win_y && cy <= w.win_y + w.win_h {
+                    hit_app = app_id;
+                    break;
+                }
+            }
+        }
+
+        if hit_app != 255 {
+            // Clicked inside a window!
+            ACTIVE_APP.store(hit_app, Ordering::Relaxed);
+            let w = &mut writers[hit_app as usize];
+            
+            // Bring to front logic
+            let mut pos = 0;
+            for i in 0..4 { if z_order[i] == hit_app as usize { pos = i; break; } }
+            for i in pos..3 { z_order[i] = z_order[i + 1]; }
+            z_order[3] = hit_app as usize;
+            
+            // Check Window Buttons
+            // Close
+            if cx >= w.win_x + w.win_w - 26 && cx <= w.win_x + w.win_w - 6 && cy >= w.win_y + 6 && cy <= w.win_y + 26 {
+                w.visible = false;
+                drop(writers);
+                drop(z_order);
+                redraw_all(None);
+                draw_cursor(cx, cy);
+            }
+            // Minimize
+            else if cx >= w.win_x + w.win_w - 74 && cx <= w.win_x + w.win_w - 54 && cy >= w.win_y + 6 && cy <= w.win_y + 26 {
+                backup_window_content(w.app_id, w.win_x, w.win_y, w.win_w, w.win_h);
+                w.minimized = true;
+                drop(writers);
+                drop(z_order);
+                redraw_all(None);
+                draw_cursor(cx, cy);
+            }
+            // Maximize/Restore
+            else if cx >= w.win_x + w.win_w - 50 && cx <= w.win_x + w.win_w - 30 && cy >= w.win_y + 6 && cy <= w.win_y + 26 {
+                backup_window_content(w.app_id, w.win_x, w.win_y, w.win_w, w.win_h);
+                if w.win_w < 1920 {
+                    w.win_x = 0; w.win_y = 0; w.win_w = 1920; w.win_h = 1046;
+                } else {
+                    w.win_x = 100; w.win_y = 100; w.win_w = 800; w.win_h = 500;
+                }
+                drop(writers);
+                drop(z_order);
+                redraw_all(None);
+                draw_cursor(cx, cy);
+            }
+            // Resize RB
+            else if cx >= w.win_x + w.win_w - 8 && cx <= w.win_x + w.win_w && cy >= w.win_y + w.win_h - 8 && cy <= w.win_y + w.win_h {
+                drag.mode = 4; drag.start_x = cx; drag.start_y = cy; drag.win_start_w = w.win_w; drag.win_start_h = w.win_h; drag.app_id = hit_app;
+            }
+            // Resize R
+            else if cx >= w.win_x + w.win_w - 8 && cx <= w.win_x + w.win_w && cy >= w.win_y && cy <= w.win_y + w.win_h {
+                drag.mode = 2; drag.start_x = cx; drag.win_start_w = w.win_w; drag.app_id = hit_app;
+            }
+            // Resize B
+            else if cy >= w.win_y + w.win_h - 8 && cy <= w.win_y + w.win_h && cx >= w.win_x && cx <= w.win_x + w.win_w {
+                drag.mode = 3; drag.start_y = cy; drag.win_start_h = w.win_h; drag.app_id = hit_app;
+            }
+            // Move (Title Bar)
+            else if cx >= w.win_x && cx <= w.win_x + w.win_w && cy >= w.win_y && cy <= w.win_y + 24 {
+                drag.mode = 1; drag.start_x = cx.saturating_sub(w.win_x); drag.start_y = cy.saturating_sub(w.win_y); drag.app_id = hit_app;
+            } else {
+                // Clicked inside content, just bring to front
+                let mut handled = false;
+                for widget in &mut w.widgets {
+                    if widget.handle_event(crate::ui::UiEvent::MouseClick { x: cx, y: cy }, w.win_x, w.win_y) {
+                        handled = true;
+                        break;
+                    }
+                }
+                
+                drop(writers);
+                drop(z_order);
+                if !handled {
+                    redraw_all(None);
+                }
+                draw_cursor(cx, cy);
+            }
+        } else {
+            // 2. Check Desktop Icons
+            if cx >= 20 && cx <= 60 {
+                let mut app_id = 255;
+                if cy >= 20 && cy <= 60 { app_id = 0; }
+                else if cy >= 80 && cy <= 120 { app_id = 1; }
+                else if cy >= 140 && cy <= 180 { app_id = 2; }
+                else if cy >= 200 && cy <= 240 { app_id = 3; }
+                
+                if app_id != 255 {
+                    ACTIVE_APP.store(app_id, Ordering::Relaxed);
+                    writers[app_id as usize].visible = true;
+                    writers[app_id as usize].minimized = false;
+                    if app_id != 0 {
+                        writers[app_id as usize].col = 0;
+                        writers[app_id as usize].row = 0;
+                    }
+                    
+                    let mut pos = 0;
+                    for i in 0..4 { if z_order[i] == app_id as usize { pos = i; break; } }
+                    for i in pos..3 { z_order[i] = z_order[i + 1]; }
+                    z_order[3] = app_id as usize;
+                    
+                    drop(writers);
+                    drop(z_order);
+                    redraw_all(None);
+                    draw_cursor(cx, cy);
+                    return;
+                }
+            }
+            
+            // 3. Check Taskbar Buttons
+            if cy >= 1046 && cx > 74 {
+                let mut taskbar_x = 78;
+                let mut clicked_app = 255;
+                for &id in z_order.iter() {
+                    if writers[id].visible {
+                        if cx >= taskbar_x && cx <= taskbar_x + 100 {
+                            clicked_app = id as u8;
+                            break;
+                        }
+                        taskbar_x += 110;
+                    }
+                }
+                if clicked_app != 255 {
+                    let w = &mut writers[clicked_app as usize];
+                    if w.minimized || z_order[3] != clicked_app as usize {
+                        w.minimized = false;
+                        
+                        let mut pos = 0;
+                        for i in 0..4 { if z_order[i] == clicked_app as usize { pos = i; break; } }
+                        for i in pos..3 { z_order[i] = z_order[i + 1]; }
+                        z_order[3] = clicked_app as usize;
+                    } else {
+                        w.minimized = true;
+                    }
+                    ACTIVE_APP.store(z_order[3] as u8, Ordering::Relaxed);
+                    drop(writers);
+                    drop(z_order);
+                    redraw_all(None);
+                    draw_cursor(cx, cy);
+                }
+            }
+        }
+    } else if !click && last_click {
+        // Mouse UP
+        let mut writers = WRITERS.lock();
+        let active_app = ACTIVE_APP.load(Ordering::Relaxed);
+        if active_app < 4 {
+            let w = &mut writers[active_app as usize];
+            for widget in &mut w.widgets {
+                widget.handle_event(crate::ui::UiEvent::MouseUp { x: cx, y: cy }, w.win_x, w.win_y);
+            }
+        }
+        drop(writers);
+        
+        let mut drag = DRAG_STATE.lock();
+        drag.mode = 0;
+    } else if click && last_click && moved {
+        let drag = DRAG_STATE.lock();
+        if drag.mode != 0 {
+            let mut writers = WRITERS.lock();
+            let w = &mut writers[drag.app_id as usize];
+            
+            let old_x = w.win_x;
+            let old_y = w.win_y;
+            let old_w = w.win_w;
+            let old_h = w.win_h;
+            
+            backup_window_content(w.app_id, w.win_x, w.win_y, w.win_w, w.win_h);
+            
+            if drag.mode == 1 {
+                w.win_x = cx.saturating_sub(drag.start_x);
+                w.win_y = cy.saturating_sub(drag.start_y);
+            } else if drag.mode == 2 {
+                let diff = cx as i32 - drag.start_x as i32;
+                w.win_w = (drag.win_start_w as i32 + diff).max(300).min(1920) as u16;
+            } else if drag.mode == 3 {
+                let diff = cy as i32 - drag.start_y as i32;
+                w.win_h = (drag.win_start_h as i32 + diff).max(200).min(1046) as u16;
+            } else if drag.mode == 4 {
+                let diff_x = cx as i32 - drag.start_x as i32;
+                let diff_y = cy as i32 - drag.start_y as i32;
+                w.win_w = (drag.win_start_w as i32 + diff_x).max(300).min(1920) as u16;
+                w.win_h = (drag.win_start_h as i32 + diff_y).max(200).min(1046) as u16;
+            }
+            
+            if w.win_x + w.win_w > 1920 { w.win_x = 1920 - w.win_w; }
+            if w.win_y + w.win_h > 1046 { w.win_y = 1046 - w.win_h; }
+            
+            let dirty = union_rect(old_x, old_y, old_w, old_h, w.win_x, w.win_y, w.win_w, w.win_h);
+            
+            drop(writers);
+            redraw_all(Some(dirty));
+            draw_cursor(cx, cy);
+        }
+    }
 }

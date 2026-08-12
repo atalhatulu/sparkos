@@ -185,17 +185,17 @@ impl Shell {
 
     async fn exec(&mut self) {
         let cmd = self.cmd().trim();
-        // Bazı asenkron komutlar için lock'ı geçici almalıyız, o yüzden w'yi match içine taşıyacağız
-        if cmd == "" { return; }
+        if cmd.is_empty() { return; }
         
-        if cmd.starts_with("edit ") {
-            let file_name = &cmd[5..].trim();
+        if let Some(file_name) = cmd.strip_prefix("edit ") {
+            let file_name = file_name.trim();
             let resolved = crate::fs::resolve_path(&self.cwd, file_name);
             crate::editor::run_editor(&resolved, file_name).await;
             return;
         }
         
-        let mut w = WRITE_LOCK.lock();
+        // Kilitlenmeleri önlemek için donanım kesmelerini kapalı tutarak lock alıyoruz
+        let mut w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
         match cmd {
             "help" | "yardim" => {
                 w.set_color(Color::Yellow, Color::Black);
@@ -268,10 +268,12 @@ impl Shell {
                 writeln!(w, "PID\tISIM").unwrap();
                 writeln!(w, "---\t----").unwrap();
                 w.set_color(Color::White, Color::Black);
-                let list = crate::task::PROCESS_LIST.lock();
-                for (id, name) in list.iter() {
-                    writeln!(w, "{}\t{}", id, name).unwrap();
-                }
+                x86_64::instructions::interrupts::without_interrupts(|| {
+                    let list = crate::task::PROCESS_LIST.lock();
+                    for (id, name) in list.iter() {
+                        writeln!(w, "{}\t{}", id, name).unwrap();
+                    }
+                });
             }
             "lspci" => {
                 w.set_color(Color::LightBlue, Color::Black);
@@ -367,20 +369,24 @@ impl Shell {
                     crate::task::yield_now().await;
                 }
                 
-                // Rust Borrow Checker icin w kilidini geri al (cunku scope sonunda kullaniliyor)
-                w = WRITE_LOCK.lock();
+                // Rust Borrow Checker icin w kilidini geri al
+                w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
             }
             "run_app" => {
                 w.set_color(Color::White, Color::Black);
-                writeln!(w, "User Mode (Ring 3) gecis hazirligi yapiliyor...").unwrap();
-                writeln!(w, "Not: Bu islemden sonra shell kilitlenecektir cunku cikis sys_exit cagirisi mevcut degil.").unwrap();
+                writeln!(w, "User Mode (Ring 3) ELF yukleniyor...").unwrap();
                 drop(w);
-                crate::user::execute_ring3_app();
-                // Buraya asla ulasilmayacak.
-                w = WRITE_LOCK.lock();
+                let hello_elf = include_bytes!("../scratch/hello.elf");
+                if let Err(e) = crate::user::exec_elf(hello_elf) {
+                    w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
+                    w.set_color(Color::LightRed, Color::Black);
+                    writeln!(w, "ELF Error: {}", e).unwrap();
+                    drop(w);
+                }
+                w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
             }
             _ if cmd.starts_with("host ") => {
-                let domain = &cmd[5..].trim();
+                let domain = cmd.strip_prefix("host ").unwrap().trim();
                 w.set_color(Color::White, Color::Black);
                 writeln!(w, "{} adresi icin DNS sorgusu yapiliyor (8.8.8.8:53)...", domain).unwrap();
                 drop(w); // Kilidi birak, donanim bekleyecegiz
@@ -399,7 +405,7 @@ impl Shell {
                         while crate::interrupts::get_tick() < start_tick + 3000 {
                             if let Some(rx_packet) = dev.poll_rx() {
                                 if let Some(ips) = crate::net::parse_dns_response(&rx_packet, tx_id) {
-                                    let mut w = WRITE_LOCK.lock();
+                                    let mut w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
                                     if ips.is_empty() {
                                         w.set_color(Color::Yellow, Color::Black);
                                         writeln!(w, "DNS Yaniti: Kayit bulunamadi.").unwrap();
@@ -418,25 +424,22 @@ impl Shell {
                     }
                 }
                 
-                w = WRITE_LOCK.lock(); // Kilidi geri al
+                w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock()); // Kilidi geri al
                 if !success {
                     w.set_color(Color::LightRed, Color::Black);
                     writeln!(w, "Zaman asimi (Timeout). DNS sunucusundan yanit alinamadi.").unwrap();
                 }
             }
             _ if cmd.starts_with("gui") => {
-                crate::gui::init();
-                {
+                crate::gui::init(None);
+                x86_64::instructions::interrupts::without_interrupts(|| {
                     let mut gw_arr = crate::gui::WRITERS.lock();
                     let mut gw = &mut gw_arr[0];
                     gw.visible = true;
-                    let (wx, wy, ww, wh) = (gw.win_x, gw.win_y, gw.win_w, gw.win_h);
-                    let visible = gw.visible;
-                    let minimized = gw.minimized;
                     drop(gw_arr);
-                    crate::gui::redraw_all();
+                    crate::gui::redraw_all(None);
                     crate::gui::flush_rect(0, 0, 1920, 1080);
-                }
+                });
                 crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
                 
                 // Artık sonraki komutların outputu doğrudan GUI üzerine çizilecek
@@ -446,17 +449,19 @@ impl Shell {
                 writeln!(w, "GUI Moduna gecildi. Masaustune hosgeldiniz!").unwrap();
             }
             _ if cmd.starts_with("kill ") => {
-                let id_str = &cmd[5..].trim();
+                let id_str = cmd.strip_prefix("kill ").unwrap().trim();
                 if let Ok(id) = id_str.parse::<u64>() {
-                    let mut list = crate::task::PROCESS_LIST.lock();
-                    if list.contains_key(&id) {
-                        crate::task::KILLED_PROCESSES.lock().push(id);
-                        w.set_color(Color::Yellow, Color::Black);
-                        writeln!(w, "Süreç [{}] (PID: {}) öldürülmek üzere işaretlendi.", list.get(&id).unwrap(), id).unwrap();
-                    } else {
-                        w.set_color(Color::Red, Color::Black);
-                        writeln!(w, "Hata: PID bulunamadi.").unwrap();
-                    }
+                    x86_64::instructions::interrupts::without_interrupts(|| {
+                        let list = crate::task::PROCESS_LIST.lock();
+                        if list.contains_key(&id) {
+                            crate::task::KILLED_PROCESSES.lock().push(id);
+                            w.set_color(Color::Yellow, Color::Black);
+                            writeln!(w, "Süreç [{}] (PID: {}) öldürülmek üzere işaretlendi.", list.get(&id).unwrap(), id).unwrap();
+                        } else {
+                            w.set_color(Color::Red, Color::Black);
+                            writeln!(w, "Hata: PID bulunamadi.").unwrap();
+                        }
+                    });
                 } else {
                     w.set_color(Color::Red, Color::Black);
                     writeln!(w, "Hata: Gecersiz PID formati. (Kullanim: kill <PID>)").unwrap();
@@ -466,7 +471,7 @@ impl Shell {
                 writeln!(w, "{}", self.cwd).unwrap();
             }
             _ if cmd.starts_with("cd ") => {
-                let path = &cmd[3..].trim();
+                let path = cmd.strip_prefix("cd ").unwrap().trim();
                 let resolved = crate::fs::resolve_path(&self.cwd, path);
                 if crate::fs::is_dir(&resolved) {
                     self.cwd = resolved;
@@ -476,7 +481,7 @@ impl Shell {
                 }
             }
             _ if cmd == "ls" || cmd.starts_with("ls ") => {
-                let target = if cmd.len() > 2 { &cmd[3..].trim() } else { "" };
+                let target = cmd.strip_prefix("ls ").unwrap_or("").trim();
                 let resolved = crate::fs::resolve_path(&self.cwd, target);
                 match crate::fs::list_dir(&resolved) {
                     Ok(items) => {
@@ -502,7 +507,7 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("mkdir ") => {
-                let dir_name = &cmd[6..].trim();
+                let dir_name = cmd.strip_prefix("mkdir ").unwrap().trim();
                 let resolved = crate::fs::resolve_path(&self.cwd, dir_name);
                 match crate::fs::mkdir(&resolved) {
                     Ok(_) => writeln!(w, "Dizin olusturuldu: {}", dir_name).unwrap(),
@@ -513,7 +518,7 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("cat ") => {
-                let file_name = &cmd[4..].trim();
+                let file_name = cmd.strip_prefix("cat ").unwrap().trim();
                 let resolved = crate::fs::resolve_path(&self.cwd, file_name);
                 match crate::fs::read_file(&resolved) {
                     Ok(content) => writeln!(w, "{}", content).unwrap(),
@@ -524,10 +529,8 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("write ") => {
-                let args = &cmd[6..].trim();
-                if let Some(space_idx) = args.find(' ') {
-                    let file_name = &args[..space_idx];
-                    let content = &args[space_idx + 1..];
+                let args = cmd.strip_prefix("write ").unwrap().trim();
+                if let Some((file_name, content)) = args.split_once(' ') {
                     let resolved = crate::fs::resolve_path(&self.cwd, file_name);
                     match crate::fs::write_file(&resolved, content) {
                         Ok(_) => writeln!(w, "Dosyaya yazildi: {}", file_name).unwrap(),
@@ -542,7 +545,7 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("rm ") => {
-                let target = &cmd[3..].trim();
+                let target = cmd.strip_prefix("rm ").unwrap().trim();
                 let resolved = crate::fs::resolve_path(&self.cwd, target);
                 match crate::fs::remove(&resolved) {
                     Ok(_) => writeln!(w, "Silindi: {}", target).unwrap(),
@@ -553,23 +556,23 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("disk_write ") => {
-                let args = &cmd[11..].trim();
-                if let Some(space_idx) = args.find(' ') {
-                    let lba_str = &args[..space_idx];
-                    let text = &args[space_idx + 1..];
+                let args = cmd.strip_prefix("disk_write ").unwrap().trim();
+                if let Some((lba_str, text)) = args.split_once(' ') {
                     if let Ok(lba) = lba_str.parse::<u32>() {
                         let mut buf = [0u8; 512];
                         let bytes = text.as_bytes();
                         let len = core::cmp::min(bytes.len(), 512);
                         buf[..len].copy_from_slice(&bytes[..len]);
                         
-                        match crate::ata::DATA_DRIVE.lock().write_sector(lba, &buf) {
-                            Ok(_) => writeln!(w, "LBA {} sektorune basariyla yazildi.", lba).unwrap(),
-                            Err(e) => {
-                                w.set_color(Color::Red, Color::Black);
-                                writeln!(w, "Hata: {}", e).unwrap();
+                        x86_64::instructions::interrupts::without_interrupts(|| {
+                            match crate::ata::DATA_DRIVE.lock().write_sector(lba, &buf) {
+                                Ok(_) => writeln!(w, "LBA {} sektorune basariyla yazildi.", lba).unwrap(),
+                                Err(e) => {
+                                    w.set_color(Color::Red, Color::Black);
+                                    writeln!(w, "Hata: {}", e).unwrap();
+                                }
                             }
-                        }
+                        });
                     } else {
                         w.set_color(Color::Red, Color::Black);
                         writeln!(w, "Hata: Gecersiz LBA (Sektor) numarasi").unwrap();
@@ -580,10 +583,13 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("disk_read ") => {
-                let lba_str = &cmd[10..].trim();
+                let lba_str = cmd.strip_prefix("disk_read ").unwrap().trim();
                 if let Ok(lba) = lba_str.parse::<u32>() {
                     let mut buf = [0u8; 512];
-                    match crate::ata::DATA_DRIVE.lock().read_sector(lba, &mut buf) {
+                    let res = x86_64::instructions::interrupts::without_interrupts(|| {
+                        crate::ata::DATA_DRIVE.lock().read_sector(lba, &mut buf)
+                    });
+                    match res {
                         Ok(_) => {
                             let mut end = 512;
                             while end > 0 && buf[end - 1] == 0 { end -= 1; }
@@ -602,7 +608,7 @@ impl Shell {
                 }
             }
             _ if cmd.starts_with("color ") => {
-                let color_name = &cmd[6..];
+                let color_name = cmd.strip_prefix("color ").unwrap().trim();
                 let color = match color_name {
                     "red" | "kirmizi" => Color::Red,
                     "green" | "yesil" => Color::Green,
@@ -619,7 +625,7 @@ impl Shell {
                 self.text_color = color;
             }
             _ if cmd.starts_with("echo ") => {
-                writeln!(w, "{}", &cmd[5..]).unwrap();
+                writeln!(w, "{}", cmd.strip_prefix("echo ").unwrap()).unwrap();
             }
             _ => {
                 w.set_color(Color::Red, Color::Black);

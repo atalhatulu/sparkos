@@ -16,3 +16,6 @@ Thumbs.db
 *.iso
 *.img
 *.bin
+
+# Local scratch/tryout artifacts
+/scratch/

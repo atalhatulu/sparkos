@@ -97,3 +97,31 @@ pub fn map_vga_uc(recursive_addr: u64, _phys_offset: u64) {
         VGA_VIRT_ADDR = 0xB8000;
     }
 }
+
+pub fn alloc_backbuffer(
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<u64, &'static str> {
+    let start_virt = VirtAddr::new(0xE0000000); // 0xE0000000 sanal adresi
+    // 1920 * 1080 * 2 * 4 bytes = 16,588,800 bytes = 4050 sayfalar (4KB)
+    let pages = 4050; 
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    for i in 0..pages {
+        let page = Page::containing_address(start_virt + i * 4096);
+        let frame = frame_allocator.allocate_frame().ok_or("Bellek doldu, cerceve bulunamadi")?;
+        unsafe {
+            match mapper.map_to(page, frame, flags, frame_allocator) {
+                Ok(tlb) => tlb.flush(),
+                Err(_) => return Err("Haritalama hatasi"),
+            }
+        }
+    }
+    
+    // Belleği temizle (siyah ekran)
+    unsafe {
+        core::ptr::write_bytes(start_virt.as_mut_ptr::<u8>(), 0, (pages * 4096) as usize);
+    }
+    
+    Ok(start_virt.as_u64())
+}
