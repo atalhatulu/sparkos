@@ -37,6 +37,9 @@ pub mod fd;
 pub mod syscall_storage;
 pub mod display;
 pub mod usb;
+pub mod net_socket;
+pub mod security;
+pub mod sec_mem;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
