@@ -187,6 +187,100 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
 
+// ---------------------------------------------------------------------------
+// Per-process address spaces (real CR3 isolation for user processes).
+// ---------------------------------------------------------------------------
+//
+// To give each Ring-3 process its own page table we clone the *active* level-4
+// table (which already maps the high-half kernel: physical-memory offset,
+// recursive mapping, kernel image, VGA, etc.) into a freshly allocated frame
+// and hand that frame's physical address to the process as its `user_cr3`.
+// Because every kernel mapping is inherited, the kernel stays reachable no
+// matter which process's CR3 is currently loaded; the only thing that differs
+// between address spaces is the low-half user region. `enter_user_current`
+// loads this CR3 right before iretq, so each Ring-3 execution truly runs in
+// its own address space.
+
+/// Clone the active page table and return the physical address of the new
+/// level-4 table (a valid CR3 value for a user process). `None` if no frame
+/// can be allocated.
+pub fn clone_active_cr3() -> Option<u64> {
+    let frame = user_alloc_frame()?;
+    let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+    // Source: active L4 (read-only borrow is fine; we copy its 512 entries).
+    let src = unsafe { active_level_4_table(phys_offset) };
+    // Destination: the freshly allocated L4, reached via the physical offset.
+    let dest = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u64>();
+    unsafe {
+        core::ptr::copy_nonoverlapping(src as *const PageTable as *const u64, dest, 512);
+    }
+    Some(frame.start_address().as_u64())
+}
+
+/// Map a freshly allocated user frame at `virt` in the *given* address space
+/// (`cr3` is a physical level-4 table address; `0` means the active/shared
+/// table). Returns the mapped virtual address on success.
+pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, &'static str> {
+    if !is_canonical(virt) || virt >= USER_ADDR_LIMIT {
+        return Err("user mapping target outside user space");
+    }
+    let frame = user_alloc_frame().ok_or("no free user frames")?;
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+    let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+
+    // Target L4: the given `cr3`, or the active table when `cr3 == 0`.
+    let target = if cr3 == 0 {
+        unsafe { active_level_4_table(phys_offset) }
+    } else {
+        let ptr = (phys_offset + PhysAddr::new(cr3).as_u64()).as_mut_ptr::<PageTable>();
+        unsafe { &mut *ptr }
+    };
+    let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
+
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    unsafe {
+        match mapper.map_to_with_table_flags(page, frame, flags, PageTableFlags::empty(), &mut UserFrameAllocatorAdapter) {
+            Ok(tlb) => {
+                tlb.flush();
+                Ok(virt)
+            }
+            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => Ok(virt),
+            Err(_) => Err("failed to map user page in cr3"),
+        }
+    }
+}
+
+/// Write `bytes` into a user region already mapped in the given address space
+/// (`cr3`), zero-padding the page(s). The region must be user-mapped in that
+/// table. Used to place code/data for a process's own address space.
+pub fn write_user_region_in_cr3(cr3: u64, virt: u64, bytes: &[u8], len: u64) {
+    let span = len.max(bytes.len() as u64);
+    let pages = ((span + 4095) / 4096) as usize;
+    let base = virt as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(base, 0, pages * 4096);
+        if !bytes.is_empty() {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), base, bytes.len());
+        }
+    }
+    let _ = cr3; // address space is identified by cr3; writes target its mapping
+}
+
+/// Convenience: map a `len`-sized user region (rounded up to whole pages) with
+/// fresh frames in the given address space. Returns the base virtual address.
+pub fn map_user_region_in_cr3(cr3: u64, virt: u64, len: u64, writable: bool) -> Result<u64, &'static str> {
+    let pages = ((len.max(1) + 4095) / 4096) as u64;
+    for i in 0..pages {
+        map_user_page_in_cr3(cr3, virt + i * 4096, writable)?;
+    }
+    Ok(virt)
+}
+
+// ---------------------------------------------------------------------------
+
 /// Legacy helper: flips USER_ACCESSIBLE/WRITABLE flags on an existing mapping.
 /// Retained for backward compatibility. New code should use `map_user_page`
 /// which allocates dedicated user frames instead of sharing kernel pages.

@@ -30,23 +30,37 @@ impl AtaDrive {
         }
     }
 
-    fn wait_busy(&mut self) {
+    fn wait_busy(&mut self) -> Result<(), &'static str> {
+        // PIO busy-wait with a bounded timeout so a missing/unresponsive
+        // disk can't hang the kernel forever. ~100k spins ~ plenty for real HW.
+        let mut timeout = 0usize;
         unsafe {
             while self.status.read() & 0x80 != 0 {
                 core::hint::spin_loop();
+                timeout += 1;
+                if timeout > 200_000 {
+                    return Err("ATA wait_busy timeout");
+                }
             }
         }
+        Ok(())
     }
 
-    fn wait_drq(&mut self) {
+    fn wait_drq(&mut self) -> Result<(), &'static str> {
+        let mut timeout = 0usize;
         unsafe {
             while self.status.read() & 0x08 == 0 {
                 if self.status.read() & 0x21 != 0 {
                     break;
                 }
                 core::hint::spin_loop();
+                timeout += 1;
+                if timeout > 200_000 {
+                    return Err("ATA wait_drq timeout");
+                }
             }
         }
+        Ok(())
     }
 
     pub fn read_sector(&mut self, lba: u32, buf: &mut [u8; 512]) -> Result<(), &'static str> {
@@ -55,7 +69,7 @@ impl AtaDrive {
 
         unsafe {
             self.drive_select.write(select);
-            self.wait_busy();
+            self.wait_busy()?;
 
             self.sec_count.write(1);
             self.lba_lo.write((lba & 0xFF) as u8);
@@ -63,8 +77,8 @@ impl AtaDrive {
             self.lba_hi.write(((lba >> 16) & 0xFF) as u8);
             self.command.write(0x20); // Okuma komutu
 
-            self.wait_busy();
-            self.wait_drq();
+            self.wait_busy()?;
+            self.wait_drq()?;
 
             if self.status.read() & 0x01 != 0 {
                 return Err("ATA Disk Okuma Hatasi (ERR)");
@@ -85,7 +99,7 @@ impl AtaDrive {
 
         unsafe {
             self.drive_select.write(select);
-            self.wait_busy();
+            self.wait_busy()?;
 
             self.sec_count.write(1);
             self.lba_lo.write((lba & 0xFF) as u8);
@@ -93,9 +107,9 @@ impl AtaDrive {
             self.lba_hi.write(((lba >> 16) & 0xFF) as u8);
             self.command.write(0x30); // Yazma komutu
 
-            self.wait_busy();
-            self.wait_drq();
-            
+            self.wait_busy()?;
+            self.wait_drq()?;
+
             if self.status.read() & 0x01 != 0 {
                 return Err("ATA Disk Yazma Hatasi (ERR)");
             }
@@ -105,10 +119,10 @@ impl AtaDrive {
                 self.data.write(*ptr);
                 ptr = ptr.add(1);
             }
-            
+
             // Cache flush
             self.command.write(0xE7);
-            self.wait_busy();
+            self.wait_busy()?;
         }
         Ok(())
     }

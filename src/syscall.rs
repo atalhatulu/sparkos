@@ -19,6 +19,10 @@ pub const SYS_CONNECT: u64 = 11;
 pub const SYS_SEND: u64 = 12;
 pub const SYS_RECV: u64 = 13;
 
+// Process syscalls (Linux-compatible numbers).
+pub const SYS_FORK: u64 = 14;
+pub const SYS_EXEC: u64 = 15;
+
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
 const EFAULT: u64 = (-14i64) as u64;
@@ -61,6 +65,25 @@ pub extern "C" fn syscall_dispatcher(
         SYS_CONNECT => crate::net_socket::sys_connect(arg1, arg2, arg3),
         SYS_SEND => crate::net_socket::sys_send(arg1, arg2, arg3),
         SYS_RECV => crate::net_socket::sys_recv(arg1, arg2, arg3),
+        SYS_FORK => {
+            let pid = crate::task::process::fork_current();
+            serial_println!("[SYSCALL] SYS_FORK from Ring 3 -> child pid {}", pid);
+            pid as u64
+        }
+        SYS_EXEC => {
+            // exec(elf_ptr, len): build a fresh user process from ELF bytes.
+            serial_println!("[SYSCALL] SYS_EXEC ({:#x}, {}) from Ring 3", arg1, arg2);
+            match crate::task::process::exec_elf_proc(
+                "execd",
+                unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) },
+            ) {
+                Ok(pid) => pid,
+                Err(e) => {
+                    serial_println!("[SYSCALL] SYS_EXEC failed: {}", e);
+                    u64::MAX
+                }
+            }
+        }
         SYS_WRITE => {
             // fd 1/2 (stdout/stderr) terminale, fd >= 3 dosyalara yazılır
             if arg1 == 1 || arg1 == 2 {
@@ -78,8 +101,17 @@ pub extern "C" fn syscall_dispatcher(
 
 fn sys_exit(status: u64) -> u64 {
     serial_println!("[SYSCALL] sys_exit({}) called from Ring 3", status);
-    // Uygulama sonlandığında executor'a dönmeli veya kernel loop'a dönmelidir.
-    // Şimdilik KERNEL_RIP ve KERNEL_RSP kullanılıyor (user.rs'te iretq öncesi kaydedilir).
+    // Process-model path: terminate this process via the scheduler and switch
+    // to the next ready process (never returns). Uses the per-PCB kernel
+    // state, not the legacy KERNEL_RSP/KERNEL_RIP globals.
+    if crate::task::process::current_is_user_process() {
+        if let Some((pid, name)) = crate::task::process::current_process_info() {
+            serial_println!("[PROC] pid {} ('{}') exiting with status {}", pid, name, status);
+        }
+        crate::task::process::exit_current();
+    }
+    // Legacy single-app path (shell.rs exec_elf): the process model is not
+    // active, so return to the kernel at the saved global resume point.
     unsafe {
         core::arch::asm!(
             "cli",
