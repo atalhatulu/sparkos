@@ -19,6 +19,12 @@ pub const SYS_WRITE: u64 = 4;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_YIELD: u64 = 9;
 
+// Socket syscalls (Linux-compatible numbers).
+pub const SYS_SOCKET: u64 = 10;
+pub const SYS_CONNECT: u64 = 11;
+pub const SYS_SEND: u64 = 12;
+pub const SYS_RECV: u64 = 13;
+
 /// Static table of all supported system calls in SparkOS 1.0.
 pub static SYSCALLS: &[SyscallInfo] = &[
     SyscallInfo {
@@ -55,6 +61,26 @@ pub static SYSCALLS: &[SyscallInfo] = &[
         number: SYS_YIELD,
         name: "sys_yield",
         description: "Cooperatively yield the CPU so other kernel tasks progress.",
+    },
+    SyscallInfo {
+        number: SYS_SOCKET,
+        name: "sys_socket",
+        description: "Create a socket (network domain) and return its file descriptor.",
+    },
+    SyscallInfo {
+        number: SYS_CONNECT,
+        name: "sys_connect",
+        description: "Connect a socket to a remote (IP, port) endpoint.",
+    },
+    SyscallInfo {
+        number: SYS_SEND,
+        name: "sys_send",
+        description: "Send data over a connected socket.",
+    },
+    SyscallInfo {
+        number: SYS_RECV,
+        name: "sys_recv",
+        description: "Receive data from a socket into a buffer.",
     },
 ];
 
