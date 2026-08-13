@@ -154,8 +154,16 @@ lend(src, req_rights, expiry)
 ```
 
 - **Tek seviye:** lend'den sonra cap'i grant/transfer YAPILAMAZ. Return disinda yol yok.
+  > **v0.x penceresi:** Bu bir evrensel capability kurali DEGIL, **bilincli v0.x
+  > kısıtı**. Sadece expire-on-return/otomatik revoke guvenligini basit tutmak icin
+  > konuldu. Ileriki surumlerde lend edilen cap'in grant edilebilmesi (ust seviye
+  > lend) yeniden degerlendirilebilir — ilgili STEP'in kapsaminda.
 - Lend edilen cap'i process, son kullaniciya teslim eder; root degil; süresi doldugunda
   otomatik recall edilir.
+- **Expiry implementasyonu ERTELENDI (v0.x):** `expiry` timer/clock altyapisina bagli.
+  Semantik (expiry → otomatik revoke) şimdiden freeze; MEKANIZMA (timer, deadline
+  handler) scheduler/time STEP'ine birakildi. v0.x'te lend yalnizca `return` ile sona
+  erer; expiry parametresi o adima kadar pasif arayuzu tasir.
 
 ### Karsilastirma ozet
 

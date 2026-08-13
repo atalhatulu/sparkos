@@ -92,20 +92,22 @@ Resource
 ## Hala cozulmesi gerekenler
 
 1. ~~Grant / Transfer / Lend tam semantigi~~ → **STEP 2 ile cozuldu**
-2. Memory mapping + TLB revoke davranisi (STEP 4)
-3. DMA + IOMMU + cancel modeli (STEP 5)
-4. IPC cancellation semantigi (STEP 7)
-5. Priority donation / time budget (STEP 8)
-6. Capability table / slot allocator implementasyon modeli
-7. `revoke()` ↔ `deref()` concurrency ve memory ordering
-8. Process death sonrasi capability davranisi
+2. ~~Concurrency / Memory Ordering~~ → **STEP 3 ile cozuldu (FIX-1/2/3)**
+3. Memory mapping + TLB revoke davranisi (STEP 4)
+4. DMA + IOMMU + cancel modeli (STEP 5)
+5. Resource lifetime implementasyon detayi (STEP 6)
+6. IPC cancellation semantigi (STEP 7)
+7. Priority / time donation (STEP 8)
+8. Slot allocator implementasyon (STEP 6 alti)
+9. Process death sonrasi capability davranisi
 
 ## Sıradaki adim
 
-**STEP 2 → Grant / Transfer / Lend semantigi** — artik freeze (bkz. `CAPABILITY_MODEL.md`).
+**STEP 3 Concurrency / Memory Ordering** — FROZEN (bkz. `CONCURRENCY_MODEL.md`).
+Capability core'un race-free oldugu adres-adres dogrulandi.
 
 Sonra:
-**Concurrency → Mapping/TLB → DMA → IPC Cancel → Scheduler**
+**STEP 4 Mapping/TLB → STEP 5 DMA/IOMMU → STEP 6 Resource Lifetime → STEP 7 IPC Cancel → STEP 8 Scheduler**
 
 ### Ana kural
 
