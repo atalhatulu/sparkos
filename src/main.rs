@@ -40,6 +40,7 @@ pub mod usb;
 pub mod net_socket;
 pub mod security;
 pub mod sec_mem;
+pub mod cap;
 pub mod acpi;
 pub mod smp;
 pub mod klog;
