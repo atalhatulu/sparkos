@@ -293,9 +293,13 @@ static TICK: AtomicU64 = AtomicU64::new(0);
 
 extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
     TICK.fetch_add(1, Ordering::Relaxed);
-    
+
+    // Preemptive timer hook: drives the round-robin process scheduler when
+    // it has been armed (default off, so existing behavior is unchanged).
+    crate::task::process::timer_tick();
+
     // Tick çıktısı kaldırıldı — debug için serial_println vardı
-    
+
     unsafe {
         let mut eoi = Port::new(0x20u16);
         eoi.write(0x20u8);

@@ -10,6 +10,7 @@ use spin::Mutex;
 pub mod simple_executor;
 pub mod keyboard;
 pub mod yield_now;
+pub mod process;
 
 pub use yield_now::yield_now;
 
