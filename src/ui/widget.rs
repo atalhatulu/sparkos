@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 
 #[derive(Clone, Copy, Debug)]
 pub enum UiEvent {

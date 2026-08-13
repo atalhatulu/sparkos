@@ -1,8 +1,6 @@
 use x86_64::instructions::port::Port;
 use alloc::vec::Vec;
-use crate::pci::{scan_pci, pci_read_u32, PciDevice};
-use alloc::format;
-use core::fmt::Write;
+use crate::pci::{scan_pci, pci_read_u32};
 
 pub struct Rtl8139 {
     io_base: u16,

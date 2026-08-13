@@ -8,7 +8,7 @@ const COLS: usize = 80;
 const ROWS: usize = 25;
 
 pub async fn run_editor(path: &str, display_name: &str) {
-    let mut content = crate::fs::read_file(path).unwrap_or_else(|_| String::new());
+    let content = crate::fs::read_file(path).unwrap_or_else(|_| String::new());
     
     // Split into lines
     let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();

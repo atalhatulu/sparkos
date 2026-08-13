@@ -1,8 +1,6 @@
 use core::fmt::Write;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::fs;
-use crate::task::keyboard;
 use crate::vga_buffer::{Color, WRITE_LOCK};
 
 const CMD_BUF: usize = 256;
@@ -434,7 +432,7 @@ impl Shell {
                 crate::gui::init(None);
                 x86_64::instructions::interrupts::without_interrupts(|| {
                     let mut gw_arr = crate::gui::WRITERS.lock();
-                    let mut gw = &mut gw_arr[0];
+                    let gw = &mut gw_arr[0];
                     gw.visible = true;
                     drop(gw_arr);
                     crate::gui::redraw_all(None);

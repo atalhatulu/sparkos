@@ -92,7 +92,7 @@ pub fn create_example_mapping(
 }
 
 // Eski VGA mapping (geriye donuk uyumluluk)
-pub fn map_vga_uc(recursive_addr: u64, _phys_offset: u64) {
+pub fn map_vga_uc(_recursive_addr: u64, _phys_offset: u64) {
     unsafe {
         VGA_VIRT_ADDR = 0xB8000;
     }

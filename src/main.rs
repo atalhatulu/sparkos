@@ -31,6 +31,8 @@ pub mod net;
 pub mod user;
 pub mod elf;
 pub mod syscall;
+pub mod sync;
+pub mod ipc;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -69,6 +71,41 @@ async fn clock_task() {
         while crate::interrupts::get_tick() < target {
             crate::task::yield_now().await;
         }
+    }
+}
+
+static TEST_CHAN: crate::sync::BlockingChannel<u32> = crate::sync::BlockingChannel::new(10);
+
+async fn ipc_consumer() {
+    let mut count = 0;
+    while count < 4 {
+        if let Some(val) = TEST_CHAN.try_recv() {
+            crate::serial_println!("[IPC Consumer] Received: {}", val);
+            count += 1;
+        } else {
+            crate::task::yield_now().await;
+        }
+    }
+    crate::serial_println!("[IPC Consumer] Test complete.");
+}
+
+async fn ipc_producer_1() {
+    for i in 1..=2 {
+        while TEST_CHAN.try_send(i).is_err() {
+            crate::task::yield_now().await;
+        }
+        crate::serial_println!("[IPC Producer 1] Sent: {}", i);
+        crate::task::yield_now().await;
+    }
+}
+
+async fn ipc_producer_2() {
+    for i in 3..=4 {
+        while TEST_CHAN.try_send(i).is_err() {
+            crate::task::yield_now().await;
+        }
+        crate::serial_println!("[IPC Producer 2] Sent: {}", i);
+        crate::task::yield_now().await;
     }
 }
 
@@ -190,6 +227,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     // Arka plan saati görevini başlat (Multitasking Gösterimi)
     executor.spawn(task::Task::new("clock", clock_task()));
+    
+    // Senkron test: 2 producer, 1 consumer üzerinden sayı akışı (Scheduler kitlenmeden çalışır)
+    executor.spawn(task::Task::new("ipc_consumer", ipc_consumer()));
+    executor.spawn(task::Task::new("ipc_prod_1", ipc_producer_1()));
+    executor.spawn(task::Task::new("ipc_prod_2", ipc_producer_2()));
     
     executor.spawn(task::Task::new("mouse", mouse::mouse_task())); // Mouse ve GUI Task aktif!
     
