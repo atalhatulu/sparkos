@@ -40,14 +40,20 @@ pub mod usb;
 pub mod net_socket;
 pub mod security;
 pub mod sec_mem;
+pub mod acpi;
+pub mod smp;
+pub mod klog;
+pub mod panic;
+pub mod ktrace;
+pub mod app;
+pub mod sysapi;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     serial::SerialWriter::force_write("KERNEL PANIC: ");
     
-    crate::serial_println!("{}", info);
-    
-    loop { x86_64::instructions::hlt(); }
+    crate::panic::crash_dump(info);
+    crate::panic::halt_loop()
 }
 
 entry_point!(kernel_main);
