@@ -13,6 +13,12 @@ pub const SYS_LSEEK: u64 = 8;
 /// relaunched at its saved resume point by the async loop in `user.rs`.
 pub const SYS_YIELD: u64 = 9;
 
+// Socket syscalls (Linux-compatible numbers).
+pub const SYS_SOCKET: u64 = 10;
+pub const SYS_CONNECT: u64 = 11;
+pub const SYS_SEND: u64 = 12;
+pub const SYS_RECV: u64 = 13;
+
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
 const EFAULT: u64 = (-14i64) as u64;
@@ -41,6 +47,8 @@ pub extern "C" fn syscall_dispatcher(
     arg4: u64,
     arg5: u64,
 ) -> u64 {
+    // Preserve the original dispatcher structure; socket(net) syscalls use
+    // arg1..arg3 only (the target IP is packed into a single u32 arg).
     let _ = (arg4, arg5);
     match syscall_num {
         SYS_EXIT => sys_exit(arg1),
@@ -49,6 +57,10 @@ pub extern "C" fn syscall_dispatcher(
         SYS_OPEN => crate::syscall_storage::sys_open(arg1, arg2),
         SYS_CLOSE => crate::syscall_storage::sys_close(arg1),
         SYS_LSEEK => crate::syscall_storage::sys_lseek(arg1, arg2 as i64, arg3),
+        SYS_SOCKET => crate::net_socket::sys_socket(arg1, arg2),
+        SYS_CONNECT => crate::net_socket::sys_connect(arg1, arg2, arg3),
+        SYS_SEND => crate::net_socket::sys_send(arg1, arg2, arg3),
+        SYS_RECV => crate::net_socket::sys_recv(arg1, arg2, arg3),
         SYS_WRITE => {
             // fd 1/2 (stdout/stderr) terminale, fd >= 3 dosyalara yazılır
             if arg1 == 1 || arg1 == 2 {
