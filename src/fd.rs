@@ -33,8 +33,13 @@ impl FdTable {
     pub fn open(&mut self, path: &str, flags: u32) -> Result<usize, &'static str> {
         let fd = self.fds.iter().position(|f| f.is_none()).ok_or("No free fd")?;
         
-        // VFS kontrolü
-        if !fs::is_dir(path) && fs::read_file(path).is_err() {
+        // VFS kontrolü. Seeded binaries (e.g. /bin/hello) are backed by the
+        // binary-safe store and are always openable, even though their SPFS
+        // tree node is only a placeholder.
+        let exists = fs::file_exists(path) || !fs::is_dir(path) && {
+            fs::read_file(path).is_ok() || fs::is_seeded_binary(path)
+        };
+        if !exists {
             if flags & O_CREAT != 0 {
                 fs::write_file(path, "")?;
             } else {
@@ -66,7 +71,13 @@ impl FdTable {
             return Err("Bad fd flags for reading");
         }
         
-        let len = fs::read_file_chunk(&desc.path, desc.offset, buf)?;
+        // Route seeded binaries (byte-exact ELF) through the binary-safe
+        // path reader; everything else keeps the legacy UTF-8 chunk path.
+        let len = if fs::is_seeded_binary(&desc.path) {
+            fs::read_file_from_path_chunk(&desc.path, desc.offset, buf)?
+        } else {
+            fs::read_file_chunk(&desc.path, desc.offset, buf)?
+        };
         desc.offset += len;
         Ok(len)
     }
@@ -84,7 +95,11 @@ impl FdTable {
 
     pub fn lseek(&mut self, fd: usize, offset: isize, whence: u32) -> Result<usize, &'static str> {
         let desc = self.fds.get_mut(fd).and_then(|f| f.as_mut()).ok_or("Invalid fd")?;
-        let content_len = fs::get_file_size(&desc.path)?;
+        let content_len = if fs::is_seeded_binary(&desc.path) {
+            fs::get_file_size_from_path(&desc.path)?
+        } else {
+            fs::get_file_size(&desc.path)?
+        };
         
         let new_offset = match whence {
             SEEK_SET => offset,

@@ -249,27 +249,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     executor.spawn(task::Task::new("ipc_prod_1", ipc_producer_1()));
     executor.spawn(task::Task::new("ipc_prod_2", ipc_producer_2()));
     
-    executor.spawn(task::Task::new("mouse", mouse::mouse_task())); // Mouse ve GUI Task aktif!
-    
-    // Otomatik olarak GUI modunda baslat!
-    // Bellek tahsisi (backbuffer için)
-    let backbuffer_ptr = crate::memory::alloc_backbuffer(&mut mapper, &mut frame_allocator).unwrap_or(0);
-    if backbuffer_ptr == 0 {
-        serial_println!("[FAIL] GUI Backbuffer tahsisi basarisiz!");
-        crate::gui::init(None);
-    } else {
-        serial_println!("[OK] GUI Backbuffer tahsis edildi: {:#x}", backbuffer_ptr);
-        crate::gui::init(Some(backbuffer_ptr));
-    }
-    
-    crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
-    {
-        let mut gw_arr = crate::gui::WRITERS.lock();
-        gw_arr[0].visible = true; // Ilk olarak terminal penceresi acik gelsin
-    }
-    crate::ui::apps::init_apps();
-    crate::gui::redraw_all(None);
-    
+    executor.spawn(task::Task::new("mouse", mouse::mouse_task())); // Mouse task (GUI sonraki faz)
+
+    // NOTE: GUI devre dışı — kullanıcı planı: GUI EN SONA, önce terminali
+    // Linux terminali kadar güçlü yap. GUI backbuffer alloc + init şu an
+    // heap'i taşırıp panic üretiyordu (VBE/backbuffer henüz stabil değil).
+    // Sistem text-mode VGA + shell üzerinden boot eder. GUI bu faz zincirinin
+    // en sonuna bağlanacak.
+    // crate::vga_buffer::GUI_MODE varsayılan false kalır (text mode).
+
     executor.run();
     
     // Fallback loop in case executor exits

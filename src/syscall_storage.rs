@@ -116,3 +116,39 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u64) -> u64 {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+//  Filesystem helper (fs/fd scope only). These are NOT syscall handlers; they
+//  are thin, binary-safe wrappers that let the future exec/load path pull a
+//  program (e.g. `/bin/hello`) out of the filesystem by full path. They live
+//  here so callers that already import syscall_storage can reach them without
+//  touching the `fs` module directly.
+// ---------------------------------------------------------------------------
+
+/// Reads the full contents of `path` (absolute or relative) as raw bytes,
+/// resolving through the SPFS root mount. Binary-safe: returns the exact ELF
+/// bytes of a seeded builtin program, not a UTF-8-decoded string.
+pub fn fs_read_file_bytes(path: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    crate::fs::read_file_from_path(path)
+}
+
+/// Reads `len` bytes at `offset` from `path` into `buf`. Returns the number of
+/// bytes actually read (0 at EOF). This is the chunked primitive an exec loader
+/// would use to page a userland image in from the SPFS.
+pub fn fs_read_file_chunk(
+    path: &str,
+    offset: usize,
+    buf: &mut [u8],
+) -> Result<usize, &'static str> {
+    crate::fs::read_file_from_path_chunk(path, offset, buf)
+}
+
+/// Full-path existence probe (covers both seeded binaries and SPFS text files).
+pub fn fs_path_exists(path: &str) -> bool {
+    crate::fs::file_exists(path)
+}
+
+/// Full-path size probe (bytes). Mirrors `get_file_size_from_path`.
+pub fn fs_path_size(path: &str) -> Result<usize, &'static str> {
+    crate::fs::get_file_size_from_path(path)
+}

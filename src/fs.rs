@@ -115,23 +115,30 @@ pub fn sync_to_disk() -> Result<(), &'static str> {
         let root = VFS.lock();
         serialize(&*root, &mut buf);
     }
-    
+
     let size = buf.len() as u32;
     let mut header = [0u8; 512];
     header[0..4].copy_from_slice(&size.to_le_bytes());
     header[4..8].copy_from_slice(b"SPFS"); // SPark File System
-    
+
+    // Disk may be absent (boot ISO / QEMU without a data drive). In that case
+    // the filesystem runs as an in-memory (RAM) FS — never let a missing disk
+    // hang or hard-fail boot. All drops to Ok; writes are best-effort.
     let mut drive = crate::ata::DATA_DRIVE.lock();
-    drive.write_sector(0, &header)?;
-    
+    if drive.write_sector(0, &header).is_err() {
+        return Ok(());
+    }
+
     let mut lba = 1;
     for chunk in buf.chunks(512) {
         let mut sec = [0u8; 512];
         sec[..chunk.len()].copy_from_slice(chunk);
-        drive.write_sector(lba, &sec)?;
+        if drive.write_sector(lba, &sec).is_err() {
+            break;
+        }
         lba += 1;
     }
-    
+
     Ok(())
 }
 
@@ -140,41 +147,64 @@ pub fn init_default_fs() {
     let _ = mkdir("/etc");
     let _ = mkdir("/home");
     let _ = mkdir("/sys");
+    // Fresh/empty filesystem: make sure distro seeds exist too.
+    seed_default_files();
 }
 
 pub fn load_from_disk() {
-    let mut drive = crate::ata::DATA_DRIVE.lock();
+    let r = {
+        let mut drive = crate::ata::DATA_DRIVE.lock();
+        let mut hdr = [0u8; 512];
+        drive.read_sector(0, &mut hdr)
+    }; // drop(drive): guard must be released before init_default_fs,
+       // which also locks DATA_DRIVE (via sync_to_disk) -> would deadlock.
+    if r.is_err() {
+        init_default_fs();
+        return;
+    }
+
+    // Re-read header with a fresh short-lived guard.
     let mut header = [0u8; 512];
-    if drive.read_sector(0, &mut header).is_err() { 
-        init_default_fs();
-        return; 
-    }
-    
-    if &header[4..8] != b"SPFS" { 
-        init_default_fs();
-        return; 
-    }
-    
-    let size = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-    if size == 0 || size > 10 * 1024 * 1024 { 
-        init_default_fs();
-        return; 
-    }
-    
-    let num_sectors = (size + 511) / 512;
-    let mut data = alloc::vec![0u8; num_sectors * 512];
-    
-    for i in 0..num_sectors {
-        let mut sec = [0u8; 512];
-        if drive.read_sector(1 + i as u32, &mut sec).is_ok() {
-            data[i * 512 .. (i+1) * 512].copy_from_slice(&sec);
+    {
+        let mut drive = crate::ata::DATA_DRIVE.lock();
+        if drive.read_sector(0, &mut header).is_err() {
+            init_default_fs();
+            return;
         }
     }
-    
+
+    if &header[4..8] != b"SPFS" {
+        init_default_fs();
+        return;
+    }
+
+    let size = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+    if size == 0 || size > 10 * 1024 * 1024 {
+        init_default_fs();
+        return;
+    }
+
+    let num_sectors = (size + 511) / 512;
+    let mut data = alloc::vec![0u8; num_sectors * 512];
+
+    {
+        let mut drive = crate::ata::DATA_DRIVE.lock();
+        for i in 0..num_sectors {
+            let mut sec = [0u8; 512];
+            if drive.read_sector(1 + i as u32, &mut sec).is_ok() {
+                data[i * 512..(i + 1) * 512].copy_from_slice(&sec);
+            }
+        }
+    }
+
     let mut offset = 0;
     if let Some(node) = deserialize(&data[..size], &mut offset) {
         *VFS.lock() = node;
     }
+
+    // Populate builtin userland binaries + first-boot config files. Idempotent,
+    // runs on every boot regardless of the on-disk state.
+    seed_default_files();
 }
 
 pub fn resolve_path(cwd: &str, path: &str) -> String {
@@ -579,5 +609,188 @@ pub fn write_file_chunk(path: &str, offset: usize, buf: &[u8]) -> Result<usize, 
     drop(root);
     sync_to_disk()?;
     Ok(buf.len())
+}
+
+// ============================================================================
+//  Distro-seed / builtin userland infrastructure
+// ============================================================================
+//
+//  A `SeededBlob` is a compile-time embedded byte array registered under a
+//  full filesystem path (e.g. `/bin/hello`). Seeds are made available at every
+//  boot, independent of the ATA disk state, so a freshly booted kernel can
+//  always read them back byte-for-byte. This is the FS half of the distro
+//  userland bootstrap: the kernel owns a small set of builtin programs and
+//  config files, and the future `exec` path reads their bytes via
+//  `read_file_from_path`.
+//
+//  NOTE: an ELF is arbitrary binary data and must NOT flow through the UTF-8
+//  `String` content of `FsNode::File`. Binary seeds are therefore kept in a
+//  dedicated, binary-safe static store. Text seeds (e.g. `/etc/hostname`) are
+//  materialized into the normal SPFS tree for the first few boots only.
+
+pub struct SeededBlob {
+    /// Full absolute path, e.g. `/bin/hello`.
+    pub path: &'static str,
+    /// Embedded raw bytes (ELF in the case of a userland binary).
+    pub data: &'static [u8],
+    /// Human-readable description used in boot log output.
+    pub desc: &'static str,
+}
+
+/// Compile-time embedded userland binaries. On boot these become readable at
+/// their registered paths (`/bin/hello`).
+pub const SEEDED_BINARIES: &[SeededBlob] = &[
+    SeededBlob {
+        path: "/bin/hello",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "hello.elf userland binary",
+    },
+];
+
+/// Compile-time seeded text configuration, installed on first boot only
+/// (existing user content is preserved on later boots).
+pub const SEEDED_TEXT: &[(&'static str, &'static str)] = &[
+    ("/etc/hostname", "sparkos\n"),
+    ("/etc/version", "0.1.0-distro\n"),
+];
+
+/// Binary-safe store for seeded blobs. Populated once by `seed_default_files`.
+/// Uses a Mutex of a keyed table; each entry holds its bytes in a binary `Vec`.
+static BLOB_STORE: spin::Lazy<Mutex<Vec<(String, Vec<u8>)>>> =
+    spin::Lazy::new(|| Mutex::new(Vec::new()));
+
+/// The root mount point. The `/` namespace is backed by the SPFS instance held
+/// in `VFS`; binary seeds are overlaid on top of it (shadowing reads with exact
+/// bytes) but do not replace the tree.
+pub const ROOT_MOUNT: &str = "/";
+
+/// Register all compile-time seeded binaries into the binary-safe store and
+/// materialize them as filesystem nodes so they also appear in `/bin` listings.
+/// Idempotent: safe to call multiple times.
+pub fn seed_default_files() {
+    // (1) Binary programs -> byte store + tree placeholder node.
+    for blob in SEEDED_BINARIES {
+        let already = {
+            let store = BLOB_STORE.lock();
+            store.iter().any(|(p, _)| p == blob.path)
+        };
+        if !already {
+            BLOB_STORE.lock().push((blob.path.to_string(), blob.data.to_vec()));
+            // Create a placeholder File node so `list_dir("/bin")` shows it.
+            let _ = write_file_quiet(blob.path, "");
+        }
+    }
+
+    // (2) Text config -> SPFS tree, first boot only (preserve user edits).
+    for (path, content) in SEEDED_TEXT {
+        if read_file(path).is_err() {
+            let _ = write_file_quiet(path, content);
+        }
+    }
+
+    crate::serial_println!(
+        "[FS] seeded {} binaries, {} text config files",
+        SEEDED_BINARIES.len(),
+        SEEDED_TEXT.len()
+    );
+}
+
+/// `write_file` wrapper that never syncs to disk and never errors on
+/// duplicate writes (used during seeding to avoid perturbing the disk image).
+fn write_file_quiet(path: &str, content: &str) -> Result<(), &'static str> {
+    if path == "/" { return Err("Root uzerine yazi yazilamaz"); }
+
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return Err("Gecersiz yol"); }
+
+    let name = parts.last().unwrap();
+    let parent_path = if parts.len() == 1 {
+        "/".to_string()
+    } else {
+        let mut p = String::new();
+        for i in 0..parts.len() - 1 {
+            p.push('/');
+            p.push_str(parts[i]);
+        }
+        p
+    };
+
+    let mut root = VFS.lock();
+    let Some(children) = find_dir(&mut root, &parent_path) else {
+        return Err("Ust dizin bulunamadi");
+    };
+    for child in children.iter_mut() {
+        if child.name() == *name {
+            if let FsNode::File { content: ref mut c, .. } = child {
+                *c = content.to_string();
+            }
+            return Ok(());
+        }
+    }
+    children.push(FsNode::File {
+        name: name.to_string(),
+        content: content.to_string(),
+    });
+    Ok(())
+}
+
+/// Returns whether `path` is backed by a seeded binary byte-for-byte.
+pub fn is_seeded_binary(path: &str) -> bool {
+    let store = BLOB_STORE.lock();
+    store.iter().any(|(p, _)| p == path)
+}
+
+/// Like BLOB_STORE but for the normal UTF-8 tree path. Convenience for the
+/// upcoming exec integration to detect "this path is a real file".
+pub fn file_exists(path: &str) -> bool {
+    if is_seeded_binary(path) { return true; }
+    if is_dir(path) { return true; }
+    read_file(path).is_ok()
+}
+
+/// Full-path byte reader: the future `exec` integration will call this to pull
+/// a user binary (e.g. `/bin/hello`) out of the filesystem as raw bytes.
+///
+/// Resolution order:
+///   1. If a seeded binary is registered, return its exact bytes.
+///   2. Otherwise fall back to the UTF-8 SPFS tree and return those bytes.
+pub fn read_file_from_path(path: &str) -> Result<Vec<u8>, &'static str> {
+    // Normalize the path so "/bin/hello" and "bin/hello" resolve the same.
+    let norm = resolve_path(ROOT_MOUNT, path);
+
+    // Binary seed takes priority (byte-exact ELF content).
+    {
+        let store = BLOB_STORE.lock();
+        for (registered, bytes) in store.iter() {
+            if registered == &norm {
+                return Ok(bytes.clone());
+            }
+        }
+    }
+
+    // Fallback: normal SPFS text file -> UTF-8 bytes.
+    read_file(&norm).map(|s| s.into_bytes())
+}
+
+/// Chunked byte reader from a full path. Mirrors the FS `read_file_chunk`
+/// contract (returns number of bytes written into `buf`) but is binary-safe
+/// and path-based, so exec/fd layers can page a program in from disk.
+pub fn read_file_from_path_chunk(
+    path: &str,
+    offset: usize,
+    buf: &mut [u8],
+) -> Result<usize, &'static str> {
+    let bytes = read_file_from_path(path)?;
+    if offset >= bytes.len() {
+        return Ok(0);
+    }
+    let n = core::cmp::min(buf.len(), bytes.len() - offset);
+    buf[..n].copy_from_slice(&bytes[offset..offset + n]);
+    Ok(n)
+}
+
+/// Hard-coded metadata helper mirroring `get_file_size` for full paths.
+pub fn get_file_size_from_path(path: &str) -> Result<usize, &'static str> {
+    Ok(read_file_from_path(path)?.len())
 }
 

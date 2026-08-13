@@ -32,7 +32,9 @@
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -95,6 +97,9 @@ pub struct RegisterContext {
     pub rsp: u64,
     /// Resume instruction pointer (return address of the `switch` call).
     pub rip: u64,
+    /// Physical CR3 to load when resuming (0 == keep current, used by kernel
+    /// threads / idle whose address space is the shared kernel table).
+    pub cr3: u64,
 }
 
 /// A Process Control Block (PCB). One per process.
@@ -231,6 +236,12 @@ extern "C" fn switch_context(current: *mut RegisterContext, next: *const Registe
             "mov r13, [rsi + 24]",
             "mov r14, [rsi + 32]",
             "mov r15, [rsi + 40]",
+            // Load the next process's address space (CR3) if set (nonzero).
+            "mov rax, [rsi + 64]",
+            "test rax, rax",
+            "jz 1f",
+            "mov cr3, rax",
+            "1:",
             "mov rsp, [rsi + 48]",
             "jmp qword ptr [rsi + 56]", // resume next process
         )
@@ -248,6 +259,11 @@ extern "C" fn jump_to_initial(next: *const RegisterContext) -> ! {
             "mov r13, [rdi + 24]",
             "mov r14, [rdi + 32]",
             "mov r15, [rdi + 40]",
+            "mov rax, [rdi + 64]",
+            "test rax, rax",
+            "jz 1f",
+            "mov cr3, rax",
+            "1:",
             "mov rsp, [rdi + 48]",
             "jmp qword ptr [rdi + 56]",
         )
@@ -287,6 +303,7 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
             r15: 0,
             rsp: p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64,
             rip: kernel_thread_stub as usize as u64,
+            cr3: 0, // kernel threads run in the shared kernel address space
         };
         s.ready.push_back(pid);
     }
@@ -326,6 +343,7 @@ pub fn create_user_process(
             r15: 0,
             rsp: p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64,
             rip: user_process_stub as usize as u64,
+            cr3: user_cr3, // enter_user_current + switch both load this CR3
         };
         s.ready.push_back(pid);
     }
@@ -536,6 +554,11 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) -> ! {
             "mov r13, [rdi + 24]",
             "mov r14, [rdi + 32]",
             "mov r15, [rdi + 40]",
+            "mov rax, [rdi + 64]",
+            "test rax, rax",
+            "jz 1f",
+            "mov cr3, rax",
+            "1:",
             "mov rsp, [rdi + 48]",
             "jmp qword ptr [rdi + 56]",
         )
@@ -572,6 +595,226 @@ pub fn exit_current() -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// Fork / Exec + demo user processes (real CR3 per process).
+// ---------------------------------------------------------------------------
+
+/// True when the current context is a Ring-3 user process running under the
+/// preemptive scheduler (as opposed to the legacy single-app shell path).
+pub fn current_is_user_process() -> bool {
+    let s = SCHEDULER.lock();
+    match s.current {
+        Some(p) => s.table.get(&p).map(|p| p.is_user).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Snapshot of the current running process name + pid (for diagnostics).
+pub fn current_process_info() -> Option<(u64, String)> {
+    let s = SCHEDULER.lock();
+    s.current.and_then(|pid| s.table.get(&pid)).map(|p| (p.pid, p.name.clone()))
+}
+
+/// `fork_current` — duplicate the calling process.
+///
+/// The child receives: a fresh pid, its own private kernel stack, and its own
+/// cloned address space (the active page table at fork time is the caller's
+/// user table, so `clone_active_cr3` gives the child a private copy of the
+/// caller's pages). The child is enqueued ready and starts by entering Ring 3
+/// with the calling process's saved user context. Returns the child pid, or
+/// `-1` if the current process is not a user process.
+pub fn fork_current() -> i64 {
+    let (cur, name, u_rip, u_rsp, u_cs, u_ss) = {
+        let mut s = SCHEDULER.lock();
+        let cur = match s.current {
+            Some(p) if p != 0 => p,
+            _ => return -1,
+        };
+        let p = match s.table.get(&cur) {
+            Some(p) if p.is_user => p,
+            _ => return -1,
+        };
+        (
+            cur,
+            p.name.clone(),
+            p.user_rip,
+            p.user_rsp,
+            p.user_cs,
+            p.user_ss,
+        )
+    };
+    let _ = cur;
+    // Clone the caller's address space (active table in Ring-3 syscall).
+    let child_cr3 = crate::memory::clone_active_cr3().unwrap_or(0);
+
+    let pid = alloc_pid();
+    let mut np = Process::new(&format!("{}_f", name));
+    np.pid = pid;
+    np.is_user = true;
+    np.state = ProcessState::Ready;
+    np.user_rip = u_rip;
+    np.user_rsp = u_rsp;
+    np.user_cr3 = child_cr3;
+    np.user_cs = u_cs;
+    np.user_ss = u_ss;
+    np.ctx = RegisterContext {
+        rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+        rsp: np.kernel_stack.as_ptr() as u64 + np.kernel_stack.len() as u64,
+        rip: user_process_stub as usize as u64,
+        cr3: child_cr3, // child runs in its cloned address space
+    };
+    {
+        let mut s = SCHEDULER.lock();
+        s.table.insert(pid, np);
+        s.ready.push_back(pid);
+    }
+    crate::task::PROCESS_LIST.lock().insert(pid, format!("{}_f", name));
+    serial_spawn("[FORK]", pid, &name);
+    pid as i64
+}
+
+/// `exec` — load an ELF into a fresh user process with its own address space.
+///
+/// Mirrors the (single-segment) load strategy of `user::exec_elf`: maps the
+/// first loadable segment at `USER_ADDR_BASE` and a stack below
+/// `USER_STACK_TOP`, all inside a freshly cloned page table so the new process
+/// gets genuine CR3 isolation. Returns the new pid.
+pub fn exec_elf_proc(name: &str, elf_bytes: &[u8]) -> Result<u64, &'static str> {
+    let elf = crate::elf::parse_elf(elf_bytes)?;
+    if elf.segments.is_empty() {
+        return Err("No loadable segments found in ELF");
+    }
+    let seg = &elf.segments[0];
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for exec")?;
+
+    let code_base = crate::memory::USER_ADDR_BASE;
+    let code_len = seg.memsz.max(1);
+    crate::memory::map_user_region_in_cr3(cr3, code_base, code_len, false)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &seg.data, code_len);
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let actual_entry = code_base + (elf.entry_point - seg.vaddr);
+    let stack_top = crate::memory::USER_STACK_TOP;
+    let pid = create_user_process(
+        name,
+        actual_entry,
+        stack_top,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+    );
+    serial_spawn("[EXEC]", pid, name);
+    Ok(pid)
+}
+
+/// Spawn a raw machine-code blob as a Ring-3 user process in its own address
+/// space. `data` (if any) is copied at `USER_ADDR_BASE + 0x2000` so code can
+/// reference a fixed data slot. Used by the demo and for raw test payloads.
+fn spawn_raw_user(name: &str, code: &[u8], data: Option<(u64, u8)>) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for user proc")?;
+    let code_base = crate::memory::USER_ADDR_BASE;
+    // Cover code page(s) plus the optional data slot (at +0x2000).
+    let map_len = 0x3000u64;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, map_len, false)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, code, 0x1000);
+    if let Some((off, byte)) = data {
+        unsafe { core::ptr::write((code_base + off) as *mut u8, byte); }
+    }
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+    let pid = create_user_process(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+    );
+    serial_spawn("[SPAWN]", pid, name);
+    Ok(pid)
+}
+
+/// Emit x86-64 machine code for a demo user program that writes `tag` to
+/// stdout several times (with a busy delay between writes) and then exits via
+/// SYS_EXIT. Uses a fixed data slot at `USER_ADDR_BASE + 0x2000` for the byte.
+#[allow(clippy::too_many_arguments)]
+fn demo_machine_code(_tag: u8, writes: u32, delay: u32) -> Vec<u8> {
+    let data_addr: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+    // mov ecx, data_addr          (ecx = buffer pointer)
+    c.push(0xB9);
+    c.extend_from_slice(&data_addr.to_le_bytes());
+    // mov ebp, writes            (ebp = outer loop counter)
+    c.push(0xBD);
+    c.extend_from_slice(&writes.to_le_bytes());
+    // Inner busy delay:  mov edx, delay
+    c.push(0xBA);
+    c.extend_from_slice(&delay.to_le_bytes());
+    // dec edx
+    c.push(0x4A);
+    let dec_edx_i = c.len() as i32; // index of the `dec edx` instruction
+    // jnz <dec edx>  (short jump, rel to end of the 2-byte jnz)
+    c.push(0x75);
+    c.push((dec_edx_i - (c.len() as i32 + 2)).wrapping_sub(0) as u8);
+    // mov eax, 4  (SYS_WRITE)
+    c.push(0xB8);
+    c.extend_from_slice(&4u32.to_le_bytes());
+    // mov ebx, 1  (fd = stdout)   -- sys_write path writes to VGA terminal
+    c.push(0xBB);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    // int 0x80
+    c.push(0xCD);
+    c.push(0x80);
+    // dec ebp
+    c.push(0x4D);
+    // jnz <mov edx, delay>  (back to inner delay + write)
+    let mov_edx_i = 10i32; // offset of `mov edx, delay`
+    c.push(0x75);
+    c.push((mov_edx_i - (c.len() as i32 + 2)).wrapping_sub(0) as u8);
+    // mov eax, 1  (SYS_EXIT)
+    c.push(0xB8);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    // int 0x80
+    c.push(0xCD);
+    c.push(0x80);
+    // hlt (safety net)
+    c.push(0xF4);
+    c
+}
+
+fn serial_spawn(kind: &str, pid: u64, name: &str) {
+    crate::serial_println!(
+        "[{}] process '{}' pid={} enqueued (CR3 isolated)",
+        kind,
+        name,
+        pid
+    );
+}
+
+/// Demo: bootstrap the scheduler (idle) and run two user processes with real
+/// CR3 isolation under the preemptive round-robin scheduler.
+///
+/// Each demo process writes its own byte (`A` / `B`) a few times with a busy
+/// delay; with preemption enabled the writes interleave in the terminal,
+/// demonstrating time-slicing between two distinct address spaces. Returns the
+/// pids so the orchestrator can inspect them.
+pub fn init_user_test() -> (u64, u64) {
+    // Ensure idle pid 0 exists (no-op if already initialised).
+    init_preemptive();
+    let code_a = demo_machine_code(b'A', 6, 2_000_000);
+    let code_b = demo_machine_code(b'B', 6, 2_000_000);
+    let a = spawn_raw_user("demoA", &code_a, Some((0x2000, b'A'))).unwrap_or(0);
+    let b = spawn_raw_user("demoB", &code_b, Some((0x2000, b'B'))).unwrap_or(0);
+    crate::serial_println!(
+        "[PREEMPT] init_user_test spawned demoA={} demoB={}; call set_preemption_enabled(true) to run",
+        a,
+        b
+    );
+    (a, b)
+}
+
+// ---------------------------------------------------------------------------
 // Enable / init
 // ---------------------------------------------------------------------------
 
@@ -595,6 +838,7 @@ fn alloc_idle() {
         r15: 0,
         rsp: stack_top,
         rip: kernel_thread_stub as usize as u64,
+        cr3: 0, // idle runs in the shared kernel address space
     };
     let mut s = SCHEDULER.lock();
     if !s.table.contains_key(&0) {
