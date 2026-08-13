@@ -13,6 +13,9 @@ pub enum FsNode {
     Directory {
         name: String,
         children: Vec<FsNode>,
+    },
+    Device {
+        name: String,
     }
 }
 
@@ -21,6 +24,7 @@ impl FsNode {
         match self {
             FsNode::File { name, .. } => name,
             FsNode::Directory { name, .. } => name,
+            FsNode::Device { name } => name,
         }
     }
     
@@ -57,6 +61,12 @@ fn serialize(node: &FsNode, buf: &mut Vec<u8>) {
                 serialize(child, buf);
             }
         }
+        FsNode::Device { name } => {
+            buf.push(3); // Device
+            let name_bytes = name.as_bytes();
+            buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name_bytes);
+        }
     }
 }
 
@@ -88,6 +98,12 @@ fn deserialize(data: &[u8], offset: &mut usize) -> Option<FsNode> {
             }
         }
         Some(FsNode::Directory { name, children })
+    } else if typ == 3 {
+        let name_len = u32::from_le_bytes(data[*offset..*offset+4].try_into().ok()?) as usize;
+        *offset += 4;
+        let name = core::str::from_utf8(&data[*offset..*offset+name_len]).ok()?.to_string();
+        *offset += name_len;
+        Some(FsNode::Device { name })
     } else {
         None
     }
@@ -438,3 +454,130 @@ pub fn is_dir(path: &str) -> bool {
     let root = VFS.lock();
     find_dir_ro(&root, path).is_some()
 }
+
+pub fn get_file_size(path: &str) -> Result<usize, &'static str> {
+    if path == "/" { return Err("Bu bir dizin"); }
+    
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return Err("Gecersiz yol"); }
+    
+    let name = parts.last().unwrap();
+    let parent_path = if parts.len() == 1 {
+        "/".to_string()
+    } else {
+        let mut p = String::new();
+        for i in 0..parts.len() - 1 {
+            p.push('/');
+            p.push_str(parts[i]);
+        }
+        p
+    };
+    
+    let root = VFS.lock();
+    if let Some(children) = find_dir_ro(&root, &parent_path) {
+        for child in children.iter() {
+            if child.name() == *name {
+                if let FsNode::File { content, .. } = child {
+                    return Ok(content.len());
+                } else {
+                    return Err("Bu bir dizin veya cihaz!");
+                }
+            }
+        }
+        Err("Dosya bulunamadi")
+    } else {
+        Err("Ust dizin bulunamadi")
+    }
+}
+
+pub fn read_file_chunk(path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+    if path == "/" { return Err("Bu bir dizin"); }
+    
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return Err("Gecersiz yol"); }
+    
+    let name = parts.last().unwrap();
+    let parent_path = if parts.len() == 1 {
+        "/".to_string()
+    } else {
+        let mut p = String::new();
+        for i in 0..parts.len() - 1 {
+            p.push('/');
+            p.push_str(parts[i]);
+        }
+        p
+    };
+    
+    let root = VFS.lock();
+    if let Some(children) = find_dir_ro(&root, &parent_path) {
+        for child in children.iter() {
+            if child.name() == *name {
+                if let FsNode::File { content, .. } = child {
+                    let bytes = content.as_bytes();
+                    if offset >= bytes.len() {
+                        return Ok(0);
+                    }
+                    let len = core::cmp::min(buf.len(), bytes.len() - offset);
+                    buf[..len].copy_from_slice(&bytes[offset..offset + len]);
+                    return Ok(len);
+                } else {
+                    return Err("Bu bir dizin veya cihaz!");
+                }
+            }
+        }
+        Err("Dosya bulunamadi")
+    } else {
+        Err("Ust dizin bulunamadi")
+    }
+}
+
+pub fn write_file_chunk(path: &str, offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+    if path == "/" { return Err("Root uzerine yazi yazilamaz"); }
+    
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return Err("Gecersiz yol"); }
+    
+    let name = parts.last().unwrap();
+    let parent_path = if parts.len() == 1 {
+        "/".to_string()
+    } else {
+        let mut p = String::new();
+        for i in 0..parts.len() - 1 {
+            p.push('/');
+            p.push_str(parts[i]);
+        }
+        p
+    };
+
+    let mut root = VFS.lock();
+    if let Some(children) = find_dir(&mut root, &parent_path) {
+        let mut found = false;
+        for child in children.iter_mut() {
+            if child.name() == *name {
+                if let FsNode::File { content: ref mut content_str, .. } = child {
+                    let mut bytes = content_str.as_bytes().to_vec();
+                    if offset + buf.len() > bytes.len() {
+                        bytes.resize(offset + buf.len(), 0);
+                    }
+                    bytes[offset..offset + buf.len()].copy_from_slice(buf);
+                    
+                    *content_str = alloc::string::String::from_utf8(bytes).map_err(|_| "Gecersiz UTF-8 verisi")?;
+                    found = true;
+                    break;
+                } else {
+                    return Err("Bu bir dizin veya cihaz, dosya degil!");
+                }
+            }
+        }
+        if !found {
+            return Err("Dosya bulunamadi");
+        }
+    } else {
+        return Err("Ust dizin bulunamadi");
+    }
+    
+    drop(root);
+    sync_to_disk()?;
+    Ok(buf.len())
+}
+
