@@ -1,6 +1,11 @@
-# SPARKOS EVRIM — 5 Asamali Detayli Plan (v2)
+# SPARKOS EVRIM — 5 Asamali Detayli Plan (v3)
 
 > Oncelik: MIGRATION_PLAN.md. Bu dokuman, 5 asamanin uygulanabilir planidir.
+> **v3 (fcc-claude eleştirisi sonrasi revizyon):** Asama 2↔3 sirasi degisti.
+> fcc: "somut exploit edilebilir delik (SYS_EXEC) Asama 3'te; capability gating,
+> korunacak bir sinir yokken dusuk deger." Yeni sure: once `cap::init` boot wiring +
+> caller kimliği + SYS_EXEC exploit kapat → Asama 2 (capability gating) → 4 → 5.
+> Asama 3'un izolasyon kismi Asama 2 ile paralel gider.
 > Is bolumu: Kodlar AGY'ye yazdirilir. Eleştiri/fikir: fcc-claude (read-only).
 > Dogrulama: Hermes (build + test + QEMU). Hermes kod YAZMAZ (orkestrator),
 > sadece iskelet/glue + dogrulama + commit yapar.
@@ -22,37 +27,75 @@
 grant/transfer/lend/revoke/deref, lineage+epoch+refcount, tek spinlock.
 9/9 invariant testi gecti. Build 0 error. QEMU boot ayni.
 
+## Aşama 2.0 — Ön koşullar (fcc eleştirisiyle eklendi) 🔴
+
+**Neden:** fcc: "capability gating, korunacak bir sınır yokken düşük değer.
+Somut exploit edilebilir delik (SYS_EXEC) önce kapatılmalı." Bir köprü kurmadan
+önce köprünün iki ucu hazır olmalı: (a) capability core aktif (boot'ta init),
+(b) her syscall'ın hangi process'ten geldiği biliniyor (caller kimliği).
+
+**Kapsam:**
+1. **`cap::init()` boot'a bağla** — `main.rs` kernel başlangıcında, capability
+   core'u init et. Boot'ta ROOT process'e bootstrap capability seti ver. Asama 1'de
+   modül sadece `pub mod cap;` ile import edildi, hiçbir syscall onu kullanmıyor —
+   bu bağlantıyı şimdi kur.
+2. **Caller kimliği tanımla** — her syscall'ın hangi process'ten geldiğini
+   `syscall_dispatcher`'a ver (current_pid + process cap table). capability
+   per-process olacak (fcc: "process exit'te sahibin tüm cap'lerini temizleme;
+   caller'ın kendi tablosunda olmayan handle'ı reddetme — yoksa A, B'nin handle
+   değerini bilirse kullanabilir; generation zorlaştırır, engellemez"). →
+   `Process.cap_table: CapTable` (fd → CapHandle map).
+3. **SYS_EXEC exploit kapat** — `syscall.rs:78`'teki `from_raw_parts`'i
+   `validate_user_ptr` ile koru (canonical + user half + her page user-mapped).
+   Bu somut delik: user, kernel adresi verip kernel'ın o adresi ELF olarak
+   okumasını sağlayabilir.
+
+**Test:** SYS_EXEC'e kernel adresi verme → -EFAULT. `cap::init` boot logu çıkar.
+QEMU boot regression.
+
+**Worker:** AGY. Dosyalar: `src/cap.rs` (init + Process entegrasyon helper),
+`src/syscall.rs` (SYS_EXEC fix), `src/task/process.rs` (cap_table alanı).
+`main.rs`'e `cap::init()` çağrısını Hermes ekler.
+
 ## Aşama 2 — Syscall Yetki Kontrolu (capability → syscall koprusu)
 
-**Hedef:** capability core'unu mevcut syscall dispatcher'a bagla; her syscall,
-cagiran process'in capability cizelgesini kontrol etsin. `security.rs`'teki eski
-`Capability(u64)` bitmask'i, `cap.rs`'in handle-tabanli modeline kopru yap.
+**Hedef:** capability core'unu syscall dispatcher'a bagla; her syscall, cagiran
+process'in capability cizelgesini kontrol etsin. `security.rs`'teki eski
+`Capability(u64)` bitmask'i tamamen `cap.rs`'in `Rights`'ına cevrildi (fcc: "tek
+right sözlüğü — eşleme katmanını minimumda tut").
+```
+security.rs eski Capability(u64)  →  cap.rs Rights(u32)
+```
+Yani bitmask kanunu kaldırılır; yetki kaynağı tek: `cap.rs` handle modeli.
 
-**Surum:** Mevcut `Capability(u64)` bitmask (uid/gid tabanli) KORUNUR ama artik
-kaputalizm icin tek yetki kaynagi DEGILDIR; `cap.rs`-tabanli per-process cap table
-devreye girer. Kopru modulu: `src/syscall_cap.rs`.
+**Kopru:** `src/syscall_cap.rs` — `Process.cap_table` (fd → CapHandle) üzerinden
+doğrulama yapar.
 
 **Kapsam (syscall basina):**
-- `SYS_READ`/`SYS_WRITE`: fd'ye erisim icin capability (READ/WRITE rights)
-- `SYS_OPEN`: yeni capability olustur (object → fd mapping)
+- `SYS_READ`/`SYS_WRITE`: fd'ye erişim için capability (READ/WRITE rights)
+- `SYS_OPEN`: yeni capability oluştur (object → fd mapping)
 - `SYS_CLOSE`: capability'yi close (handle free)
-- `SYS_EXEC`/`SYS_FORK`: process baslatmak icin EXECUTE right (cap table of parent)
-- `SYS_SOCKET`/`SYS_CONNECT`/`SYS_SEND`/`SYS_RECV`: NET/IO right
-- `SYS_EXIT`/`SYS_YIELD`: yetki gerektirmez (goren islem)
+- `SYS_EXEC`/`SYS_FORK`: ELF yükleme + process başlatma için EXECUTE/SYS_ADMIN right
+- `SYS_SOCKET`/`SYS_CONNECT`/`SYS_SEND`/`SYS_RECV`: IO/NET right
+- `SYS_EXIT`/`SYS_YIELD`: yetki gerektirmez (gören işlem)
 
 **Tasarim detayi (kopru):**
-- `Process` struct'ina `cap_table: CapTable` alani ekle (fd → CapHandle map).
-- `syscall_dispatcher` her syscall'da once caller'ın cap table'ina bakar.
-- Eksik capability → `-EACCES` (ecurity) sonucu, syscall islem yapmaz.
-- ROOT (uid 0) process icin bir "bootstrap" capability seti init edilir.
+- `syscall_dispatcher` her syscall'da once caller kimliğini alır (current_pid),
+  sonra `Process.cap_table`'ına bakar.
+- Eksik capability → `-EACCES`, syscall islemi yapmaz.
+- `CapObject` artik **gerçek kaynağa bağlıdır** (fcc: "köprünün kalbi — object →
+  fd mapping): her açılan fd bir `CapObject(fd)` olur, `Process.cap_table[fd]`
+  o objenin handle'ın taşır.
 
 **Test (host):**
-- syscall_cap kopru testleri: fd acma capability'siz → EACCES, capability'li → OK.
+- syscall_cap kopru testleri: fd açma capability'siz → EACCES, capability'li → OK.
 - capability revoke sonrasi syscall → EACCES.
-- QEMU boot regression (mevcut deneme uygulamalari hala calisir olmali).
+- Caller'ın kendi tablosunda olmayan handle'ı syscall'da kullanma → red.
+- QEMU boot regression (mevcut deneme uygulamaları hala calisir olmali).
 
-**Worker:** AGY. Dosya(ler): `src/syscall_cap.rs` (copru), `src/cap.rs` (gerekli
-public API genisletilmeleri). `main.rs`'e `pub mod syscall_cap;` Hermes ekler.
+**Worker:** AGY. Dosya(ler): `src/syscall_cap.rs` (kopru), `src/cap.rs` (gerekli
+API genisletmeleri), `src/syscall.rs` (dispatcher gating). `main.rs`'e `pub mod
+syscall_cap;` Hermes ekler.
 
 ## Aşama 3 — Memory/pointer güvenliği (per-process CR3 + user ptr zorlaması)
 
@@ -93,15 +136,19 @@ icerisinde capability check + capability transfer destegi eklenir.
 
 **Kapsam:**
 - `ipc.rs`: channel capability'si (bir process'in channel'a send/recv hakk vardir).
-- Message payload yaninda `CapHandle` tasinabilir (cap transfer).
+- Message payload yaninda `CapHandle` tasinabilir.
 
-**Capability transfer kurallari (FROZEN: dequeue aninda dogrula):**
-- Mesaj kuyruktayken sender revoke ettiyse → cap slot `Revoked` isaretlenir.
+**Capability transfer kurallari (fcc dagitimi — FROZEN uyumlu):**
+- **Kalici devir** → `transfer` (callback edilemez, sahiplik aktarimi).
+- **Revoke-edilebilir gecici yetki** → `lend` (FROZEN "dequeue'da dogrula" kurali
+  LEND uzerinden tanimlanir): mesaj kuyruktayken sender lend'i iptal ederse → cap
+  slot `Revoked` isaretlenir, payload yine teslim edilir.
 - Sessiz drop YASAK.
 
 **Test:**
 - Channel capability'si olmayan process send dener → EACCES.
-- capability transfer + revoke → `Revoked` state.
+- **Lend:** lend sonrasi sender iptal → mesaj payload teslim, cap slot `Revoked`.
+- **Transfer:** transfer devir → revoke-edilemez, kalici.
 - QEMU boot regression (IPC demo hala calisir).
 
 **Worker:** AGY. Dosyalar: `src/ipc.rs`, `src/cap.rs` (transfer API).
@@ -114,39 +161,53 @@ tasimaya basla (fault isolation).
 **Surum:** Bu en buyuk ve en riskli asama. Dogrulama standardi yukselir. Asama 4
 tamamlanmadan Asama 5'e girilmez (IPC capability tabanli olmali).
 
-**Kapsam (ilk adim — kapsami dar tut):**
-- En basit driver'i (rtl8139? yok; ps2 mouse? serial) user-space servise tasi.
-- capability tabanli IPC ile kernel <-> driver arasinda protokol.
-- Driver crash → kernel etkilenmeden driver yeni baslatilabilir (fault recovery).
+**Kapsam (fcc: donanimsız servis önce, ilk donanım adayı serial):**
+- **Donanımsız servis** ile başla: örn. `keyboard` veya `fb_query` gibi bir user-space
+  servis, capability tabanlı IPC ile kernel'e erişir. Bu, servis mimarisini driver
+  karmaşıklığı olmadan doğrular.
+- İlk donanım adayı **serial** (rtl8139 QEMU'da yok; serial en basit, IOMMU gerektirmez).
+- Driver/servis crash → kernel etkilenmeden restart (fault recovery).
 
 **Test:**
-- Driver user-space'te calisir, kernel'e syscall ile erisir.
-- Driver'i force-crash et → kernel cokmez, driver restart.
+- Servis user-space'te calisir, kernel'e syscall/IPC ile erisir.
+- Servisi force-crash et → kernel cokmez, servis restart.
 - QEMU boot regression.
 
 **Worker:** AGY (paralel kanal icin fcc ile veya yalniz). En kapsamli.
 Bu asama buyuk; ayrıca alt adimlara bolunebilir.
 
-## Uygulama sirasi (bu plan icin)
+## Uygulama sirasi (fcc revizyonu — bu plan icin)
 
 ```
-Asama 2 plan + fcc eleştiri → AGY kod → dogrula → commit
+Asama 2.0 (ön koşul) + fcc eleştiri → AGY kod → dogrula → commit
          ↓
-Asama 3 plan + fcc eleştiri → AGY kod → dogrula → commit
+Asama 2 (capability gating) + fcc eleştiri → AGY kod → dogrula → commit
          ↓
-Asama 4 plan + fcc eleştiri → AGY kod → dogrula → commit
+Asama 4 (IPC capability) → Asama 5 (driver/servis)
          ↓
-Asama 5 plan + fcc eleştiri → AGY kod → dogrula → commit
+(Asama 3 izolasyon kismi — per-process CR3 — Asama 2 ile paralel gider; dogrusal
+ yapilacaksa Asama 4'ten sonra.)
 ```
 
-## Riskler ve acik sorular (fcc inceleyecek)
+## Riskler ve acik sorular (fcc eleştirisinden)
 
-1. Asama 2'de mevcut bitmask `Capability(u64)` ile yeni `cap.rs` handle modeli
-   yan yana mi yasamali, yoksa tamamen mi degistirilmeli? (Uyumluluk vs tamlik.)
-2. Asama 3'te per-process CR3 gecisinin boot'a etkisi — mevcut single address
-   space varsayimi kirilinca hangi kod patlar?
-3. Asama 4'te `BlockingChannel`'a capability eklemek, mevcut IPC demo'sunu
-   bozar mi? Geriye donuk uyumluluk stratejisi ne olmali?
-4. Asama 5'te hangi driver en dogru ilk aday? (rtl8139 QEMU'da yok.)
-5. capability table per-process mi global mi olmali? (Asama 2'de `Process`'e
-   alan eklemek mi, yoksa global map mi?)
+fcc-claude eleştirisi (2026-son, /tmp/fcc_plan_review_out.txt) işlendi:
+1. ✅ **Öncelik hatası düzeltildi** — Asama 2.0 eklendi (cap::init boot wiring +
+   caller kimliği + SYS_EXEC exploit kapat). "capability gating korunacak sınır
+   yokken düşük değer."
+2. ✅ **CapObject gerçek kaynağa bağlandı** — object→fd mapping köprünün kalbi.
+3. ✅ **Tek right sözlüğü** — eski `Capability(u64)` tamamen `cap.rs Rights`'ına
+   çevrildi, eşleme katmanı min.
+4. ✅ **Per-process cap_table** — Process'e `cap_table` (fd→CapHandle); caller'ın
+   kendi tablosunda olmayan handle reddi; process exit'te temizlik.
+5. ✅ **Asama 4: transfer→lend** ayrımı — kalıcı devir `transfer`, geçici yetki
+   `lend`; FROZEN "dequeue'da doğrula" lend üzerinden.
+6. ✅ **Asama 5: donanımsız servis önce, ilk donanım adayı serial.**
+7. ⚠️ **SMP tek global spinlock** — DEFERRED kapsamında; deref lock'u erişim
+   boyunca tutmuyor (CapAccess salınıyor) — tasarım doğru, korunacak.
+8. ⚠️ **QEMU boot regression güvenlik için yetersiz** — negatif testler (cap yok →
+   EACCES) zorunlu; boot hata vermese de yetki boş olabilir.
+
+**Açık karar:** Eski `security.rs Capability(u64)` tamamen kaldırılacak (fcc önerisi)
+— ama uid/gid temeli (Uid/Gid) KORUNUR; sadece bitmask capability katmanı
+`cap.rs Rights`'ına devredilir.
