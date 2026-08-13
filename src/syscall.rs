@@ -2,7 +2,11 @@ use crate::serial_println;
 
 pub const SYS_EXIT: u64 = 1;
 pub const SYS_WRITE: u64 = 4;
-// More syscalls can be added here, e.g. SYS_READ, SYS_YIELD
+pub const SYS_READ: u64 = 0;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
+pub const SYS_LSEEK: u64 = 8;
+// More syscalls can be added here, e.g. SYS_YIELD
 
 pub fn init() {
     serial_println!("[OK] Syscall dispatcher initialized");
@@ -14,12 +18,23 @@ pub extern "C" fn syscall_dispatcher(
     arg1: u64,
     arg2: u64,
     arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
+    arg4: u64,
+    arg5: u64,
 ) -> u64 {
     match syscall_num {
         SYS_EXIT => sys_exit(arg1),
-        SYS_WRITE => sys_write(arg1, arg2, arg3),
+        SYS_READ => crate::syscall_storage::sys_read(arg1, arg2, arg3),
+        SYS_OPEN => crate::syscall_storage::sys_open(arg1, arg2),
+        SYS_CLOSE => crate::syscall_storage::sys_close(arg1),
+        SYS_LSEEK => crate::syscall_storage::sys_lseek(arg1, arg2 as i64, arg3),
+        SYS_WRITE => {
+            // fd 1/2 (stdout/stderr) terminale, fd >= 3 dosyalara yazılır
+            if arg1 == 1 || arg1 == 2 {
+                sys_write(arg1, arg2, arg3)
+            } else {
+                crate::syscall_storage::sys_write(arg1, arg2, arg3)
+            }
+        }
         _ => {
             serial_println!("[SYSCALL] Unknown syscall number: {}", syscall_num);
             // Return an error code (e.g., -1) for unknown syscalls

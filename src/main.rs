@@ -33,6 +33,10 @@ pub mod elf;
 pub mod syscall;
 pub mod sync;
 pub mod ipc;
+pub mod fd;
+pub mod syscall_storage;
+pub mod display;
+pub mod usb;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
