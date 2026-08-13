@@ -354,7 +354,7 @@ pub fn draw_start_menu() {
 }
 
 
-pub fn draw_files_ui(x: u16, y: u16, w: u16, h: u16) {
+pub fn draw_files_ui(x: u16, y: u16, _w: u16, h: u16) {
     // Sidebar
     draw_rect(x + 2, y + 30, 120, h.saturating_sub(32), 0x001A1A1A);
     // Sidebar items
@@ -388,7 +388,7 @@ pub fn draw_notepad_ui(x: u16, y: u16, w: u16, h: u16) {
     draw_rect(x + 2, y + 30, w.saturating_sub(4), 30, 0x00E0E0E0);
 }
 
-pub fn draw_taskmgr_ui(x: u16, y: u16, w: u16, h: u16) {
+pub fn draw_taskmgr_ui(x: u16, y: u16, w: u16, _h: u16) {
     // Tabs
     draw_rect(x + 2, y + 30, w.saturating_sub(4), 30, 0x00222222);
     let mut px = x + 10;

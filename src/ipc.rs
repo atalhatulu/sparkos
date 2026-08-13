@@ -1,5 +1,4 @@
-use alloc::collections::VecDeque;
-use spin::Mutex;
+use crate::sync::BlockingChannel;
 use core::fmt::Debug;
 
 /// SparkOS Typed IPC
@@ -19,25 +18,7 @@ impl<T> Capability<T> {
 }
 
 /// Typed kanal — sadece belirli bir tipin geçmesine izin verir
-pub struct Channel<M: Send + 'static> {
-    buffer: Mutex<VecDeque<M>>,
-}
-
-impl<M: Send + 'static> Channel<M> {
-    pub const fn new() -> Self {
-        Channel {
-            buffer: Mutex::new(VecDeque::new()),
-        }
-    }
-    
-    pub fn send(&self, msg: M) {
-        self.buffer.lock().push_back(msg);
-    }
-    
-    pub fn recv(&self) -> Option<M> {
-        self.buffer.lock().pop_front()
-    }
-}
+pub type Channel<M> = BlockingChannel<M>;
 
 /// Sistem mesaj tipleri — her biri kendi alanına sahip
 #[derive(Debug)]
@@ -57,4 +38,4 @@ pub enum FileFlags {
 }
 
 // Global system IPC kanalı
-pub static SYSTEM_CHAN: Channel<SystemMessage> = Channel::new();
+pub static SYSTEM_CHAN: Channel<SystemMessage> = Channel::new(128);

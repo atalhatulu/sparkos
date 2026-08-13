@@ -186,14 +186,14 @@ impl VgaWriter {
 impl fmt::Write for VgaWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         if GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
-            let fg_u32 = match (self.color.0 & 0x0F) {
+            let fg_u32 = match self.color.0 & 0x0F {
                 0 => 0x00000000, 1 => 0x000000AA, 2 => 0x0000AA00, 3 => 0x0000AAAA,
                 4 => 0x00AA0000, 5 => 0x00AA00AA, 6 => 0x00AA5500, 7 => 0x00AAAAAA,
                 8 => 0x00555555, 9 => 0x005555FF, 10 => 0x0055FF55, 11 => 0x0055FFFF,
                 12 => 0x00FF5555, 13 => 0x00FF55FF, 14 => 0x00FFFF55, 15 => 0x00FFFFFF,
                 _ => 0x00FFFFFF,
             };
-            let bg_u32 = match (self.color.0 >> 4) {
+            let bg_u32 = match self.color.0 >> 4 {
                 0 => 0x001E1E1E, // Siyah yerine terminal gri
                 1 => 0x000000AA, 2 => 0x0000AA00, 3 => 0x0000AAAA,
                 4 => 0x00AA0000, 5 => 0x00AA00AA, 6 => 0x00AA5500, 7 => 0x00AAAAAA,

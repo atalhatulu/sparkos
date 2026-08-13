@@ -36,7 +36,7 @@ pub fn init_idt() {
     
     // Syscall (Ring 3 accessible)
     unsafe {
-        idt[0x80].set_handler_addr(x86_64::VirtAddr::new(syscall_entry as u64))
+        idt[0x80].set_handler_addr(x86_64::VirtAddr::new(syscall_entry as *const () as u64))
             .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
     }
     
