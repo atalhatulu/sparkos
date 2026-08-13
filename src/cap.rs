@@ -64,6 +64,8 @@ pub enum ObjectKind {
     Device,
     Endpoint,
     Generic,
+    Fd,
+    Process,
 }
 
 pub struct CapNode {
@@ -145,6 +147,15 @@ pub fn init() {
         nodes: Vec::new(),
         objects: Vec::new(),
     });
+}
+
+/// Root capability'sini olusturup dondurur. Boot'ta root process'e verilir.
+/// ObjectKind::Process tipinde bir obje yaratir ve temel yetkileri (READ|WRITE|
+/// MAP|EXECUTE) ile bir handle doner. Asama 2.0 (fcc ön koşulu): capability core'un
+/// boot'ta aktiflesmesi icin cagrilir — main.rs'te `cap::init()` + `bootstrap_root()`.
+pub fn bootstrap_root() -> Result<CapHandle> {
+    let root = create_object(ObjectKind::Process)?;
+    grant(root, Rights(1 | 2 | 4 | 256)) // READ|WRITE|MAP|EXECUTE
 }
 
 pub fn create_object(kind: ObjectKind) -> Result<CapHandle> {

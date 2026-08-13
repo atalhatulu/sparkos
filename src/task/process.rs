@@ -127,6 +127,11 @@ pub struct Process {
     /// Result of a user process that exited.
     pub exit_code: u64,
     pub exited: bool,
+    /// Caller'ın capability handle'larının tutuldugu per-process tablo (fd -> CapHandle).
+    /// Asama 2.0 (fcc ön koşulu — caller kimliği): her syscall caller'ın kendi tablosuna
+    /// bakar; kendi tablosunda olmayan handle kullanilamaz. Process exit'te tum handle'lar
+    /// temizlenir.
+    pub cap_table: alloc::vec::Vec<(u32, crate::cap::CapHandle)>,
 }
 
 impl Process {
@@ -148,6 +153,7 @@ impl Process {
             kernel_rip: 0,
             exit_code: 0,
             exited: false,
+            cap_table: alloc::vec::Vec::new(),
         }
     }
 }

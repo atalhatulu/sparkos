@@ -205,6 +205,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     // Syscall dispatcher (Linux/SysV ABI, int 0x80 üzerinden)
     syscall::init();
+
+    // Asama 2.0 (fcc ön koşulu): capability core aktiflesir. BOOTTA init edilir;
+    // ROOT capability (ObjectKind::Process) olusturulur. Bu olmadan capability
+    // core tum syscall'lar icin pasifti.
+    cap::init();
+    if let Ok(_root) = cap::bootstrap_root() {
+        serial_println!("[OK] Capability core initialized (root capability)");
+    } else {
+        serial_println!("[ERR] Capability core init FAILED");
+    }
     
     serial_println!("[OK] Initializing PIC...");
     interrupts::init_pic();

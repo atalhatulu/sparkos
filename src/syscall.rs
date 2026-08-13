@@ -73,6 +73,12 @@ pub extern "C" fn syscall_dispatcher(
         SYS_EXEC => {
             // exec(elf_ptr, len): build a fresh user process from ELF bytes.
             serial_println!("[SYSCALL] SYS_EXEC ({:#x}, {}) from Ring 3", arg1, arg2);
+            // Asama 2.0 (fcc exploit tespiti): kernel adresini vererek kernel'ın
+            // o adresi ELF olarak okumasini engelle. User pointer zorunlu.
+            if check_user_read(arg1, arg2 as usize).is_err() {
+                serial_println!("[SYSCALL] SYS_EXEC Error: invalid user buffer (EFAULT)");
+                return EFAULT;
+            }
             match crate::task::process::exec_elf_proc(
                 "execd",
                 unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) },
