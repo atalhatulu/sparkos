@@ -19,3 +19,7 @@ Thumbs.db
 
 # Local scratch/tryout artifacts
 /scratch/
+
+# Geçici ajan raporları (kalıcı doküman değil)
+*_RAPORU.md
+WORKING_KERNEL_ROADMAP.md

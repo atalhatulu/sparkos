@@ -17,6 +17,7 @@ pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_WRITE: u64 = 4;
 pub const SYS_LSEEK: u64 = 8;
+pub const SYS_YIELD: u64 = 9;
 
 /// Static table of all supported system calls in SparkOS 1.0.
 pub static SYSCALLS: &[SyscallInfo] = &[
@@ -49,6 +50,11 @@ pub static SYSCALLS: &[SyscallInfo] = &[
         number: SYS_LSEEK,
         name: "sys_lseek",
         description: "Reposition the file offset of a file descriptor.",
+    },
+    SyscallInfo {
+        number: SYS_YIELD,
+        name: "sys_yield",
+        description: "Cooperatively yield the CPU so other kernel tasks progress.",
     },
 ];
 

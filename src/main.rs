@@ -132,6 +132,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     // Heap (GUI buffer için önce heap başlatılmalı)
     allocator::init_heap(boot_info.physical_memory_offset, &boot_info.memory_map);
+    // Dedicated user-space frame pool (syscall/user izolasyonu için)
+    memory::init_user_memory(&boot_info.memory_map);
 
     // VGA çıktı
     vga_buffer::WRITE_LOCK.lock().clear();
@@ -220,11 +222,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Şimdilik shell başlat
     
     serial_println!("[OK] Enabling interrupts...");
+    // Initialize async keyboard scancode queue BEFORE enabling interrupts
+    // so the first timer/keyboard IRQ never sees an uninitialized queue.
+    task::keyboard::init();
+
     x86_64::instructions::interrupts::enable();
     serial_println!("[OK] Interrupts enabled");
-    
-    // Initialize async keyboard scancode queue
-    task::keyboard::init();
     
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "\n[OK] Loading filesystem from ATA disk...\n").unwrap();
     fs::load_from_disk();

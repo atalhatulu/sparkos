@@ -1,5 +1,6 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::instructions::port::Port;
+use x86_64::PrivilegeLevel;
 use crate::serial_println;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -229,17 +230,60 @@ extern "C" fn syscall_handler_inner(num: u64, arg1: u64, arg2: u64, arg3: u64, a
 
 // ========== Page fault ==========
 
+/// Returns `true` when the fault originated from a Ring-3 (user) context.
+/// The CPU saves the user code selector's RPL bits in the interrupt stack
+/// frame; RPL == 3 means the faulting instruction ran in user mode.
+fn fault_from_user(stack: &InterruptStackFrame) -> bool {
+    stack.code_segment.rpl() == PrivilegeLevel::Ring3
+}
+
+/// Aborts the faulting user task without returning to it.
+///
+/// Mirrors `sys_exit`: it clobbers the interrupt stack frame's implicit return
+/// by restoring the kernel's saved RSP/RIP (recorded by `user.rs` just before
+/// `iretq` into Ring 3). Control therefore resumes in the kernel loop and the
+/// kernel keeps running even though the user process died of a page fault.
+fn kill_user_task() -> ! {
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            "mov rsp, {kernel_rsp}",
+            "jmp {kernel_rip}",
+            kernel_rsp = in(reg) crate::user::KERNEL_RSP,
+            kernel_rip = in(reg) crate::user::KERNEL_RIP,
+            options(noreturn)
+        );
+    }
+}
+
 extern "x86-interrupt" fn page_fault_handler(
-    _stack: InterruptStackFrame,
-    _error_code: PageFaultErrorCode,
+    stack: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
 ) {
     let addr = x86_64::registers::control::Cr2::read_raw();
+
+    // Distinguish user vs kernel faults using the saved code-segment RPL.
+    if fault_from_user(&stack) {
+        // User fault: the process touched memory it is not allowed to. Kill the
+        // task and let the kernel continue running. `kill_user_task` diverges.
+        serial_println!(
+            "[USER-FAULT] killed user task: rip={:#x}, addr={:#x}, err={:?}",
+            stack.instruction_pointer,
+            addr,
+            error_code,
+        );
+        kill_user_task();
+    }
+
+    // Kernel-space fault (and any survivable non-user path): this is a real
+    // kernel bug; halt and panic. Reached only for kernel faults because the
+    // user branch above diverged.
     serial_println!(
-        "[PANIC] Page Fault at {:#x}, access={:#x}",
-        _stack.instruction_pointer,
+        "[PANIC] Kernel Page Fault at {:#x}, access={:#x}",
+        stack.instruction_pointer,
         addr,
     );
-    serial_println!("  Error code: {:?}", _error_code);
+    serial_println!("  Error code: {:?}", error_code);
     loop { x86_64::instructions::hlt(); }
 }
 
