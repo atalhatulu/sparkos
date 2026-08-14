@@ -25,6 +25,11 @@ pub const SYS_RECV: u64 = 13;
 pub const SYS_FORK: u64 = 14;
 pub const SYS_EXEC: u64 = 15;
 
+// Microkernel IPC & Device Port syscalls (Aşama 4 & 5).
+pub const SYS_IPC_SEND: u64 = 20;
+pub const SYS_IPC_RECV: u64 = 21;
+pub const SYS_IOPERM: u64 = 22;
+
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
 const EFAULT: u64 = (-14i64) as u64;
@@ -132,11 +137,112 @@ pub extern "C" fn syscall_dispatcher(
                 crate::syscall_storage::sys_write(arg1, arg2, arg3)
             }
         }
+        SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3, arg4, arg5),
+        SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
+        SYS_IOPERM => sys_ioperm(arg1, arg2, arg3),
         _ => {
             serial_println!("[SYSCALL] Unknown syscall number: {}", syscall_num);
             u64::MAX
         }
     }
+}
+
+fn sys_ipc_send(ep_id: u64, buf_ptr: u64, len: u64, attach_slot: u64, mode_val: u64) -> u64 {
+    let pid = crate::task::process::current_pid();
+    let sender_cap = match crate::task::process::with_cap_table(pid, |t| {
+        t.iter().find(|(fd, _)| *fd == ep_id as u32).map(|(_, h)| *h)
+    }) {
+        Some(Some(h)) => h,
+        _ => return EACCES,
+    };
+
+    let data = match crate::sec_mem::validate_user_ptr(buf_ptr, len as usize) {
+        Ok(d) => d,
+        Err(_) => return EFAULT,
+    };
+
+    let attached_cap = if attach_slot != 0 {
+        crate::task::process::with_cap_table(pid, |t| {
+            t.iter().find(|(fd, _)| *fd == attach_slot as u32).map(|(_, h)| *h)
+        }).flatten()
+    } else {
+        None
+    };
+
+    let mode = match mode_val {
+        1 => crate::ipc::TransferMode::Transfer,
+        2 => crate::ipc::TransferMode::Lend,
+        _ => crate::ipc::TransferMode::None,
+    };
+
+    match crate::ipc::raw_ipc_send(ep_id as u32, sender_cap, data, attached_cap, mode) {
+        Ok(_) => 0,
+        Err(crate::cap::CapError::NoRights) => EACCES,
+        Err(_) => u64::MAX,
+    }
+}
+
+fn sys_ipc_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64) -> u64 {
+    let pid = crate::task::process::current_pid();
+    let receiver_cap = match crate::task::process::with_cap_table(pid, |t| {
+        t.iter().find(|(fd, _)| *fd == ep_id as u32).map(|(_, h)| *h)
+    }) {
+        Some(Some(h)) => h,
+        _ => return EACCES,
+    };
+
+    let out_buf = match crate::sec_mem::validate_user_ptr_mut(buf_ptr, max_len as usize) {
+        Ok(b) => b,
+        Err(_) => return EFAULT,
+    };
+
+    match crate::ipc::raw_ipc_recv(ep_id as u32, receiver_cap) {
+        Ok(msg) => {
+            let n = core::cmp::min(msg.payload.len(), max_len as usize);
+            out_buf[..n].copy_from_slice(&msg.payload[..n]);
+
+            if out_cap_ptr != 0 {
+                if let Some(cap) = msg.capability {
+                    if let Ok(cap_bytes) = crate::sec_mem::validate_user_ptr_mut(out_cap_ptr, 8) {
+                        cap_bytes[..4].copy_from_slice(&cap.slot.to_le_bytes());
+                        cap_bytes[4..8].copy_from_slice(&cap.generation.to_le_bytes());
+                    }
+                }
+            }
+            n as u64
+        }
+        Err(crate::cap::CapError::NoRights) => EACCES,
+        Err(_) => u64::MAX,
+    }
+}
+
+fn sys_ioperm(start_port: u64, end_port: u64, enable: u64) -> u64 {
+    let pid = crate::task::process::current_pid();
+    // IO yetkisi (Rights::IO = 8) kontrolü
+    let has_io_right = crate::task::process::with_cap_table(pid, |t| {
+        t.iter().any(|(_, h)| crate::cap::check_rights(*h, Rights(8)).is_ok())
+    }).unwrap_or(false);
+
+    if !has_io_right {
+        serial_println!("[SYSCALL] sys_ioperm EACCES: pid {} has no IO capability", pid);
+        return EACCES;
+    }
+
+    if start_port > end_port || end_port > 65535 {
+        return u64::MAX;
+    }
+
+    if enable != 0 {
+        crate::gdt::allow_port_range(start_port as u16, end_port as u16);
+        crate::task::process::set_current_allowed_ports(Some((start_port as u16, end_port as u16)));
+        serial_println!("[SYSCALL] sys_ioperm: enabled ports {:#x}..={:#x} for pid {}", start_port, end_port, pid);
+    } else {
+        crate::gdt::deny_port_range(start_port as u16, end_port as u16);
+        crate::task::process::set_current_allowed_ports(None);
+        serial_println!("[SYSCALL] sys_ioperm: disabled ports {:#x}..={:#x} for pid {}", start_port, end_port, pid);
+    }
+
+    0
 }
 
 fn sys_exit(status: u64) -> u64 {

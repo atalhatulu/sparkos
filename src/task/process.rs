@@ -132,6 +132,8 @@ pub struct Process {
     /// bakar; kendi tablosunda olmayan handle kullanilamaz. Process exit'te tum handle'lar
     /// temizlenir.
     pub cap_table: alloc::vec::Vec<(u32, crate::cap::CapHandle)>,
+    /// TSS IOPB yetkili port aralığı (None == hiçbir porta erişemez).
+    pub allowed_ports: Option<(u16, u16)>,
 }
 
 impl Process {
@@ -154,6 +156,7 @@ impl Process {
             exit_code: 0,
             exited: false,
             cap_table: alloc::vec::Vec::new(),
+            allowed_ports: None,
         }
     }
 }
@@ -369,7 +372,7 @@ pub fn create_user_process(
 /// kernel continuation so the int-0x80 / sys_exit path can return here.
 /// Does not return on its own stack (control goes to Ring 3).
 fn enter_user_current() -> ! {
-    let (user_rip, user_rsp, user_cr3, user_cs, user_ss, kstack_top) = {
+    let (user_rip, user_rsp, user_cr3, user_cs, user_ss, allowed_ports, kstack_top) = {
         let mut s = SCHEDULER.lock();
         let pid = match s.current {
             Some(p) => p,
@@ -390,21 +393,21 @@ fn enter_user_current() -> ! {
             p.user_cr3,
             p.user_cs,
             p.user_ss,
+            p.allowed_ports,
             krsp,
         )
     };
 
-    // Point RSP0 (Ring3->Ring0 stack, used by interrupts/syscalls from Ring 3)
-    // at this process's private kernel stack. The TSS lives in writable static
-    // memory loaded into the GDT, so hardware observes this write at the next
-    // privilege drop; mutate via a raw pointer because the `Lazy` static only
-    // yields a shared reference.
-    unsafe {
-        let base: *mut u64 = (&raw const *crate::gdt::TSS).cast_mut().cast();
-        // `privilege_stack_table` is the first struct member of a
-        // TaskStateSegment containing one `[VirtAddr; 8]` of u64s.
-        core::ptr::write(base.add(0), kstack_top);
+    // TSS IOPB izinlerini senkronize et
+    if let Some((start, end)) = allowed_ports {
+        crate::gdt::reset_io_bitmap();
+        crate::gdt::allow_port_range(start, end);
+    } else {
+        crate::gdt::reset_io_bitmap();
     }
+
+    // Point RSP0 at this process's private kernel stack.
+    crate::gdt::set_tss_rsp0(kstack_top);
 
     // Optional per-process address space switch.
     if user_cr3 != 0 {
@@ -538,6 +541,14 @@ pub fn schedule() {
         if let Some(p) = s.table.get_mut(&next) {
             p.state = ProcessState::Running;
         }
+        let ports = s.table.get(&next).and_then(|p| p.allowed_ports);
+        if let Some((start, end)) = ports {
+            crate::gdt::reset_io_bitmap();
+            crate::gdt::allow_port_range(start, end);
+        } else {
+            crate::gdt::reset_io_bitmap();
+        }
+
         arm_quantum();
         let next_raw = &s.table[&next].ctx as *const RegisterContext;
         (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
@@ -910,5 +921,14 @@ where
 {
     let mut s = SCHEDULER.lock();
     s.table.get_mut(&pid).map(|p| f(&mut p.cap_table))
+}
+
+pub fn set_current_allowed_ports(ports: Option<(u16, u16)>) {
+    let mut s = SCHEDULER.lock();
+    if let Some(pid) = s.current {
+        if let Some(p) = s.table.get_mut(&pid) {
+            p.allowed_ports = ports;
+        }
+    }
 }
 

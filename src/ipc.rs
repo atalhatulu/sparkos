@@ -145,6 +145,49 @@ impl<M> CapChannel<M> {
 }
 
 // -----------------------------------------------------------------------------
+// Global Endpoint Registry & Syscall Bridge (Ring 3 <-> Microkernel IPC)
+// -----------------------------------------------------------------------------
+
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use spin::Mutex;
+
+pub type RawCapChannel = CapChannel<Vec<u8>>;
+
+pub static ENDPOINTS: Mutex<BTreeMap<u32, RawCapChannel>> = Mutex::new(BTreeMap::new());
+
+/// Yeni bir mikroçekirdek IPC Endpoint'i oluşturur ve kayıt eder.
+pub fn create_raw_endpoint(capacity: usize) -> cap::Result<(u32, CapHandle)> {
+    let (channel, handle) = RawCapChannel::new(capacity)?;
+    let ep_id = handle.slot;
+    ENDPOINTS.lock().insert(ep_id, channel);
+    Ok((ep_id, handle))
+}
+
+/// Syscall için ham bayt IPC gönderimi
+pub fn raw_ipc_send(
+    ep_id: u32,
+    sender_cap: CapHandle,
+    data: &[u8],
+    attached_cap: Option<CapHandle>,
+    mode: TransferMode,
+) -> cap::Result<()> {
+    let guard = ENDPOINTS.lock();
+    let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
+    channel.send(sender_cap, data.to_vec(), attached_cap, mode)
+}
+
+/// Syscall için ham bayt IPC alımı
+pub fn raw_ipc_recv(
+    ep_id: u32,
+    receiver_cap: CapHandle,
+) -> cap::Result<CapMessage<Vec<u8>>> {
+    let guard = ENDPOINTS.lock();
+    let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
+    channel.recv(receiver_cap)
+}
+
+// -----------------------------------------------------------------------------
 // Legacy API & System Message Definitions (Geriye Dönük Uyumluluk)
 // -----------------------------------------------------------------------------
 

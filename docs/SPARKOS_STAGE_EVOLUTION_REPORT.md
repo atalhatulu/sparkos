@@ -1,58 +1,43 @@
-# SPARKOS — Capability Microkernel Evrimi ve Aşama Raporu
+# SPARKOS — Capability Microkernel Evrimi: Aşama 5.0 ve IOPB Raporu
 
 **Tarih:** 2026-08-14  
-**Durum:** Aşama 1, 2.0, 2, 3 (Pointer Hardening) ve 4 (Capability IPC) Tamamlandı / Doğrulandı
+**Tamamlanan Aşamalar:** Aşama 1, 2.0, 2, 3 (Pointer Hardening), 4 (Capability IPC), 5.0 (TSS IOPB & Ring 3 IPC Syscalls)
 
 ---
 
-## 1. Tespit Edilen Riskler ve Üretilen Çözümler
+## 1. Mimari Dönüşüm: IOPL Yerine TSS IOPB (I/O Permission Bitmap)
 
-### A. Tanımsız Davranış (UB) ve Eşzamanlılık Riski (`src/cap.rs`)
-- **Risk:** `cap.rs` içerisinde `is_revoked` ve `revoke` fonksiyonlarında `&u64 as *const u64 as *const AtomicU64` şeklinde güvensiz (unsafe) pointer tür dönüşümü bulunuyordu.
-- **Çözüm:** `CoreState` zaten tek bir `spin::Mutex` altında korunmaktadır. Eşzamanlı yarış riski olmadan `state.nodes[node_idx].epoch.saturating_add(1)` ve `state.nodes[curr].epoch > 0` güvenli koduna dönüştürüldü, tüm güvensiz bloklar ve gereksiz atomik dönüşümler temizlendi.
+### Neden IOPL=3 Reddedildi?
+- `IOPL=3` kullanımı, sürece tüm 65.536 I/O portunu (PIC, PIT, ATA, ACPI, güç yönetimi vb.) sınırsız açarak mikroçekirdeğin "en az yetki" (least privilege) kuralını tamamen ihlal eder.
+- Bu nedenle x86_64 donanım seviyesinde çalışan **TSS IOPB** mimarisine geçilmiştir.
 
-### B. Bellek & Pointer Doğrulama Açıkları (`src/syscall.rs`)
-- **Risk:** `SYS_EXEC` ve `sys_write` içerisinde doğrulamadan bağımsız `core::slice::from_raw_parts` kullanımları bulunuyordu.
-- **Çözüm:** `sec_mem::validate_user_ptr` API'si doğrudan dilim döndürecek şekilde entegre edildi. Kullanıcı adres alanı sınırları (`0..0x8000_0000`) ve her sayfanın `USER_ACCESSIBLE` / `WRITABLE` bayrakları doğrulanarak çiğ işaretçi manipülasyonu ortadan kaldırıldı.
-
-### C. Aşama 4: Capability Destekli IPC (`src/ipc.rs`)
-- **Risk:** Klasik kanal yapısı (`BlockingChannel`) yetki kontrolü yapmıyor ve mesaj içinde kaynak/yetki transferi sağlayamıyordu.
-- **Çözüm:** `CapMessage<M>` ve `CapChannel<M>` mimarisi uygulandı:
-  - Kanal uç noktası (`ObjectKind::Endpoint`) üzerinden `Rights::WRITE` ve `Rights::READ` denetimi.
-  - `TransferMode::Transfer`: Mülkiyet aktarımı (lineage koparılarak alıcı yeni root yapılır).
-  - `TransferMode::Lend`: Geçici ödünç (gönderici mesaj kuyruktayken geri alabilir; geri alınırsa alıcıda `CapError::Revoked` döner, payload güvenle teslim edilir).
-  - Geriye dönük uyumluluk: Eski `BlockingChannel` ve `SYSTEM_CHAN` API'si bozulmadan korundu.
+### Uygulanan TSS IOPB Mimarisi (`src/gdt.rs`)
+- **Veri Yapısı:** `TssWithIopb` (104 bayt `TaskStateSegment` + 8192 bayt `io_bitmap` + 1 bayt `0xFF` trailing bayt).
+- **GDT 64-bit TSS Descriptor:** Descriptor limiti `size_of::<TssWithIopb>() - 1` (8296 bayt) olarak 16-baytlık System Descriptor şeklinde GDT'ye yüklendi.
+- **`iomap_base`:** TSS başlangıcından bitmap'e olan 104 baytlık ofset (`0x68`) donanıma bildirildi.
+- **Port Güvenliği:** Varsayılan olarak tüm 8192 bayt `0xFF` (tüm portlar Ring 3 için `#GP` ile yasaklı).
+- **Context Switch Entegrasyonu (`src/task/process.rs`):** Süreç PCB'sinde `allowed_ports: Option<(u16, u16)>` alanı eklendi. Yalnızca `Rights::IO` capability'sine sahip sürücü süreci çalıştığında (örn. Serial: `0x3F8..=0x3FF`) ilgili bitler `0` (izinli) yapılır; süreç değiştiğinde bitmap sıfırlanır (`reset_io_bitmap`).
 
 ---
 
-## 2. Doğrulama ve Test Kanıtları
+## 2. Ring 3 Mikroçekirdek IPC Syscall Köprüsü (`src/syscall.rs` & `src/ipc.rs`)
 
-1. **Kernel Derlemesi (`cargo build`):**
-   - **0 Hata**, 6 önemsiz uyarı.
-2. **Bootimage Üretimi (`cargo bootimage`):**
-   - `bootimage-sparkos.bin` başarıyla üretildi.
-3. **QEMU Boot & Fonksiyonel Doğrulama:**
-   - Serial Çıktısı:
-     ```text
-     [OK] Serial port ready
-     [OK] Virtual Memory (Paging) Initialized
-     [OK] Syscall dispatcher initialized
-     [OK] Capability core initialized (root capability)
-     [OK] Interrupts enabled
-     [IPC Producer 1] Sent: 1
-     [IPC Producer 2] Sent: 3
-     [IPC Consumer] Received: 1
-     [IPC Consumer] Received: 3
-     [IPC Producer 1] Sent: 2
-     [IPC Producer 2] Sent: 4
-     [IPC Consumer] Received: 2
-     [IPC Consumer] Received: 4
-     [IPC Consumer] Test complete.
-     ```
+1. **`SYS_IPC_SEND` (20):**
+   - Kullanıcı tamponu `validate_user_ptr` ile doğrulanır.
+   - Endpoint üzerinde `Rights::WRITE` capability kontrolü yapılır.
+   - `TransferMode::Transfer` (mülkiyet devri) veya `TransferMode::Lend` (ödünç) yetki aktarımı desteklenir.
+2. **`SYS_IPC_RECV` (21):**
+   - Kullanıcı tamponu `validate_user_ptr_mut` ile doğrulanır.
+   - Endpoint üzerinde `Rights::READ` capability kontrolü yapılır.
+   - Mesajla gelen capability handle varsa güvenle kullanıcı alanına yazılır.
+3. **`SYS_IOPERM` (22):**
+   - Sürecin `Rights::IO` capability'si doğrulanır.
+   - Belirtilen dar port aralığı için TSS IOPB güncellenir.
 
 ---
 
-## 3. Sıradaki Adımlar (Aşama 5 — Microkernel Driver İzolasyonu)
+## 3. Doğrulama Kanıtları
 
-- **IRQ Notification Endpoint Mimarisi:** Sürücülerin user-space'e taşınabilmesi için kernel kesmelerinin (`IRQ`) IPC bildirimine dönüştürülmesi.
-- **Port I/O & MMIO İzinleri:** Serial sürücüsü için I/O port (`0x3F8`) veya bellek sayfalarının capability ile sürece bağlanması.
+- **Derleme:** `cargo build` **0 hata**.
+- **Bootimage:** `cargo bootimage` başarıyla üretildi.
+- **QEMU Boot & Regression:** Paging, TSS/GDT, Syscall Dispatcher, PIT Timer, Interrupts ve IPC Producer/Consumer testleri sıfır regresyonla çalıştı.
