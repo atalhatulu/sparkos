@@ -340,6 +340,9 @@ pub fn create_user_process(
         p.user_cr3 = user_cr3;
         p.user_cs = user_cs;
         p.user_ss = user_ss;
+        // Asama 2 (B1): user process doğduğu anda stdio (0/1/2) + process-exec seed'le.
+        // Aksi halde SYS_WRITE fd 1/2 dahil tüm fd syscall'lar EACCES döner (sistem kullanılamaz).
+        let _ = crate::syscall_cap::seed_new_process(&mut p.cap_table);
         p.ctx = RegisterContext {
             rbx: 0,
             rbp: 0,
@@ -662,6 +665,9 @@ pub fn fork_current() -> i64 {
     np.user_cr3 = child_cr3;
     np.user_cs = u_cs;
     np.user_ss = u_ss;
+    // Asama 2 (B1 fork): child da stdio + process-exec hakkı almalı; aksi halde
+    // fork edilen child SYS_WRITE fd 1/2 ile EACCES alır.
+    let _ = crate::syscall_cap::seed_new_process(&mut np.cap_table);
     np.ctx = RegisterContext {
         rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
         rsp: np.kernel_stack.as_ptr() as u64 + np.kernel_stack.len() as u64,
@@ -893,3 +899,16 @@ pub fn process_count() -> usize {
     let s = SCHEDULER.lock();
     s.table.values().filter(|p| !p.exited).count()
 }
+
+/// SCHEDULER lock'u icinde mutable cap_table erisimi saglar (Asama 2 glue).
+/// Guard'lari (MutexGuard) fonksiyon disaris tasimak Rust'ta yasak oldugu icin,
+/// capability erisimi bu closure kalibi icinde yapilir. `pid`'li process yoksa
+/// None doner; varsa closure'a `&mut cap_table` verilir.
+pub fn with_cap_table<F, R>(pid: u64, f: F) -> Option<R>
+where
+    F: FnOnce(&mut alloc::vec::Vec<(u32, crate::cap::CapHandle)>) -> R,
+{
+    let mut s = SCHEDULER.lock();
+    s.table.get_mut(&pid).map(|p| f(&mut p.cap_table))
+}
+

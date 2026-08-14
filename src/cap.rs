@@ -398,6 +398,36 @@ pub fn revoke(cap: CapHandle) -> Result<()> {
     Ok(())
 }
 
+/// Pasif erişim kontrolü: capability `needed` rights'ı içeriyor mu ve hâlâ canlı mı?
+/// `deref`'ten farkı: refcount ARTTIRMAZ, CapAccess guard üretmez, object'i FREE
+/// ETMEZ. fd-capability gibi KALICI kaynaklar için kullanılır — "check" bir syscall
+/// gate'inde object ömrünü tüketmemelidir (deref+drop refcount'u 0'a düşürüp
+/// obje'yi valid=false yapar; ikinci check Invalid verirdi).
+pub fn check_rights(cap: CapHandle, needed: Rights) -> Result<()> {
+    let state_guard = STATE.lock();
+    let state = state_guard.as_ref().ok_or(CapError::Invalid)?;
+    let slot_idx = cap.slot as usize;
+    if slot_idx >= state.slots.len() {
+        return Err(CapError::Invalid);
+    }
+    let slot = &state.slots[slot_idx];
+    if slot.free || slot.generation != cap.generation {
+        return Err(CapError::Invalid);
+    }
+    if !slot.rights.contains(needed) {
+        return Err(CapError::NoRights);
+    }
+    if is_revoked(state, slot.node_idx) {
+        return Err(CapError::Revoked);
+    }
+    let obj_idx = slot.object_idx as usize;
+    if !state.objects[obj_idx].valid {
+        return Err(CapError::Invalid);
+    }
+    // refcount'a dokunmaz, free etmez — sadece yetki ve canlılık.
+    Ok(())
+}
+
 // FIX-1: deref claim = generation check + epoch check + refcount++ AYNI KRİTİK DİLİMDE
 pub fn deref(cap: CapHandle, flags: Rights) -> Result<CapAccess> {
     let mut state_guard = STATE.lock(); // Atomik dilim başlangıcı

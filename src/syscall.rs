@@ -1,4 +1,6 @@
 use crate::serial_println;
+use crate::cap::Rights;
+use crate::syscall_cap;
 
 pub const SYS_EXIT: u64 = 1;
 pub const SYS_WRITE: u64 = 4;
@@ -26,6 +28,8 @@ pub const SYS_EXEC: u64 = 15;
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
 const EFAULT: u64 = (-14i64) as u64;
+// EACCES (permission denied) — Asama 2: capability gate'i reddettiğinde döner.
+const EACCES: u64 = (-13i64) as u64;
 
 pub fn init() {
     serial_println!("[OK] Syscall dispatcher initialized");
@@ -57,15 +61,46 @@ pub extern "C" fn syscall_dispatcher(
     match syscall_num {
         SYS_EXIT => sys_exit(arg1),
         SYS_YIELD => sys_yield(),
-        SYS_READ => crate::syscall_storage::sys_read(arg1, arg2, arg3),
+        SYS_READ => {
+            // Asama 2: fd reader yetkisi (Rights::READ). capability yoksa EACCES.
+            if syscall_cap::check_fd_access(arg1 as u32, Rights(1)).is_err() {
+                return EACCES;
+            }
+            crate::syscall_storage::sys_read(arg1, arg2, arg3)
+        }
         SYS_OPEN => crate::syscall_storage::sys_open(arg1, arg2),
-        SYS_CLOSE => crate::syscall_storage::sys_close(arg1),
-        SYS_LSEEK => crate::syscall_storage::sys_lseek(arg1, arg2 as i64, arg3),
+        SYS_CLOSE => {
+            // Asama 2: fd destroy yetkisi (Rights::DESTROY=128), G1: close_fd.
+            if syscall_cap::check_fd_access(arg1 as u32, Rights(128)).is_err() {
+                return EACCES;
+            }
+            crate::syscall_storage::sys_close(arg1)
+        }
+        SYS_LSEEK => {
+            // Asama 2: fd read-navigate yetkisi (Rights::READ).
+            if syscall_cap::check_fd_access(arg1 as u32, Rights(1)).is_err() {
+                return EACCES;
+            }
+            crate::syscall_storage::sys_lseek(arg1, arg2 as i64, arg3)
+        }
         SYS_SOCKET => crate::net_socket::sys_socket(arg1, arg2),
-        SYS_CONNECT => crate::net_socket::sys_connect(arg1, arg2, arg3),
-        SYS_SEND => crate::net_socket::sys_send(arg1, arg2, arg3),
-        SYS_RECV => crate::net_socket::sys_recv(arg1, arg2, arg3),
+        SYS_CONNECT | SYS_SEND | SYS_RECV => {
+            // Asama 2: socket fd IO yetkisi (Rights::IO=8).
+            if syscall_cap::check_fd_access(arg1 as u32, Rights(8)).is_err() {
+                return EACCES;
+            }
+            match syscall_num {
+                SYS_CONNECT => crate::net_socket::sys_connect(arg1, arg2, arg3),
+                SYS_SEND => crate::net_socket::sys_send(arg1, arg2, arg3),
+                SYS_RECV => crate::net_socket::sys_recv(arg1, arg2, arg3),
+                _ => unreachable!(),
+            }
+        }
         SYS_FORK => {
+            // Asama 2 (B3): process'in EXECUTE yetkisi olmadan fork yapamaz.
+            if syscall_cap::check_process_exec().is_err() {
+                return EACCES;
+            }
             let pid = crate::task::process::fork_current();
             serial_println!("[SYSCALL] SYS_FORK from Ring 3 -> child pid {}", pid);
             pid as u64
@@ -73,6 +108,10 @@ pub extern "C" fn syscall_dispatcher(
         SYS_EXEC => {
             // exec(elf_ptr, len): build a fresh user process from ELF bytes.
             serial_println!("[SYSCALL] SYS_EXEC ({:#x}, {}) from Ring 3", arg1, arg2);
+            // Asama 2 (B3): EXECUTE yetkisi check.
+            if syscall_cap::check_process_exec().is_err() {
+                return EACCES;
+            }
             // Asama 2.0 (fcc exploit tespiti): kernel adresini vererek kernel'ın
             // o adresi ELF olarak okumasini engelle. User pointer zorunlu.
             if check_user_read(arg1, arg2 as usize).is_err() {
@@ -91,6 +130,11 @@ pub extern "C" fn syscall_dispatcher(
             }
         }
         SYS_WRITE => {
+            // Asama 2: fd yazma yetkisi (Rights::WRITE=2). fd 1/2 stdio seed'li
+            // oldugu icin gecer; fd>=3 icin backend yolu.
+            if syscall_cap::check_fd_access(arg1 as u32, Rights(2)).is_err() {
+                return EACCES;
+            }
             // fd 1/2 (stdout/stderr) terminale, fd >= 3 dosyalara yazılır
             if arg1 == 1 || arg1 == 2 {
                 sys_write(arg1, arg2, arg3)

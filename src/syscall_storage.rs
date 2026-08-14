@@ -46,7 +46,21 @@ pub fn sys_open(path_ptr: u64, flags: u64) -> u64 {
 
     if let Ok(path) = core::str::from_utf8(&path_buf[..len]) {
         match FD_TABLE.lock().open(path, flags as u32) {
-            Ok(fd) => fd as u64,
+            Ok(fd) => {
+                // Asama 2 (B2 provision): başarılı açılan her fd için capability
+                // kaydı oluştur ve aktif process'in cap_table'ına ekle. READ|WRITE
+                // verilir; ileride flag'lere göre daraltılabilir.
+                if fd != usize::MAX {
+                    if let Ok(cap) = crate::cap::create_object(crate::cap::ObjectKind::Fd) {
+                        let _ = crate::syscall_cap::add_fd_to_current(
+                            fd as u32,
+                            cap,
+                            crate::cap::Rights(3), // READ|WRITE
+                        );
+                    }
+                }
+                fd as u64
+            }
             Err(e) => {
                 crate::serial_println!("[SYSCALL] sys_open Error: {}", e);
                 u64::MAX
@@ -98,6 +112,10 @@ pub fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 }
 
 pub fn sys_close(fd: u64) -> u64 {
+    // Asama 2 (G1): capability kaydını önce cap_table'dan kaldır (entry leak
+    // olmasın). FD_TABLE kapatılmadan önce close_fd yapılır ki handle release
+    // edilsin.
+    let _ = crate::syscall_cap::remove_fd_from_current(fd as u32);
     match FD_TABLE.lock().close(fd as usize) {
         Ok(_) => 0,
         Err(e) => {

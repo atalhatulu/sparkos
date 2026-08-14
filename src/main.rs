@@ -41,6 +41,7 @@ pub mod net_socket;
 pub mod security;
 pub mod sec_mem;
 pub mod cap;
+pub mod syscall_cap; // Asama 2 — syscall yetki kontrolü köprüsü
 pub mod acpi;
 pub mod smp;
 pub mod klog;

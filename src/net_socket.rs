@@ -242,7 +242,18 @@ pub fn sys_socket(domain: u64, kind: u64) -> u64 {
         _ => SocketType::Raw,
     };
     match socket(st) {
-        Some(fd) => fd as u64,
+        Some(fd) => {
+            // Asama 2 (B2 provision): başarılı socket fd için capability kaydı;
+            // yoksa SYS_SEND/RECV/CONNECT gating (IO=8) EACCES döner.
+            if let Ok(cap) = crate::cap::create_object(crate::cap::ObjectKind::Fd) {
+                let _ = crate::syscall_cap::add_fd_to_current(
+                    fd as u32,
+                    cap,
+                    crate::cap::Rights(11), // READ|WRITE|IO
+                );
+            }
+            fd as u64
+        }
         None => u64::MAX,
     }
 }
