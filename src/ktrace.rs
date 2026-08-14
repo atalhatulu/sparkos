@@ -44,10 +44,10 @@ impl TraceEvent {
 
 /// Sabit boyutlu halka buffer.
 pub struct RingBuffer {
-    events: [TraceEvent; RING_CAP],
-    head: usize,
-    count: usize,
-    next_id: u64,
+    pub events: [TraceEvent; RING_CAP],
+    pub head: usize,
+    pub count: usize,
+    pub next_id: u64,
 }
 
 impl RingBuffer {

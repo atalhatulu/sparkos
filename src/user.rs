@@ -121,29 +121,27 @@ pub async fn exec_elf_async(elf_bytes: &[u8]) -> Result<(), &'static str> {
 
 pub fn exec_elf(elf_bytes: &[u8]) -> Result<(), &'static str> {
     crate::serial_println!("[USER_MODE] ELF dosyasi yukleniyor...");
-    let elf = crate::elf::parse_elf(elf_bytes)?;
+    let elf = crate::elf::parse_elf(elf_bytes).map_err(|e| match e {
+        crate::elf::ElfError::FileTooSmall => "File too small to be ELF",
+        crate::elf::ElfError::InvalidMagic => "Invalid ELF magic",
+        crate::elf::ElfError::Not64Bit => "Not a 64-bit ELF",
+        crate::elf::ElfError::NotLittleEndian => "Not Little Endian ELF",
+        crate::elf::ElfError::NotExecutable => "Not an executable ELF",
+        crate::elf::ElfError::InvalidMachine => "Not an x86-64 ELF",
+        crate::elf::ElfError::HeadersOutOfBounds => "Program headers out of bounds",
+        crate::elf::ElfError::SegmentOutOfBounds => "Segment data out of bounds",
+        crate::elf::ElfError::InvalidSegmentBounds => "Invalid segment memory bounds",
+        crate::elf::ElfError::KernelAddressViolation => "Segment touches kernel address space",
+        crate::elf::ElfError::OverlappingSegments => "Overlapping ELF segments",
+        crate::elf::ElfError::InvalidEntryPoint => "Invalid ELF entry point",
+        crate::elf::ElfError::NoLoadableSegments => "No loadable segments found",
+    })?;
 
-    if elf.segments.is_empty() {
-        return Err("No loadable segments found in ELF");
+    // Multi-Segment Loading: Her PT_LOAD segmentini ilgili vaddr'a haritala
+    for seg in &elf.segments {
+        let is_writable = (seg.flags & crate::elf::PF_W) != 0;
+        let _ = map_user_image(seg.vaddr, &seg.data, is_writable);
     }
-
-    // Simplification: assume 1 loadable segment for a simple bare-metal app
-    let segment = &elf.segments[0];
-
-    // Dedicated user region'na ELF segment yukle: her segment page'i icin fresh
-    // user frame tahsis et, boylece user PTE'leri kernel sayfalarina uzanmaz.
-    let code_ptr = match map_user_image(USER_CODE_BASE, &segment.data, false) {
-        Ok(p) => p,
-        Err(_) => {
-            // Fallback: kernel-heap yukleme, user-accessible isaretlenir.
-            let mut user_code = Vec::<u8>::with_capacity(segment.memsz as usize);
-            user_code.extend_from_slice(&segment.data);
-            user_code.resize(segment.memsz as usize, 0);
-            let cp = user_code.as_ptr() as u64;
-            unsafe { crate::memory::set_user_accessible(cp, segment.memsz as usize); }
-            cp
-        }
-    };
 
     // Kullanici stack'ini dedicated region'a haritala.
     let stack_base = USER_STACK_TOP - 4096;
@@ -160,9 +158,7 @@ pub fn exec_elf(elf_bytes: &[u8]) -> Result<(), &'static str> {
 
     let user_data = crate::gdt::GDT.1.user_data_selector.0;
     let user_code_sel = crate::gdt::GDT.1.user_code_selector.0;
-
-    // Calculate actual entry point based on loaded address
-    let actual_entry = code_ptr + (elf.entry_point - segment.vaddr);
+    let actual_entry = elf.entry_point;
 
     unsafe {
         asm!(

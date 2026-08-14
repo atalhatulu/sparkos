@@ -89,15 +89,18 @@ Resource
   revoke ve revoke=cancel modellerini reddetti; **lineage + lazy epoch + claim/refcount**
   modelini secti.
 
-## Hala cozulmesi gerekenler
+## Tamamlanan ve Dondurulan Mimarî Adımlar (Aşama 1 - 10)
 
-1. ~~Grant / Transfer / Lend tam semantigi~~ → **STEP 2 ile cozuldu**
-2. ~~Concurrency / Memory Ordering~~ → **STEP 3 ile cozuldu (FIX-1/2/3)**
-3. Memory mapping + TLB revoke davranisi (STEP 4)
-4. DMA + IOMMU + cancel modeli (STEP 5)
-5. Resource lifetime implementasyon detayi (STEP 6)
-6. IPC cancellation semantigi (STEP 7)
-7. Priority / time donation (STEP 8)
+1. ✅ **Grant / Transfer / Lend Tam Semantiği** → `src/cap.rs` içinde çözüldü ve donduruldu.
+2. ✅ **Concurrency & Memory Ordering** → Lock-order ve Atomic/Spinlock korumasıyla çözüldü.
+3. ✅ **Memory Mapping & CR3 İzolasyonu (Aşama 2-3)** → Her süreç için bağımsız CR3 sayfa tablosu.
+4. ✅ **DMA + DmaRegion + Zero-Copy Köprüsü (Aşama 6.1, 6.2, 6.3)** → `DmaRegion`, `SLOT_MAP` ve `recycle_slot_cap`.
+5. ✅ **Resource Lifetime & RefCount (Aşama 1 & 10)** → `revoke != free`, RefCount==0 olunca temizlik.
+6. ✅ **IPC Cancellation Semantiği (Aşama 7.1)** → `SYS_IPC_CANCEL(29)` ve `cancel_endpoint`.
+7. ✅ **Lend Expiry (Aşama 7.2)** → PIT 1000Hz zamanlayıcıya bağlı `expire_lent_capabilities`.
+8. ✅ **Binary-Safe VFS & BlockCache (Aşama 8.2 & 8.3)** → `FsNode::File { content: Vec<u8> }` ve 32KB LFU/LRU önbellek.
+9. ✅ **Çok Çekirdekli (SMP) Aktivasyonu (Aşama 9)** → ACPI MADT, Local APIC, I/O APIC `0xFEC00000`, INIT-SIPI-SIPI.
+10. ✅ **Biçimsel Güvenlik & 20 Invariant (Aşama 10)** → `CAP_INV-1..20` 57 test ile doğrulandı.
 8. Slot allocator implementasyon (STEP 6 alti)
 9. Process death sonrasi capability davranisi
 

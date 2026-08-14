@@ -293,6 +293,7 @@ fn kill_user_task() -> ! {
 fn recover_user_fault(stack: &InterruptStackFrame, addr: u64, why: &str) -> ! {
     if crate::task::process::current_is_user_process() {
         if let Some((pid, name)) = crate::task::process::current_process_info() {
+            crate::ktrace::log_trace(crate::klog::LogLevel::Warn, format_args!("PROC_FAULT pid={} name='{}' rip={:#x} addr={:#x} {}", pid, name, stack.instruction_pointer, addr, why));
             crate::serial_println!(
                 "[USER-FAULT] process {} ('{}') faulted: rip={:#x}, addr={:#x}, {}",
                 pid,
@@ -302,6 +303,7 @@ fn recover_user_fault(stack: &InterruptStackFrame, addr: u64, why: &str) -> ! {
                 why,
             );
         } else {
+            crate::ktrace::log_trace(crate::klog::LogLevel::Warn, format_args!("PROC_FAULT rip={:#x} addr={:#x} {}", stack.instruction_pointer, addr, why));
             crate::serial_println!(
                 "[USER-FAULT] user fault recovered: rip={:#x}, addr={:#x}, {}",
                 stack.instruction_pointer,
@@ -355,7 +357,10 @@ extern "x86-interrupt" fn page_fault_handler(
 static TICK: AtomicU64 = AtomicU64::new(0);
 
 extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
-    TICK.fetch_add(1, Ordering::Relaxed);
+    let current_tick = TICK.fetch_add(1, Ordering::Relaxed) + 1;
+
+    // Aşama 7.2: Lend Expiry — süresi dolan ödünç capability'leri otomatik iptal (revoke) et.
+    crate::cap::expire_lent_capabilities(current_tick);
 
     // Preemptive timer hook: drives the round-robin process scheduler when
     // it has been armed (default off, so existing behavior is unchanged).

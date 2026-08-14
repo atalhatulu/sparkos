@@ -18,7 +18,7 @@ pub enum TransferMode {
 }
 
 /// Capability taşıyabilen mesaj zarfı
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapMessage<M> {
     pub payload: M,
     pub capability: Option<CapHandle>,
@@ -197,7 +197,15 @@ pub fn hangup_channel_for_pid(pid: u32) {
 
     for ep_id in to_remove {
         owners.remove(&ep_id);
-        endpoints.remove(&ep_id);
+        if let Some(channel) = endpoints.remove(&ep_id) {
+            // Kanal kapanırken kuyrukta bekleyen in-flight capability'leri kapat (Zero-Leak)
+            let root = channel.endpoint();
+            while let Ok(Some(msg)) = channel.try_recv(root) {
+                if let Some(attached) = msg.capability {
+                    let _ = cap::close(attached);
+                }
+            }
+        }
 
         // Bu endpoint'e bağlı IRQ'ları unbind et
         let irqs: Vec<u8> = irq_guard.iter()
@@ -323,7 +331,10 @@ pub fn cancel_endpoint(ep_id: u32, cap: CapHandle) -> cap::Result<usize> {
     let guard = ENDPOINTS.lock();
     let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
     let mut count = 0;
-    while let Ok(Some(_)) = channel.try_recv(cap) {
+    while let Ok(Some(msg)) = channel.try_recv(cap) {
+        if let Some(attached) = msg.capability {
+            let _ = cap::close(attached);
+        }
         count += 1;
     }
     Ok(count)

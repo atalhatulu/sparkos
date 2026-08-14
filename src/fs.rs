@@ -8,7 +8,7 @@ use core::convert::TryInto;
 pub enum FsNode {
     File {
         name: String,
-        content: String,
+        content: Vec<u8>,
     },
     Directory {
         name: String,
@@ -47,9 +47,8 @@ fn serialize(node: &FsNode, buf: &mut Vec<u8>) {
             let name_bytes = name.as_bytes();
             buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(name_bytes);
-            let content_bytes = content.as_bytes();
-            buf.extend_from_slice(&(content_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(content_bytes);
+            buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            buf.extend_from_slice(content);
         }
         FsNode::Directory { name, children } => {
             buf.push(2); // Directory
@@ -81,7 +80,7 @@ fn deserialize(data: &[u8], offset: &mut usize) -> Option<FsNode> {
         *offset += name_len;
         let content_len = u32::from_le_bytes(data[*offset..*offset+4].try_into().ok()?) as usize;
         *offset += 4;
-        let content = core::str::from_utf8(&data[*offset..*offset+content_len]).ok()?.to_string();
+        let content = data[*offset..*offset+content_len].to_vec();
         *offset += content_len;
         Some(FsNode::File { name, content })
     } else if typ == 2 {
@@ -345,7 +344,7 @@ pub fn mkdir(path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
+pub fn write_file_bytes(path: &str, content: &[u8]) -> Result<(), &'static str> {
     if path == "/" { return Err("Root uzerine yazi yazilamaz"); }
     
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -367,8 +366,8 @@ pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
     if let Some(children) = find_dir(&mut root, &parent_path) {
         for child in children.iter_mut() {
             if child.name() == *name {
-                if let FsNode::File { content: ref mut content_str, .. } = child {
-                    *content_str = content.to_string();
+                if let FsNode::File { content: ref mut content_vec, .. } = child {
+                    *content_vec = content.to_vec();
                     drop(root);
                     sync_to_disk()?;
                     return Ok(());
@@ -379,7 +378,7 @@ pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
         }
         children.push(FsNode::File {
             name: name.to_string(),
-            content: content.to_string(),
+            content: content.to_vec(),
         });
     } else {
         return Err("Ust dizin bulunamadi");
@@ -387,6 +386,10 @@ pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
     drop(root);
     sync_to_disk()?;
     Ok(())
+}
+
+pub fn write_file(path: &str, content: &str) -> Result<(), &'static str> {
+    write_file_bytes(path, content.as_bytes())
 }
 
 pub fn remove(path: &str) -> Result<(), &'static str> {
@@ -431,7 +434,7 @@ pub fn remove(path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn read_file(path: &str) -> Result<String, &'static str> {
+pub fn read_file_bytes(path: &str) -> Result<Vec<u8>, &'static str> {
     if path == "/" { return Err("Bu bir dizin"); }
     
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -464,6 +467,11 @@ pub fn read_file(path: &str) -> Result<String, &'static str> {
     } else {
         Err("Ust dizin bulunamadi")
     }
+}
+
+pub fn read_file(path: &str) -> Result<String, &'static str> {
+    let bytes = read_file_bytes(path)?;
+    Ok(alloc::string::String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn list_dir(path: &str) -> Result<Vec<(String, bool)>, &'static str> {
@@ -543,12 +551,11 @@ pub fn read_file_chunk(path: &str, offset: usize, buf: &mut [u8]) -> Result<usiz
         for child in children.iter() {
             if child.name() == *name {
                 if let FsNode::File { content, .. } = child {
-                    let bytes = content.as_bytes();
-                    if offset >= bytes.len() {
+                    if offset >= content.len() {
                         return Ok(0);
                     }
-                    let len = core::cmp::min(buf.len(), bytes.len() - offset);
-                    buf[..len].copy_from_slice(&bytes[offset..offset + len]);
+                    let len = core::cmp::min(buf.len(), content.len() - offset);
+                    buf[..len].copy_from_slice(&content[offset..offset + len]);
                     return Ok(len);
                 } else {
                     return Err("Bu bir dizin veya cihaz!");
@@ -584,14 +591,11 @@ pub fn write_file_chunk(path: &str, offset: usize, buf: &[u8]) -> Result<usize, 
         let mut found = false;
         for child in children.iter_mut() {
             if child.name() == *name {
-                if let FsNode::File { content: ref mut content_str, .. } = child {
-                    let mut bytes = content_str.as_bytes().to_vec();
-                    if offset + buf.len() > bytes.len() {
-                        bytes.resize(offset + buf.len(), 0);
+                if let FsNode::File { content: ref mut content_vec, .. } = child {
+                    if offset + buf.len() > content_vec.len() {
+                        content_vec.resize(offset + buf.len(), 0);
                     }
-                    bytes[offset..offset + buf.len()].copy_from_slice(buf);
-                    
-                    *content_str = alloc::string::String::from_utf8(bytes).map_err(|_| "Gecersiz UTF-8 verisi")?;
+                    content_vec[offset..offset + buf.len()].copy_from_slice(buf);
                     found = true;
                     break;
                 } else {
@@ -599,8 +603,17 @@ pub fn write_file_chunk(path: &str, offset: usize, buf: &[u8]) -> Result<usize, 
                 }
             }
         }
+        
         if !found {
-            return Err("Dosya bulunamadi");
+            let mut content_vec = Vec::new();
+            if offset + buf.len() > 0 {
+                content_vec.resize(offset + buf.len(), 0);
+            }
+            content_vec[offset..offset + buf.len()].copy_from_slice(buf);
+            children.push(FsNode::File {
+                name: name.to_string(),
+                content: content_vec,
+            });
         }
     } else {
         return Err("Ust dizin bulunamadi");
@@ -638,12 +651,52 @@ pub struct SeededBlob {
 }
 
 /// Compile-time embedded userland binaries. On boot these become readable at
-/// their registered paths (`/bin/hello`).
+/// their registered paths (`/bin/hello`, `/bin/echo`, `/bin/cat`, `/bin/ls`).
 pub const SEEDED_BINARIES: &[SeededBlob] = &[
     SeededBlob {
         path: "/bin/hello",
         data: include_bytes!("../scratch/hello.elf"),
         desc: "hello.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/echo",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "echo.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/cat",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "cat.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/ls",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "ls.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/touch",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "touch.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/mkdir",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "mkdir.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/rm",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "rm.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/ping",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "ping.elf userland binary",
+    },
+    SeededBlob {
+        path: "/bin/host",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "host.elf userland binary",
     },
 ];
 
@@ -697,7 +750,7 @@ pub fn seed_default_files() {
 
 /// `write_file` wrapper that never syncs to disk and never errors on
 /// duplicate writes (used during seeding to avoid perturbing the disk image).
-fn write_file_quiet(path: &str, content: &str) -> Result<(), &'static str> {
+fn write_file_quiet_bytes(path: &str, content: &[u8]) -> Result<(), &'static str> {
     if path == "/" { return Err("Root uzerine yazi yazilamaz"); }
 
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -722,16 +775,20 @@ fn write_file_quiet(path: &str, content: &str) -> Result<(), &'static str> {
     for child in children.iter_mut() {
         if child.name() == *name {
             if let FsNode::File { content: ref mut c, .. } = child {
-                *c = content.to_string();
+                *c = content.to_vec();
             }
             return Ok(());
         }
     }
     children.push(FsNode::File {
         name: name.to_string(),
-        content: content.to_string(),
+        content: content.to_vec(),
     });
     Ok(())
+}
+
+fn write_file_quiet(path: &str, content: &str) -> Result<(), &'static str> {
+    write_file_quiet_bytes(path, content.as_bytes())
 }
 
 /// Returns whether `path` is backed by a seeded binary byte-for-byte.
@@ -792,5 +849,127 @@ pub fn read_file_from_path_chunk(
 /// Hard-coded metadata helper mirroring `get_file_size` for full paths.
 pub fn get_file_size_from_path(path: &str) -> Result<usize, &'static str> {
     Ok(read_file_from_path(path)?.len())
+}
+
+// -----------------------------------------------------------------------------
+// Aşama 8.3: BlockCache (Disk Sektör Önbellek Servisi)
+// -----------------------------------------------------------------------------
+
+pub const BLOCK_SIZE: usize = 512;
+pub const CACHE_BLOCKS: usize = 64;
+
+#[derive(Clone, Copy)]
+pub struct CachedBlock {
+    pub lba: u64,
+    pub data: [u8; BLOCK_SIZE],
+    pub valid: bool,
+    pub dirty: bool,
+    pub access_count: u32,
+}
+
+impl CachedBlock {
+    pub const fn empty() -> Self {
+        Self {
+            lba: 0,
+            data: [0; BLOCK_SIZE],
+            valid: false,
+            dirty: false,
+            access_count: 0,
+        }
+    }
+}
+
+pub struct BlockCache {
+    entries: [CachedBlock; CACHE_BLOCKS],
+}
+
+impl BlockCache {
+    pub const fn new() -> Self {
+        Self {
+            entries: [CachedBlock::empty(); CACHE_BLOCKS],
+        }
+    }
+
+    pub fn get(&mut self, lba: u64) -> Option<[u8; BLOCK_SIZE]> {
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.lba == lba {
+                entry.access_count = entry.access_count.saturating_add(1);
+                return Some(entry.data);
+            }
+        }
+        None
+    }
+
+    pub fn put(&mut self, lba: u64, data: [u8; BLOCK_SIZE], dirty: bool) {
+        // Önce mevcut girişi ara
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.lba == lba {
+                entry.data = data;
+                entry.dirty = entry.dirty || dirty;
+                entry.access_count = entry.access_count.saturating_add(1);
+                return;
+            }
+        }
+
+        // Boş slot ara
+        for entry in self.entries.iter_mut() {
+            if !entry.valid {
+                entry.lba = lba;
+                entry.data = data;
+                entry.valid = true;
+                entry.dirty = dirty;
+                entry.access_count = 1;
+                return;
+            }
+        }
+
+        // En az erişilen (LFU) slotu bul ve değiştir
+        let mut min_idx = 0;
+        let mut min_count = u32::MAX;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.access_count < min_count {
+                min_count = entry.access_count;
+                min_idx = i;
+            }
+        }
+
+        self.entries[min_idx] = CachedBlock {
+            lba,
+            data,
+            valid: true,
+            dirty,
+            access_count: 1,
+        };
+    }
+}
+
+pub static BLOCK_CACHE: spin::Lazy<Mutex<BlockCache>> =
+    spin::Lazy::new(|| Mutex::new(BlockCache::new()));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_safe_read_write() {
+        let binary_payload: [u8; 8] = [0x7F, b'E', b'L', b'F', 0x00, 0xFF, 0x80, 0xAA];
+        assert!(write_file_bytes("/test.bin", &binary_payload).is_ok());
+        let read_back = read_file_bytes("/test.bin").expect("read failed");
+        assert_eq!(read_back, binary_payload);
+    }
+
+    #[test]
+    fn test_block_cache_lru() {
+        let mut cache = BlockCache::new();
+        let block_a = [0xAA; 512];
+        let block_b = [0xBB; 512];
+
+        cache.put(100, block_a, false);
+        cache.put(200, block_b, true);
+
+        assert_eq!(cache.get(100), Some(block_a));
+        assert_eq!(cache.get(200), Some(block_b));
+        assert_eq!(cache.get(300), None);
+    }
 }
 

@@ -1,0 +1,8 @@
+[package]
+name = "libspark"
+version = "0.1.0"
+edition = "2021"
+authors = ["SparkOS Team"]
+description = "Official Userspace SDK & Runtime Library for SparkOS"
+
+[dependencies]

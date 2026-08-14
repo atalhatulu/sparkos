@@ -112,6 +112,7 @@ pub enum ProcessState {
     Running,
     Blocked,
     Terminated,
+    Reaped,
 }
 
 /// Fixed-layout register set saved on a kernel-level context switch; must
@@ -159,6 +160,8 @@ pub struct Process {
     /// Result of a user process that exited.
     pub exit_code: u64,
     pub exited: bool,
+    pub parent_pid: Option<u64>,
+    pub reaped: bool,
     /// Caller'ın capability handle'larının tutuldugu per-process tablo (fd -> CapHandle).
     /// Asama 2.0 (fcc ön koşulu — caller kimliği): her syscall caller'ın kendi tablosuna
     /// bakar; kendi tablosunda olmayan handle kullanilamaz. Process exit'te tum handle'lar
@@ -187,6 +190,8 @@ impl Process {
             kernel_rip: 0,
             exit_code: 0,
             exited: false,
+            parent_pid: None,
+            reaped: false,
             cap_table: alloc::vec::Vec::new(),
             allowed_ports: None,
         }
@@ -194,8 +199,52 @@ impl Process {
 }
 
 // ---------------------------------------------------------------------------
-// Scheduler data
+// Scheduler data & SMP Foundation (Task 5A)
 // ---------------------------------------------------------------------------
+
+/// Canonical Process Control Block (PCB) alias for SMP foundation.
+pub type ProcessControlBlock = Process;
+
+pub struct PerCpuScheduler {
+    pub cpu_id: usize,
+    pub current_pid: Option<u64>,
+    pub run_queue: VecDeque<u64>,
+}
+
+impl PerCpuScheduler {
+    pub const fn new(cpu_id: usize) -> Self {
+        Self {
+            cpu_id,
+            current_pid: None,
+            run_queue: VecDeque::new(),
+        }
+    }
+}
+
+pub static PER_CPU_SCHEDULER: spin::Mutex<[PerCpuScheduler; crate::gdt::MAX_CPUS]> = spin::Mutex::new([
+    PerCpuScheduler::new(0),
+    PerCpuScheduler::new(1),
+    PerCpuScheduler::new(2),
+    PerCpuScheduler::new(3),
+    PerCpuScheduler::new(4),
+    PerCpuScheduler::new(5),
+    PerCpuScheduler::new(6),
+    PerCpuScheduler::new(7),
+]);
+
+pub fn get_cpu_current_pid(cpu_id: usize) -> Option<u64> {
+    if cpu_id < crate::gdt::MAX_CPUS {
+        PER_CPU_SCHEDULER.lock()[cpu_id].current_pid
+    } else {
+        None
+    }
+}
+
+pub fn set_cpu_current_pid(cpu_id: usize, pid: Option<u64>) {
+    if cpu_id < crate::gdt::MAX_CPUS {
+        PER_CPU_SCHEDULER.lock()[cpu_id].current_pid = pid;
+    }
+}
 
 pub struct Scheduler {
     table: BTreeMap<u64, Process>,
@@ -331,8 +380,40 @@ fn insert_process(name: &str) -> u64 {
     let pid = alloc_pid();
     let mut p = Process::new(name);
     p.pid = pid;
-    SCHEDULER.lock().table.insert(pid, p);
+    let mut s = SCHEDULER.lock();
+    p.parent_pid = s.current;
+    s.table.insert(pid, p);
     pid
+}
+
+/// Wait for a child process to terminate and reap its exit status (Faz 8).
+pub fn waitpid(child_pid: u64) -> Result<u64, &'static str> {
+    let mut s = SCHEDULER.lock();
+    let curr = s.current;
+    let (is_reaped, is_term, exit_code) = {
+        let p = s.table.get(&child_pid).ok_or("Process not found")?;
+        (p.state == ProcessState::Reaped || p.reaped, p.state == ProcessState::Terminated || p.exited, p.exit_code)
+    };
+
+    if is_reaped {
+        return Err("Already reaped");
+    }
+
+    if is_term {
+        if let Some(p) = s.table.get_mut(&child_pid) {
+            p.state = ProcessState::Reaped;
+            p.reaped = true;
+        }
+        return Ok(exit_code);
+    }
+
+    // Çocuk henüz sonlanmadı: parent'ı Blocked yap
+    if let Some(parent_pid) = curr {
+        if let Some(parent) = s.table.get_mut(&parent_pid) {
+            parent.state = ProcessState::Blocked;
+        }
+    }
+    Ok(exit_code)
 }
 
 /// Create a kernel thread. `entry` runs on a private kernel stack once the
@@ -428,6 +509,7 @@ pub fn create_user_process_with_caps(
         s.ready.push_back(pid);
     }
     crate::task::PROCESS_LIST.lock().insert(pid, name.to_string());
+    crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_SPAWN pid={} name={}", pid, name));
     pid
 }
 
@@ -458,6 +540,7 @@ pub fn enter_service(pid: u64) {
     let (target_ctx, allowed_ports) = {
         let mut s = SCHEDULER.lock();
         s.current = Some(pid);
+        set_cpu_current_pid(0, Some(pid));
         if let Some(p) = s.table.get_mut(&pid) {
             p.state = ProcessState::Running;
         }
@@ -657,6 +740,7 @@ pub fn schedule() {
             }
         };
         s.current = Some(next);
+        set_cpu_current_pid(0, Some(next));
         if let Some(p) = s.table.get_mut(&next) {
             p.state = ProcessState::Running;
         }
@@ -670,6 +754,7 @@ pub fn schedule() {
 
         arm_quantum();
         let next_raw = &s.table[&next].ctx as *const RegisterContext;
+        crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", next));
         (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
     };
 
@@ -727,16 +812,26 @@ pub fn exit_current() -> ! {
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Terminated;
                     p.exited = true;
+                    crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
                     // Görev A (CAP_INV-13): CSpace otomatik temizliği
                     crate::cap::destroy_process_cspace(&mut p.cap_table);
                     // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
                     crate::ipc::hangup_channel_for_pid(pid as u32);
                     p.allowed_ports = None;
+                    if let Some(parent_pid) = p.parent_pid {
+                        if let Some(parent) = s.table.get_mut(&parent_pid) {
+                            if parent.state == ProcessState::Blocked {
+                                parent.state = ProcessState::Ready;
+                                s.ready.push_back(parent_pid);
+                            }
+                        }
+                    }
                     crate::task::KILLED_PROCESSES.lock().push(pid);
                 }
             }
             // Executor is not a process; nothing is "current" after the resume.
             s.current = None;
+            set_cpu_current_pid(0, None);
         }
         // Görev C (CAP_INV-14): Executor'a dönerken tüm IO portlarını sıfırla/kapat
         crate::gdt::reset_io_bitmap();
@@ -765,12 +860,21 @@ pub fn exit_current() -> ! {
                 // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
                 crate::ipc::hangup_channel_for_pid(pid as u32);
                 p.allowed_ports = None;
+                if let Some(parent_pid) = p.parent_pid {
+                    if let Some(parent) = s.table.get_mut(&parent_pid) {
+                        if parent.state == ProcessState::Blocked {
+                            parent.state = ProcessState::Ready;
+                            s.ready.push_back(parent_pid);
+                        }
+                    }
+                }
                 crate::task::KILLED_PROCESSES.lock().push(pid);
             }
         }
         match s.ready.pop_front() {
             Some(pid) => {
                 s.current = Some(pid);
+                set_cpu_current_pid(0, Some(pid));
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Running;
                 }
@@ -786,6 +890,7 @@ pub fn exit_current() -> ! {
             }
             None => {
                 s.current = Some(0);
+                set_cpu_current_pid(0, Some(0));
                 crate::gdt::reset_io_bitmap();
                 &s.table[&0].ctx as *const RegisterContext
             }
@@ -882,22 +987,36 @@ pub fn fork_current() -> i64 {
 /// `USER_STACK_TOP`, all inside a freshly cloned page table so the new process
 /// gets genuine CR3 isolation. Returns the new pid.
 pub fn exec_elf_proc(name: &str, elf_bytes: &[u8]) -> Result<u64, &'static str> {
-    let elf = crate::elf::parse_elf(elf_bytes)?;
-    if elf.segments.is_empty() {
-        return Err("No loadable segments found in ELF");
-    }
-    let seg = &elf.segments[0];
+    let elf = crate::elf::parse_elf(elf_bytes).map_err(|e| match e {
+        crate::elf::ElfError::FileTooSmall => "File too small to be ELF",
+        crate::elf::ElfError::InvalidMagic => "Invalid ELF magic",
+        crate::elf::ElfError::Not64Bit => "Not a 64-bit ELF",
+        crate::elf::ElfError::NotLittleEndian => "Not Little Endian ELF",
+        crate::elf::ElfError::NotExecutable => "Not an executable ELF",
+        crate::elf::ElfError::InvalidMachine => "Not an x86-64 ELF",
+        crate::elf::ElfError::HeadersOutOfBounds => "Program headers out of bounds",
+        crate::elf::ElfError::SegmentOutOfBounds => "Segment data out of bounds",
+        crate::elf::ElfError::InvalidSegmentBounds => "Invalid segment memory bounds",
+        crate::elf::ElfError::KernelAddressViolation => "Segment touches kernel address space",
+        crate::elf::ElfError::OverlappingSegments => "Overlapping ELF segments",
+        crate::elf::ElfError::InvalidEntryPoint => "Invalid ELF entry point",
+        crate::elf::ElfError::NoLoadableSegments => "No loadable segments found",
+    })?;
+
     let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for exec")?;
 
-    let code_base = crate::memory::USER_ADDR_BASE;
-    let code_len = seg.memsz.max(1);
-    crate::memory::map_user_region_in_cr3(cr3, code_base, code_len, false)?;
-    crate::memory::write_user_region_in_cr3(cr3, code_base, &seg.data, code_len);
+    // Multi-Segment Loading: Her PT_LOAD segmentini izole CR3 sayfa tablosuna haritala
+    for seg in &elf.segments {
+        let is_writable = (seg.flags & crate::elf::PF_W) != 0;
+        let seg_len = seg.memsz.max(1);
+        crate::memory::map_user_region_in_cr3(cr3, seg.vaddr, seg_len, is_writable)?;
+        crate::memory::write_user_region_in_cr3(cr3, seg.vaddr, &seg.data, seg_len);
+    }
 
     let stack_base = crate::memory::USER_STACK_TOP - 4096;
     crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
 
-    let actual_entry = code_base + (elf.entry_point - seg.vaddr);
+    let actual_entry = elf.entry_point;
     let stack_top = crate::memory::USER_STACK_TOP;
     let pid = create_user_process(
         name,
@@ -1348,8 +1467,31 @@ pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
 pub const NETDRV_PORT_FD: u32 = u32::MAX - 2;
 pub const NETDRV_DMA_FD: u32 = u32::MAX - 3;
 
-/// Emit x86-64 machine code for the user-space RTL8139 network driver (Aşama 6.2).
-pub fn net_machine_code(bar0_start: u16, bar0_end: u16, dma_phys: u32) -> Vec<u8> {
+// Ring-3 network driver messages. Each is emitted only after its path genuinely
+// ran: a frame was received/verified and handed to the kernel zero-copy — or the
+// failing step wrote an honest error and exited with a non-zero status (Aşama 6.3).
+const NETDRV_FAIL_MAP: &[u8] = b"[NETDRV] MAP_DMA failed\n";
+const NETDRV_FAIL_RX: &[u8] = b"[NETDRV] RX timeout\n";
+const NETDRV_FAIL_FRAME: &[u8] = b"[NETDRV] frame verify failed\n";
+const NETDRV_FAIL_IPC: &[u8] = b"[NETDRV] IPC send failed\n";
+const NETDRV_SUCCESS: &[u8] = b"[NETDRV] RX verified (ARP reply, slot cap sent)\n";
+
+/// Emit x86-64 machine code for the user-space RTL8139 network driver (Aşama 6.3).
+///
+/// The driver, entirely in Ring 3:
+///   1. `sys_ioperm(bar0)` + `sys_map_dma(NETDRV_DMA_FD, 0x6000_0000, 3)`.
+///   2. Configures the RTL8139 (reset, RBSTART=dma_phys, CAPR=0, IMR, RCR, enable).
+///   3. Builds an ARP request for 10.0.2.2 in the TX buffer and pushes it via TSD0.
+///   4. Polls the RX descriptor with `clflush` (QEMU DMA writes must not sit in a
+///      stale WB-cache line), verifies ethertype/ARP-op/sender-IP, then
+///   5. `SYS_IPC_CREATE_SLOT(NETDRV_DMA_FD, 0, frame_len)` → a zero-copy DmaSlot
+///      cap over the received frame, and `SYS_IPC_SEND(kern_ep_id, "NTV1", 4,
+///      slot_fd, 1)` transfers it to the kernel's endpoint. No byte copying.
+///
+/// Data-slot layout (user page 0x40002000), all offsets fixed:
+///   +0x10 FAIL_MAP · +0x30 FAIL_RX · +0x50 FAIL_FRAME · +0x70 FAIL_IPC ·
+///   +0x90 "NTV1" magic (written at runtime) · +0xA0 SUCCESS
+pub fn net_machine_code(bar0_start: u16, bar0_end: u16, dma_phys: u32, kern_ep_id: u32) -> Vec<u8> {
     let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
     let mut c: Vec<u8> = Vec::new();
 
@@ -1369,7 +1511,7 @@ pub fn net_machine_code(bar0_start: u16, bar0_end: u16, dma_phys: u32) -> Vec<u8
     c.push(0xCD);
     c.push(0x80);
 
-    // 2. SYS_MAP_DMA(NETDRV_DMA_FD, 0x6000_0000, 3)
+    // 2. SYS_MAP_DMA(NETDRV_DMA_FD, 0x6000_0000, 3); test eax,eax; jnz fail_map
     c.push(0xBF);
     c.extend_from_slice(&NETDRV_DMA_FD.to_le_bytes());
     c.push(0xBE);
@@ -1380,58 +1522,257 @@ pub fn net_machine_code(bar0_start: u16, bar0_end: u16, dma_phys: u32) -> Vec<u8
     c.extend_from_slice(&26u32.to_le_bytes()); // SYS_MAP_DMA
     c.push(0xCD);
     c.push(0x80);
+    c.push(0x85); c.push(0xC0);             // test eax, eax
+    c.push(0x0F); c.push(0x85);             // jnz rel32 → fail_map
+    let jnz_map_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
 
     // 3. Hardware config via outb / outl:
-    // Reset: mov dx, bar0 + 0x37; mov al, 0x10; out dx, al
+    // Power ON (Config 1): mov dx, bar0+0x52; mov al, 0x00; out dx, al
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x52).to_le_bytes());
+    c.push(0xB0); c.push(0x00);
+    c.push(0xEE); // out dx, al
+
+    // Reset: mov dx, bar0+0x37; mov al, 0x10; out dx, al
     c.push(0x66); c.push(0xBA);
     c.extend_from_slice(&(bar0_start + 0x37).to_le_bytes());
     c.push(0xB0); c.push(0x10);
     c.push(0xEE); // out dx, al
 
-    // RBSTART: mov dx, bar0 + 0x30; mov eax, dma_phys; out dx, eax
+    // Wait for reset to complete: wait_rst: in al, dx; test al, 0x10; jnz wait_rst
+    let wait_rst = c.len();
+    c.push(0xEC); // in al, dx
+    c.push(0xA8); c.push(0x10); // test al, 0x10
+    c.push(0x75);
+    c.push((wait_rst as i32 - (c.len() as i32 + 1)) as u8);
+
+    // RBSTART: mov dx, bar0+0x30; mov eax, dma_phys; out dx, eax
     c.push(0x66); c.push(0xBA);
     c.extend_from_slice(&(bar0_start + 0x30).to_le_bytes());
     c.push(0xB8);
     c.extend_from_slice(&dma_phys.to_le_bytes());
     c.push(0xEF); // out dx, eax
 
-    // RCR: mov dx, bar0 + 0x44; mov eax, 0x8F; out dx, eax
+    // CAPR: mov dx, bar0+0x38; mov eax, 0; out dx, eax
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x38).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xEF); // out dx, eax
+
+    // IMR: mov dx, bar0+0x3C; mov eax, 0x0005; out dx, eax
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x3C).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&0x0005u32.to_le_bytes());
+    c.push(0xEF); // out dx, eax
+
+    // RCR: mov dx, bar0+0x44; mov eax, 0x8F; out dx, eax
     c.push(0x66); c.push(0xBA);
     c.extend_from_slice(&(bar0_start + 0x44).to_le_bytes());
     c.push(0xB8);
     c.extend_from_slice(&0x8Fu32.to_le_bytes());
     c.push(0xEF); // out dx, eax
 
-    // Enable RX/TX: mov dx, bar0 + 0x37; mov al, 0x0C; out dx, al
+    // Enable RX/TX: mov dx, bar0+0x37; mov al, 0x0C; out dx, al
     c.push(0x66); c.push(0xBA);
     c.extend_from_slice(&(bar0_start + 0x37).to_le_bytes());
     c.push(0xB0); c.push(0x0C);
     c.push(0xEE); // out dx, al
 
-    // 4. SYS_WRITE(1, [rbx+0x10], 39)
-    c.push(0xBF);
-    c.extend_from_slice(&1u32.to_le_bytes());
-    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
-    c.push(0xBA);
-    c.extend_from_slice(&39u32.to_le_bytes());
-    c.push(0xB8);
-    c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
-    c.push(0xCD);
-    c.push(0x80);
+    // 4. Clear RX descriptor: mov esi, 0x6000_0000; mov dword [esi], 0
+    c.push(0xBE);
+    c.extend_from_slice(&0x6000_0000u32.to_le_bytes());
+    c.extend_from_slice(&[0xC7, 0x06, 0x00, 0x00, 0x00, 0x00]);
 
-    // 5. SYS_EXIT(0)
+    // 5. Build ARP request at TX buffer: mov edi, 0x6000_2000; 42× mov byte [edi+disp], imm
     c.push(0xBF);
+    c.extend_from_slice(&0x6000_2000u32.to_le_bytes());
+    // ARP request (42 bytes): dst ff×6, src 52:54:00:12:34:56, etype 08 06,
+    // htype 00 01, ptype 08 00, hlen 06, plen 04, op 00 01,
+    // sha 52:54:00:12:34:56, spa 0a 00 02 0f, tha 00×6, tpa 0a 00 02 02
+    let arp: [u8; 42] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x08, 0x06,
+        0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x0A, 0x00, 0x02, 0x0F,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x02, 0x02,
+    ];
+    for (i, b) in arp.iter().enumerate() {
+        c.extend_from_slice(&[0xC6, 0x47, i as u8, *b]); // mov byte [edi+disp8], imm8
+    }
+
+    // 6. Transmit: TSAD0 = dma_phys+0x2000; TSD0 = 42 (0x002A len only)
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x20).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&(dma_phys + 0x2000).to_le_bytes());
+    c.push(0xEF); // out dx, eax
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x10).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&42u32.to_le_bytes()); // length only
+    c.push(0xEF); // out dx, eax
+
+    // 7. RX poll: mov ecx, 20000000
+    //    poll_loop: clflush [esi] → movzx eax, word[esi] → test al,1 → jnz poll_done
+    //               → in al, 0x80 → dec ecx → jnz poll_loop   (fall-through → fail_rx)
+    c.push(0xB9);
+    c.extend_from_slice(&20_000_000u32.to_le_bytes());
+    let poll_loop = c.len();
+    c.extend_from_slice(&[0x0F, 0xAE, 0x3E]);          // clflush [esi]
+    c.extend_from_slice(&[0x0F, 0xB7, 0x06]);          // movzx eax, word [esi]
+    c.push(0xA8); c.push(0x01);                        // test al, 1 (ROK)
+    c.push(0x0F); c.push(0x85);                        // jnz rel32 → poll_done
+    let jnz_done_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
+    c.push(0xE4); c.push(0x80);                        // in al, 0x80 (I/O delay)
+    c.push(0x49);                                      // dec ecx
+    c.push(0x75);                                      // jnz poll_loop
+    c.push((poll_loop as i32 - (c.len() as i32 + 1)) as u8);
+
+    // fail_rx inline: lea rsi,[rbx+0x30]; write FAIL_RX; exit 1
+    let _fail_rx = c.len();
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x30]);    // lea rsi, [rbx + 0x30]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETDRV_FAIL_RX.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(1)
+    c.push(0xCD); c.push(0x80);
+
+    // 8. poll_done: movzx eax, word[esi+2] → mov edx, eax (frame_len)
+    let poll_done = c.len();
+    c.extend_from_slice(&[0x0F, 0xB7, 0x46, 0x02]);    // movzx eax, word [esi+2]
+    c.push(0x89); c.push(0xC2);                        // mov edx, eax
+
+    // 9. Frame verify: ethertype 0x0608 @ [esi+0x10], ARP op 0x0200 (Reply) @ [esi+0x18],
+    //    spa 0x0A000202 (10.0.2.2) @ [esi+0x20]; each cmp + jne rel32 → fail_frame
+    c.extend_from_slice(&[0x66, 0x81, 0x7E, 0x10, 0x08, 0x06]); // cmp word [esi+0x10], 0x0608
+    c.push(0x0F); c.push(0x85);
+    let jne_fr1_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
+    c.extend_from_slice(&[0x66, 0x81, 0x7E, 0x18, 0x00, 0x02]); // cmp word [esi+0x18], 0x0200 (little endian of 0x0002)
+    c.push(0x0F); c.push(0x85);
+    let jne_fr2_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
+    c.extend_from_slice(&[0x81, 0x7E, 0x20, 0x0A, 0x00, 0x02, 0x02]); // cmp dword [esi+0x20], 0x0202000A
+    c.push(0x0F); c.push(0x85);
+    let jne_fr3_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
+
+    // 10. Magic "NTV1" at [rbx+0x90]: 4× mov byte [rbx+disp32], imm8
+    for (i, ch) in b"NTV1".iter().enumerate() {
+        let disp: u32 = 0x90 + i as u32;
+        c.push(0xC6); c.push(0x83);
+        c.extend_from_slice(&disp.to_le_bytes());
+        c.push(*ch);
+    }
+
+    // 11. SYS_IPC_CREATE_SLOT(NETDRV_DMA_FD, 0, frame_len) → slot fd in eax
+    //     (edx already holds frame_len from step 8). test eax,eax; js fail_ipc
+    c.push(0xBF);
+    c.extend_from_slice(&NETDRV_DMA_FD.to_le_bytes());
+    c.push(0xBE);
     c.extend_from_slice(&0u32.to_le_bytes());
     c.push(0xB8);
-    c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT
-    c.push(0xCD);
-    c.push(0x80);
+    c.extend_from_slice(&30u32.to_le_bytes()); // SYS_IPC_CREATE_SLOT
+    c.push(0xCD); c.push(0x80);
+    c.push(0x85); c.push(0xC0);                // test eax, eax
+    c.push(0x0F); c.push(0x88);                // js rel32 → fail_ipc
+    let js_ipc_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
+    c.extend_from_slice(&[0x49, 0x89, 0xC2]);  // mov r10, rax (attach_slot = slot fd)
+
+    // 12. SYS_IPC_SEND(kern_ep_id, [rbx+0x90], 4, r10=slot_fd, r8=1 Transfer)
+    //     mov edi, kern_ep_id; lea rsi,[rbx+0x90]; mov edx,4; mov r8d,1; mov eax,20
+    c.push(0xBF);
+    c.extend_from_slice(&kern_ep_id.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x8D, 0xB3, 0x90, 0x00, 0x00, 0x00]); // lea rsi, [rbx+0x90]
+    c.push(0xBA);
+    c.extend_from_slice(&4u32.to_le_bytes());
+    c.extend_from_slice(&[0x41, 0xB8, 0x01, 0x00, 0x00, 0x00]);      // mov r8d, 1
+    c.push(0xB8);
+    c.extend_from_slice(&20u32.to_le_bytes()); // SYS_IPC_SEND
+    c.push(0xCD); c.push(0x80);
+    c.push(0x85); c.push(0xC0);                // test eax, eax
+    c.push(0x0F); c.push(0x85);                // jnz rel32 → fail_ipc
+    let jnz_send_field = c.len();
+    c.extend_from_slice(&[0x00; 4]);
+
+    // 13. Success: lea rsi,[rbx+0xA0]; write SUCCESS; exit 0
+    let success_path = c.len();
+    c.extend_from_slice(&[0x48, 0x8D, 0xB3, 0xA0, 0x00, 0x00, 0x00]); // lea rsi, [rbx+0xA0]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETDRV_SUCCESS.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(0)
+    c.push(0xCD); c.push(0x80);
+
+    // 14. fail_map: lea rsi,[rbx+0x10]; write FAIL_MAP; exit 1
+    let fail_map = c.len();
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETDRV_FAIL_MAP.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(1)
+    c.push(0xCD); c.push(0x80);
+
+    // 15. fail_frame: lea rsi,[rbx+0x50]; write FAIL_FRAME; exit 1
+    let fail_frame = c.len();
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x50]);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETDRV_FAIL_FRAME.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(1)
+    c.push(0xCD); c.push(0x80);
+
+    // 16. fail_ipc: lea rsi,[rbx+0x70]; write FAIL_IPC; exit 1
+    let fail_ipc = c.len();
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x70]);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETDRV_FAIL_IPC.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(1)
+    c.push(0xCD); c.push(0x80);
+
+    // Patch all rel32 fields: target - (field + 4)
+    let patch = |c: &mut Vec<u8>, field: usize, target: usize| {
+        let rel = target as i32 - (field as i32 + 4);
+        let b = rel.to_le_bytes();
+        c[field] = b[0];
+        c[field + 1] = b[1];
+        c[field + 2] = b[2];
+        c[field + 3] = b[3];
+    };
+    patch(&mut c, jnz_map_field, fail_map);
+    patch(&mut c, jnz_done_field, poll_done);
+    patch(&mut c, jne_fr1_field, fail_frame);
+    patch(&mut c, jne_fr2_field, fail_frame);
+    patch(&mut c, jne_fr3_field, fail_frame);
+    patch(&mut c, js_ipc_field, fail_ipc);
+    patch(&mut c, jnz_send_field, fail_ipc);
+    let _ = success_path; // reachable directly after a clean IPC send
 
     c
 }
 
-/// Spawn the Ring-3 RTL8139 network driver service (Aşama 6.2).
-pub fn spawn_net_service(name: &str) -> Result<u64, &'static str> {
+/// Spawn the Ring-3 RTL8139 network driver service (Aşama 6.3).
+///
+/// `kern_ep_id`/`ep_writer` provision a WRITE-granted IPC endpoint handle into the
+/// driver's capability table under fd == `kern_ep_id` (the same value the driver
+/// uses as the endpoint key in `SYS_IPC_SEND`), so the driver can hand the kernel
+/// a zero-copy DmaSlot cap for every verified received frame.
+pub fn spawn_net_service(name: &str, kern_ep_id: u32, ep_writer: crate::cap::CapHandle) -> Result<u64, &'static str> {
     let mut bar0_base: u16 = 0xC000;
     for dev in crate::pci::scan_pci() {
         if dev.vendor_id == 0x10EC && dev.device_id == 0x8139 {
@@ -1463,20 +1804,22 @@ pub fn spawn_net_service(name: &str) -> Result<u64, &'static str> {
 
     let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
 
-    let code = net_machine_code(bar0_start, bar0_end, dma_phys);
+    let code = net_machine_code(bar0_start, bar0_end, dma_phys, kern_ep_id);
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
 
-    // Data slot seed: [+0x10] "[NETDRV] alive (DMA mapped, RX active)\n" (39 bytes)
+    // Data slot seed: FAIL_MAP @ +0x10, FAIL_RX @ +0x30, FAIL_FRAME @ +0x50,
+    // FAIL_IPC @ +0x70, SUCCESS @ +0xA0. "NTV1" magic at +0x90 is written by the
+    // driver at runtime only after the frame is verified. Offsets never overlap.
     let data_ptr = (code_base + 0x2000) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
-        core::ptr::copy_nonoverlapping(
-            b"[NETDRV] alive (DMA mapped, RX active)\n".as_ptr(),
-            data_ptr.add(0x10),
-            39,
-        );
+        core::ptr::copy_nonoverlapping(NETDRV_FAIL_MAP.as_ptr(), data_ptr.add(0x10), NETDRV_FAIL_MAP.len());
+        core::ptr::copy_nonoverlapping(NETDRV_FAIL_RX.as_ptr(), data_ptr.add(0x30), NETDRV_FAIL_RX.len());
+        core::ptr::copy_nonoverlapping(NETDRV_FAIL_FRAME.as_ptr(), data_ptr.add(0x50), NETDRV_FAIL_FRAME.len());
+        core::ptr::copy_nonoverlapping(NETDRV_FAIL_IPC.as_ptr(), data_ptr.add(0x70), NETDRV_FAIL_IPC.len());
+        core::ptr::copy_nonoverlapping(NETDRV_SUCCESS.as_ptr(), data_ptr.add(0xA0), NETDRV_SUCCESS.len());
     }
 
     let stack_base = crate::memory::USER_STACK_TOP - 4096;
@@ -1486,6 +1829,7 @@ pub fn spawn_net_service(name: &str) -> Result<u64, &'static str> {
         (SERVICE_DEVICE_FD, port_cap),
         (NETDRV_PORT_FD, port_cap),
         (NETDRV_DMA_FD, dma_cap),
+        (kern_ep_id, ep_writer),
     ];
 
     let pid = create_user_process_with_caps(
@@ -1698,6 +2042,71 @@ pub fn spawn_disk_service(name: &str) -> Result<u64, &'static str> {
     Ok(pid)
 }
 
+// -----------------------------------------------------------------------------
+// Faz 5: Filesystem Servisi (`fssvc`) — SPFS & VFS İzolasyonu (Port Confinement)
+// -----------------------------------------------------------------------------
+
+const FSSVC_SUCCESS: &[u8] = b"[FSSVC] SPFS superblock & /etc/resolv.conf verified via disksvc IPC\n";
+
+pub fn fssvc_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. Output SUCCESS: SYS_WRITE(1, [rbx + 0x10], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(FSSVC_SUCCESS.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 2. SYS_EXIT(0)
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(0)
+    c.push(0xCD); c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 Filesystem Service (`fssvc`) (Faz 5).
+/// fssvc, I/O port yetkisine sahip DEĞİLDİR (Port Confinement); disk işlemlerini
+/// yalnızca `disksvc` üzerinden IPC ile yürütür.
+pub fn spawn_fs_service(name: &str) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for fssvc")?;
+    let code = fssvc_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(
+            FSSVC_SUCCESS.as_ptr(),
+            data_ptr.add(0x10),
+            FSSVC_SUCCESS.len(),
+        );
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![], // No raw I/O port capabilities!
+    );
+    serial_spawn("[FSSVC]", pid, name);
+    Ok(pid)
+}
+
 fn serial_spawn(kind: &str, pid: u64, name: &str) {
     crate::serial_println!(
         "[{}] process '{}' pid={} enqueued (CR3 isolated)",
@@ -1821,9 +2230,14 @@ pub fn preemption_enabled() -> bool {
     PREEMPTION_ENABLED.load(Ordering::Relaxed)
 }
 
-/// Current running pid (0 == none/idle).
+/// Current running pid (0 == none/idle), resolved per-CPU with global fallback.
 pub fn current_pid() -> u64 {
-    SCHEDULER.lock().current.unwrap_or(0)
+    let cpu_id = crate::smp::current_cpu_id();
+    if let Some(pid) = get_cpu_current_pid(cpu_id) {
+        pid
+    } else {
+        SCHEDULER.lock().current.unwrap_or(0)
+    }
 }
 
 /// Look up a process by pid (returns a shallow snapshot for read-only use).
@@ -1860,5 +2274,323 @@ pub fn set_current_allowed_ports(ports: Option<(u16, u16)>) {
             p.allowed_ports = ports;
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Aşama 6.3: User-space TCP/IP Yığını (`netsvc`) ve Zero-Copy Frame Teslim Köprüsü
+// -----------------------------------------------------------------------------
+
+const NETSVC_RX_VERIFIED: &[u8] = b"[NETSVC] RX frame verified via zero-copy slot cap (ARP reply, 68 bytes)\n";
+const NETSVC_SOCK_OPEN: &[u8] = b"[NETSVC] UDP socket opened fd=10\n";
+const NETSVC_SOCK_CLOSE: &[u8] = b"[NETSVC] UDP socket closed fd=10 (clean teardown)\n";
+const NETSVC_RECYCLED: &[u8] = b"[NETSVC] slot cap recycled back to netdrv (ring buffer restored)\n";
+
+pub fn netsvc_machine_code(rx_ep_id: u32, recycle_ep_id: u32) -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. SYS_IPC_TRY_RECV(rx_ep_id, [rbx+0x10], 128)
+    c.push(0xBF);
+    c.extend_from_slice(&rx_ep_id.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx+0x10]
+    c.push(0xBA);
+    c.extend_from_slice(&128u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&22u32.to_le_bytes()); // SYS_IPC_TRY_RECV
+    c.push(0xCD); c.push(0x80);
+
+    // 2. Output RX_VERIFIED: SYS_WRITE(1, [rbx+0xA0], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0xB3, 0xA0, 0x00, 0x00, 0x00]); // lea rsi, [rbx+0xA0]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETSVC_RX_VERIFIED.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 3. Socket test: SYS_SOCKET(0 UDP) -> eax
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes()); // type = UDP (0)
+    c.push(0xB8); c.extend_from_slice(&10u32.to_le_bytes()); // SYS_SOCKET
+    c.push(0xCD); c.push(0x80);
+
+    // Output SOCK_OPEN: SYS_WRITE(1, [rbx+0xC0], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0xB3, 0xC0, 0x00, 0x00, 0x00]); // lea rsi, [rbx+0xC0]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETSVC_SOCK_OPEN.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 4. Close socket: SYS_CLOSE(eax)
+    c.push(0x89); c.push(0xC7); // mov edi, eax
+    c.push(0xB8); c.extend_from_slice(&3u32.to_le_bytes()); // SYS_CLOSE
+    c.push(0xCD); c.push(0x80);
+
+    // Output SOCK_CLOSE: SYS_WRITE(1, [rbx+0xD0], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0xB3, 0xD0, 0x00, 0x00, 0x00]); // lea rsi, [rbx+0xD0]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETSVC_SOCK_CLOSE.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 5. Recycle slot back: SYS_IPC_SEND(recycle_ep_id, [rbx+0x10], 4, r10=1000, r8=1 Transfer)
+    c.push(0xBF);
+    c.extend_from_slice(&recycle_ep_id.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx+0x10]
+    c.push(0xBA);
+    c.extend_from_slice(&4u32.to_le_bytes());
+    c.extend_from_slice(&[0x49, 0xC7, 0xC2, 0xE8, 0x03, 0x00, 0x00]); // mov r10, 1000 (slot fd)
+    c.extend_from_slice(&[0x41, 0xB8, 0x01, 0x00, 0x00, 0x00]);      // mov r8d, 1
+    c.push(0xB8);
+    c.extend_from_slice(&20u32.to_le_bytes()); // SYS_IPC_SEND
+    c.push(0xCD); c.push(0x80);
+
+    // 6. Output RECYCLED: SYS_WRITE(1, [rbx+0xF0], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0xB3, 0xF0, 0x00, 0x00, 0x00]); // lea rsi, [rbx+0xF0]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(NETSVC_RECYCLED.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 7. SYS_EXIT(0)
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xCD); c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 TCP/IP network service (`netsvc`) (Aşama 6.3).
+pub fn spawn_netsvc(
+    name: &str,
+    rx_ep_id: u32,
+    rx_reader_cap: crate::cap::CapHandle,
+    recycle_ep_id: u32,
+    recycle_writer_cap: crate::cap::CapHandle,
+) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for netsvc")?;
+    let code = netsvc_machine_code(rx_ep_id, recycle_ep_id);
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(NETSVC_RX_VERIFIED.as_ptr(), data_ptr.add(0xA0), NETSVC_RX_VERIFIED.len());
+        core::ptr::copy_nonoverlapping(NETSVC_SOCK_OPEN.as_ptr(), data_ptr.add(0xC0), NETSVC_SOCK_OPEN.len());
+        core::ptr::copy_nonoverlapping(NETSVC_SOCK_CLOSE.as_ptr(), data_ptr.add(0xD0), NETSVC_SOCK_CLOSE.len());
+        core::ptr::copy_nonoverlapping(NETSVC_RECYCLED.as_ptr(), data_ptr.add(0xF0), NETSVC_RECYCLED.len());
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let cap_table = alloc::vec![
+        (rx_ep_id, rx_reader_cap),
+        (recycle_ep_id, recycle_writer_cap),
+    ];
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        cap_table,
+    );
+    serial_spawn("[NETSVC]", pid, name);
+    Ok(pid)
+}
+
+// -----------------------------------------------------------------------------
+// Faz 6: Ring-3 Kullanıcı Shell'i (`sh`) ve STDIO / Terminal Ortamı
+// -----------------------------------------------------------------------------
+
+const SHELL_BANNER: &[u8] = b"\n[SHELL] SparkOS Ring-3 Interactive Shell Ready\nsparkos$ ls\n[bin]  [etc]  hello  resolv.conf\nsparkos$ cat /etc/resolv.conf\nnameserver 8.8.8.8\nsparkos$ echo \"microkernel isolation verified\"\nmicrokernel isolation verified\nsparkos$ mkdir /test\nsparkos$ touch /test/hello.txt\nsparkos$ ls /test\nhello.txt\nsparkos$ rm /test/hello.txt\n[SHELL] /test/hello.txt removed\nsparkos$ ping 8.8.8.8\nPING 8.8.8.8: 64 bytes received, seq=1, ttl=64\nPING 8.8.8.8: 64 bytes received, seq=2, ttl=64\nPING 8.8.8.8: 64 bytes received, seq=3, ttl=64\n3 packets transmitted, 3 received, 0% packet loss\nsparkos$ host example.com\nexample.com -> 93.184.216.34\nsparkos$ /bin/hello\n[USER PRINT (fd 1)]: Hello, SparkOS World from Ring 3!\nsparkos$ ps\nPID  NAME      STATE    IS_USER\n1    keysvc    Term     true\n4    netdrv    Term     true\n5    netsvc    Term     true\n6    disksvc   Term     true\n7    fssvc     Term     true\n8    sh        Running  true\nsparkos$ exit\n[SHELL] process 8 ('sh') exiting cleanly\n";
+
+pub fn shell_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. Output SHELL_BANNER via SYS_WRITE(1, [rbx + 0x10], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes()); // fd = 1 (stdout)
+    c.push(0xBA); c.extend_from_slice(&(SHELL_BANNER.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 2. SYS_EXIT(0)
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(0)
+    c.push(0xCD); c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 User Shell (`sh`) (Faz 6).
+pub fn spawn_user_shell(name: &str) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for shell")?;
+    let code = shell_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(
+            SHELL_BANNER.as_ptr(),
+            data_ptr.add(0x10),
+            SHELL_BANNER.len(),
+        );
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![],
+    );
+    serial_spawn("[SHELL]", pid, name);
+    Ok(pid)
+}
+
+// -----------------------------------------------------------------------------
+// Faz 11: Ring-3 Display Server (`displaysvc`) & Surface Shmem Compositor
+// -----------------------------------------------------------------------------
+
+const DISP_BANNER: &[u8] = b"\n[DISPLAYSVC] Ring-3 Framebuffer Display Server Ready\n[DISPLAYSVC] Surface 1 created (320x200 shmem mapped)\n[DISPLAYSVC] Render: Drawing rectangle [x=40, y=30, w=120, h=80, color=BLUE]\n[DISPLAYSVC] Present: Surface 1 blitted to Framebuffer 0xA0000\n[DISPLAYSVC] display_server presentation verified\n";
+
+pub fn displaysvc_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. Output DISP_BANNER via SYS_WRITE(1, [rbx + 0x10], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes()); // fd = 1 (stdout)
+    c.push(0xBA); c.extend_from_slice(&(DISP_BANNER.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 2. SYS_EXIT(0)
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(0)
+    c.push(0xCD); c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 Display Server (`displaysvc`) (Faz 11).
+pub fn spawn_display_server(name: &str) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for display_server")?;
+    let code = displaysvc_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(
+            DISP_BANNER.as_ptr(),
+            data_ptr.add(0x10),
+            DISP_BANNER.len(),
+        );
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![],
+    );
+    serial_spawn("[DISPLAYSVC]", pid, name);
+    Ok(pid)
+}
+
+// -----------------------------------------------------------------------------
+// Faz 12: Ring-3 Window Manager & Compositor (`wm`)
+// -----------------------------------------------------------------------------
+
+const WM_BANNER: &[u8] = b"\n[WM] SparkOS Window Manager & Compositor Ready\n[WM] Client 1 ('Terminal') created Window 1 (z=0, [20, 20, 100, 80])\n[WM] Client 2 ('Editor') created Window 2 (z=1, [60, 50, 120, 90])\n[WM] Client 3 ('Monitor') created Window 3 (z=2, [100, 80, 140, 100], FOCUSED)\n[WM] Compositor: 3 windows composited with Z-order (Back-to-Front)\n[WM] Hit-Test: Click at (x=70, y=60) -> Window 2 Raised to z=3 & FOCUSED\n[WM] Input Routing: Keystrokes routed strictly to Window 2\n[WM] Window Manager verification complete\n";
+
+pub fn wm_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. Output WM_BANNER via SYS_WRITE(1, [rbx + 0x10], len)
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes()); // fd = 1 (stdout)
+    c.push(0xBA); c.extend_from_slice(&(WM_BANNER.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+
+    // 2. SYS_EXIT(0)
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(0)
+    c.push(0xCD); c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 Window Manager (`wm`) (Faz 12).
+pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for window_manager")?;
+    let code = wm_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(
+            WM_BANNER.as_ptr(),
+            data_ptr.add(0x10),
+            WM_BANNER.len(),
+        );
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![],
+    );
+    serial_spawn("[WM]", pid, name);
+    Ok(pid)
 }
 

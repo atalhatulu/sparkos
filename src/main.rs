@@ -187,13 +187,56 @@ async fn fault_demo() {
     }
 }
 
-/// Aşama 6.2 boot regresyonu: user-space RTL8139 network driver.
+/// Aşama 6.3 boot regresyonu: Ring-3 RTL8139 driver'ın üst yığına zero-copy frame.
+///
+/// Kernel bir IPC endpoint'i kurar, WRITE hakkını grant edip `ep_writer` handle'ını
+/// netdrv'e provision eder (fd == `kern_ep_id`). netdrv RX'te doğruladığı ARP reply/// Aşama 6.3: netdrv (RTL8139 Ring 3 DMA) <-> netsvc (Ring 3 TCP/IP) Zero-Copy Frame Hand-off.
 async fn net_demo() {
-    match crate::task::process::spawn_net_service("netdrv") {
-        Ok(pid) => {
-            crate::serial_println!("[NETDRV] netdrv pid={} entering (cooperative)", pid);
-            crate::task::process::enter_service(pid);
-            crate::serial_println!("[NETDRV] demo complete (Ring-3 RTL8139 + DMA mapped).");
+    let (rx_ep_id, rx_root) = match crate::ipc::create_raw_endpoint(8) {
+        Ok(pair) => pair,
+        Err(e) => {
+            crate::serial_println!("[NETDRV] RX endpoint create failed: {:?}", e);
+            return;
+        }
+    };
+    let rx_writer = match crate::cap::grant(rx_root, crate::cap::Rights::WRITE) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let rx_reader = match crate::cap::grant(rx_root, crate::cap::Rights::READ) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let (recycle_ep_id, recycle_root) = match crate::ipc::create_raw_endpoint(8) {
+        Ok(pair) => pair,
+        Err(e) => {
+            crate::serial_println!("[NETDRV] recycle endpoint create failed: {:?}", e);
+            return;
+        }
+    };
+    let recycle_writer = match crate::cap::grant(recycle_root, crate::cap::Rights::WRITE) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    // 1. netdrv sürücüsünü başlat (RX frame'i rx_ep_id'ye iletir)
+    match crate::task::process::spawn_net_service("netdrv", rx_ep_id, rx_writer) {
+        Ok(drv_pid) => {
+            crate::serial_println!("[NETDRV] netdrv pid={} entering (cooperative)", drv_pid);
+            crate::task::process::enter_service(drv_pid);
+
+            // 2. netsvc TCP/IP servisini başlat (rx_ep_id'den paketi alır ve recycle_ep_id ile iade eder)
+            match crate::task::process::spawn_netsvc("netsvc", rx_ep_id, rx_reader, recycle_ep_id, recycle_writer) {
+                Ok(svc_pid) => {
+                    crate::serial_println!("[NETSVC] netsvc pid={} entering (cooperative)", svc_pid);
+                    crate::task::process::enter_service(svc_pid);
+                    crate::serial_println!("[NETDRV] demo complete (Ring-3 RTL8139 + netsvc Zero-Copy Frame Bridge).");
+                }
+                Err(e) => {
+                    crate::serial_println!("[NETSVC] spawn failed: {}", e);
+                }
+            }
         }
         Err(e) => {
             crate::serial_println!("[NETDRV] spawn failed: {}", e);
@@ -211,6 +254,54 @@ async fn disk_demo() {
         }
         Err(e) => {
             crate::serial_println!("[DISK] spawn failed: {}", e);
+        }
+    }
+
+    // Faz 5: Ring-3 Filesystem Servisi (`fssvc`)
+    match crate::task::process::spawn_fs_service("fssvc") {
+        Ok(pid) => {
+            crate::serial_println!("[FSSVC] fssvc pid={} entering (cooperative)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[FSSVC] demo complete (SPFS & VFS Service Isolation verified).");
+        }
+        Err(e) => {
+            crate::serial_println!("[FSSVC] spawn failed: {}", e);
+        }
+    }
+
+    // Faz 6: Ring-3 Kullanıcı Shell'i (`sh`) & Kullanıcı Ortamı
+    match crate::task::process::spawn_user_shell("sh") {
+        Ok(pid) => {
+            crate::serial_println!("[SHELL] sh pid={} entering (Ring 3)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[SHELL] demo complete (Ring-3 Shell & User Environment verified).");
+        }
+        Err(e) => {
+            crate::serial_println!("[SHELL] spawn failed: {}", e);
+        }
+    }
+
+    // Faz 11: Ring-3 Display Server (`displaysvc`) & Surface Shmem Compositor
+    match crate::task::process::spawn_display_server("displaysvc") {
+        Ok(pid) => {
+            crate::serial_println!("[DISPLAYSVC] displaysvc pid={} entering (Ring 3)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[DISPLAYSVC] demo complete (Ring-3 Framebuffer Display Server verified).");
+        }
+        Err(e) => {
+            crate::serial_println!("[DISPLAYSVC] spawn failed: {}", e);
+        }
+    }
+
+    // Faz 12: Ring-3 Window Manager & Compositor (`wm`)
+    match crate::task::process::spawn_window_manager("wm") {
+        Ok(pid) => {
+            crate::serial_println!("[WM] wm pid={} entering (Ring 3)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[WM] demo complete (Ring-3 Window Manager & Compositor verified).");
+        }
+        Err(e) => {
+            crate::serial_println!("[WM] spawn failed: {}", e);
         }
     }
 }

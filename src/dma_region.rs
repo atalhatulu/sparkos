@@ -243,6 +243,88 @@ pub fn lookup_dma_region(cap_slot: u32) -> Option<(u64, u64)> {
 }
 
 // ---------------------------------------------------------------------------
+// Aşama 6.3 — DmaSlot Buffer-Cap Registry (Zero-Copy Üst Yığın Köprüsü)
+// ---------------------------------------------------------------------------
+//
+// netdrv (Ring 3) bir DMA bölgesi içindeki alt-aralığı (örn. RX ring'de gelen
+// bir frame) üst yığına capability ile ulaştırır: SYS_IPC_CREATE_SLOT yeni bir
+// `ObjectKind::Memory` nesnesi üretir ve `object_idx`'i burada kaydeder. Donanım
+// (DMA) ve kernel consumer aynı fiziksel sayfaları gördüğü için veri hiç
+// kopyalanmaz — `resolve_slot_cap` yalnızca sanal adresi ve uzunluğu döndürür.
+//
+// SLOT_MAP `object_idx` ile anahtarlanır (cap slota değil): sys_ipc_create_slot
+// her çağrıda benzersiz bir object ürettiği için, slot cap'in dma_cap'in
+// lineage'ından tamamen bağımsız yaşaması ve netdrv çıkışında/revoke'unda
+// geçerliliğini koruması garantilenir.
+
+/// DMA bölgesi içinde capability'ye bağlanmış bir alt-aralık.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotMapEntry {
+    /// DMA bölgesinin ilk sayfasının fiziksel adresi.
+    pub region_phys: u64,
+    /// Bölge başlangıcından bayt uzaklığı (ör. RX ring için 4 = frame başı).
+    pub offset: usize,
+    /// Alt-aralık uzunluğu (bayt).
+    pub len: usize,
+}
+
+static SLOT_MAP: Mutex<BTreeMap<u32, SlotMapEntry>> = Mutex::new(BTreeMap::new());
+
+/// Bir Memory-object `object_idx`'ini DMA bölgesi alt-aralığına bağlar.
+pub fn register_slot(object_idx: u32, region_phys: u64, offset: usize, len: usize) {
+    SLOT_MAP.lock().insert(
+        object_idx,
+        SlotMapEntry {
+            region_phys,
+            offset,
+            len,
+        },
+    );
+}
+
+/// Kayıtlı slot girişini döndürür (test/denetim için).
+pub fn lookup_slot(object_idx: u32) -> Option<SlotMapEntry> {
+    SLOT_MAP.lock().get(&object_idx).copied()
+}
+
+/// Capability'yi doğrular ve işaret ettiği DMA alt-aralığının kernel-görünür
+/// sıfır-kopya sanal adresini + uzunluğunu döndürür.
+///
+/// Gate'ler:
+/// - `cap` `needed` haklarını içermeli (pasif `check_rights`) → NoRights/Invalid
+/// - `cap` bir `ObjectKind::Memory` nesnesine işaret etmeli → NoRights
+/// - o object_idx için SLOT_MAP kaydı mevcut olmalı → NotFound
+pub fn resolve_slot_cap(
+    cap: crate::cap::CapHandle,
+    needed: crate::cap::Rights,
+) -> Result<(*mut u8, usize), crate::cap::CapError> {
+    crate::cap::check_rights(cap, needed)?;
+    let (kind, object_idx) = crate::cap::object_identity(cap)?;
+    if kind != crate::cap::ObjectKind::Memory {
+        return Err(crate::cap::CapError::NoRights);
+    }
+    let entry = lookup_slot(object_idx).ok_or(crate::cap::CapError::NotFound)?;
+    #[cfg(target_os = "none")]
+    let base = unsafe { crate::gui::PHYS_OFFSET };
+    #[cfg(not(target_os = "none"))]
+    let base = 0u64; // host test: işaretçi yalnızca ofset mantığını doğrular
+    let ptr = (base + entry.region_phys + entry.offset as u64) as *mut u8;
+    Ok((ptr, entry.len))
+}
+
+/// Aşama 6.3: netsvc tarafından işlenen bir slot capability'sini netdrv'ye iade eder (Recycle).
+/// SLOT_MAP kaydını kaldırır ve capability'yi kapatır.
+pub fn recycle_slot_cap(cap: crate::cap::CapHandle) -> Result<(), crate::cap::CapError> {
+    let (kind, object_idx) = crate::cap::object_identity(cap)?;
+    if kind != crate::cap::ObjectKind::Memory {
+        return Err(crate::cap::CapError::NoRights);
+    }
+    SLOT_MAP.lock().remove(&object_idx);
+    crate::cap::close(cap)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // §4. Capability Katmanı Entegrasyon Şeması (Sözleşme Referansı)
 // ---------------------------------------------------------------------------
 //
@@ -373,5 +455,52 @@ mod tests {
 
         // Geçerli sayfa
         assert!(DmaRegion::allocate(3).is_ok());
+    }
+
+    #[test]
+    fn test_slot_map_resolve_cap() {
+        // Capability core'u tazele (STATE global — test-threads=1 ile koşar).
+        crate::cap::init();
+
+        // Memory object üret, SLOT_MAP'e kaydet, resolve aynı aralığı dönmeli.
+        let mem = crate::cap::create_object(crate::cap::ObjectKind::Memory).unwrap();
+        let (kind, object_idx) = crate::cap::object_identity(mem).unwrap();
+        assert_eq!(kind, crate::cap::ObjectKind::Memory);
+
+        let region_phys: u64 = 0x1234_0000;
+        let offset = 4usize; // RX ring frame başı
+        let len = 60usize;
+        register_slot(object_idx, region_phys, offset, len);
+
+        // Host stub base=0 → ptr = region_phys + offset; len korunur.
+        let (ptr, got_len) = resolve_slot_cap(mem, crate::cap::Rights::READ).unwrap();
+        assert_eq!(ptr as u64, region_phys + offset as u64);
+        assert_eq!(got_len, len);
+
+        // Kayıtlı olmayan object_idx → NotFound.
+        let mem2 = crate::cap::create_object(crate::cap::ObjectKind::Memory).unwrap();
+        assert_eq!(
+            resolve_slot_cap(mem2, crate::cap::Rights::READ).err(),
+            Some(crate::cap::CapError::NotFound)
+        );
+
+        // Memory olmayan object (Device) → NoRights.
+        let dev = crate::cap::create_object(crate::cap::ObjectKind::Device).unwrap();
+        assert_eq!(
+            resolve_slot_cap(dev, crate::cap::Rights::READ).err(),
+            Some(crate::cap::CapError::NoRights)
+        );
+
+        // Kayıtlı slot cap'i WRITE hakkıyla okumaya çalış → NoRights
+        // (create_object Rights::all() verir, bu yüzden zayıflatılmış child üret).
+        let child = crate::cap::grant(mem, crate::cap::Rights::READ).unwrap();
+        let (_, child_idx) = crate::cap::object_identity(child).unwrap();
+        register_slot(child_idx, region_phys, offset, len);
+        // READ hakkı var → Ok; DMA hakkı yok → NoRights.
+        assert!(resolve_slot_cap(child, crate::cap::Rights::READ).is_ok());
+        assert_eq!(
+            resolve_slot_cap(child, crate::cap::Rights::DMA).err(),
+            Some(crate::cap::CapError::NoRights)
+        );
     }
 }

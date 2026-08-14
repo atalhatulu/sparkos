@@ -45,6 +45,8 @@ pub const SYS_NET_SEND_FRAME: u64 = 27;
 pub const SYS_NET_RECV_FRAME: u64 = 28;
 /// Cooperative IPC İptali (Aşama 7.1).
 pub const SYS_IPC_CANCEL: u64 = 29;
+/// Zero-Copy DMA Slot Capability Üretimi (Aşama 6.3).
+pub const SYS_IPC_CREATE_SLOT: u64 = 30;
 
 /// Static table of all supported system calls in SparkOS 1.0.
 pub static SYSCALLS: &[SyscallInfo] = &[
@@ -138,4 +140,46 @@ pub static SYSCALLS: &[SyscallInfo] = &[
 /// Returns the table of available system calls.
 pub fn syscall_table() -> &'static [SyscallInfo] {
     SYSCALLS
+}
+
+// -----------------------------------------------------------------------------
+// Faz 7: Userspace Syscall Wrappers (`lib/sysapi` ABI)
+// -----------------------------------------------------------------------------
+
+/// Raw system call invocation via `int 0x80`
+#[inline(always)]
+pub unsafe fn raw_syscall3(n: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    let ret: u64;
+    core::arch::asm!(
+        "int 0x80",
+        inout("rax") n => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        options(nostack)
+    );
+    ret
+}
+
+/// Standard output write
+pub fn write(fd: u64, buf: &[u8]) -> i64 {
+    unsafe { raw_syscall3(SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64) as i64 }
+}
+
+/// Standard input read
+pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
+    unsafe { raw_syscall3(SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64) as i64 }
+}
+
+/// Process exit
+pub fn exit(code: u64) -> ! {
+    unsafe {
+        raw_syscall3(SYS_EXIT, code, 0, 0);
+        loop { core::arch::asm!("hlt"); }
+    }
+}
+
+/// Cooperative yield
+pub fn yield_cpu() {
+    unsafe { raw_syscall3(SYS_YIELD, 0, 0, 0); }
 }

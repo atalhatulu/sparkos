@@ -42,6 +42,12 @@ pub const SYS_MAP_DMA: u64 = 26;
 pub const SYS_NET_SEND_FRAME: u64 = 27;
 pub const SYS_NET_RECV_FRAME: u64 = 28;
 pub const SYS_IPC_CANCEL: u64 = 29;
+/// Aşama 6.3: netdrv bir DMA bölgesi içindeki alt-aralığı (ör. RX ring'de gelen
+/// frame) üst yığına zero-copy ulaştırmak için bir "buffer capability" üretir.
+/// dma_fd üzerinden (MAP|DMA haklı) bir ObjectKind::Memory slot cap oluşturulur;
+/// bu cap SLOT_MAP'te o bölgenin fiziksel adresi + offset/len ile kaydedilir.
+/// Return: yeni slot cap'inin fd'si (>= 1000); hata -13 (EACCES) / -14 (EFAULT).
+pub const SYS_IPC_CREATE_SLOT: u64 = 30;
 
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
@@ -164,6 +170,7 @@ pub extern "C" fn syscall_dispatcher(
         SYS_NET_SEND_FRAME => sys_net_send_frame(arg1, arg2),
         SYS_NET_RECV_FRAME => sys_net_recv_frame(arg1, arg2),
         SYS_IPC_CANCEL => sys_ipc_cancel(arg1),
+        SYS_IPC_CREATE_SLOT => sys_ipc_create_slot(arg1, arg2, arg3),
         _ => {
             serial_println!("[SYSCALL] Unknown syscall number: {}", syscall_num);
             u64::MAX
@@ -579,6 +586,98 @@ fn sys_map_dma(dma_slot: u64, virt_addr: u64, pages: u64) -> u64 {
             EFAULT
         }
     }
+}
+
+/// Aşama 6.3: DmaSlot Buffer-Cap Oluşturma Köprüsü.
+///
+/// netdrv (Ring 3), elindeki DMA bölgesi capability'siyle (`dma_fd`) bölge
+/// içindeki bir alt-aralığı (ör. RX ring'de gelen frame) üst yığına zero-copy
+/// ulaştırmak için yeni bir `ObjectKind::Memory` slot cap üretir. Slot, SLOT_MAP
+/// kaydına bölgenin fiziksel adresi + `offset`/`len` olarak bağlanır; üst yığın
+/// `dma_region::resolve_slot_cap` ile aynı fiziksel sayfaların kernel-görünür
+/// sanal adresini alır — veri hiç kopyalanmaz.
+///
+/// Gate'ler (sys_map_dma ile aynı kalıp):
+/// - process modeli altında çalışmalı → EACCES
+/// - `dma_fd` tabloda bulunmalı → EACCES
+/// - handle MAP(4)|DMA(16) hakkı taşımalı → EACCES
+/// - handle kayıtlı bir DMA bölgesine işaret etmeli → EACCES
+/// - `len==0` veya `offset+len` bölge kapasitesini aşmalı → EFAULT
+///
+/// Return: yeni slot cap'inin fd'si (>= 1000).
+fn sys_ipc_create_slot(dma_fd: u64, offset: u64, len: u64) -> u64 {
+    if !crate::task::process::current_is_user_process() {
+        serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT EACCES: not a user process");
+        return EACCES;
+    }
+    let pid = crate::task::process::current_pid();
+
+    let dma_cap = match crate::task::process::with_cap_table(pid, |t| {
+        crate::syscall_cap::find_fd_in_table(t, dma_fd as u32)
+    }) {
+        Some(Some(h)) => h,
+        _ => return EACCES,
+    };
+
+    // Rights::MAP(4) | Rights::DMA(16) kontrolü
+    if crate::cap::check_rights(dma_cap, crate::cap::Rights(4 | 16)).is_err() {
+        serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT EACCES: missing MAP|DMA rights");
+        return EACCES;
+    }
+
+    let (region_phys, pages) = match crate::dma_region::lookup_dma_region(dma_cap.slot) {
+        Some(pair) => pair,
+        None => {
+            serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT EACCES: no registered DMA region for cap slot {}", dma_cap.slot);
+            return EACCES;
+        }
+    };
+
+    let offset_usize = offset as usize;
+    let len_usize = len as usize;
+    let region_bytes = (pages as usize) * 4096;
+    if len_usize == 0 || offset_usize.checked_add(len_usize).map_or(true, |end| end > region_bytes) {
+        serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT EFAULT: slot range out of DMA region bounds");
+        return EFAULT;
+    }
+
+    // Yeni slot cap: bağımsız Memory object (lineage'dan ayrı yaşar).
+    let slot_cap = match crate::cap::create_object(crate::cap::ObjectKind::Memory) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT failed: capability store exhausted ({:?})", e);
+            return u64::MAX;
+        }
+    };
+    let (kind, object_idx) = match crate::cap::object_identity(slot_cap) {
+        Ok(pair) => pair,
+        Err(e) => {
+            serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT failed: object_identity {:?}", e);
+            return u64::MAX;
+        }
+    };
+    debug_assert_eq!(kind, crate::cap::ObjectKind::Memory);
+    crate::dma_region::register_slot(object_idx, region_phys, offset_usize, len_usize);
+
+    // Boş fd'yi 1000'den itibaren tara; cap_table'a ekle ve fd'yi döndür.
+    let fd = match crate::task::process::with_cap_table(pid, |t| {
+        let mut fd = 1000u32;
+        while t.iter().any(|(f, _)| *f == fd) {
+            fd += 1;
+        }
+        t.push((fd, slot_cap));
+        fd
+    }) {
+        Some(fd) => fd,
+        None => {
+            serial_println!("[SYSCALL] SYS_IPC_CREATE_SLOT EACCES: process table vanished");
+            return EACCES;
+        }
+    };
+
+    serial_println!("[SYSCALL] pid {} created slot cap fd {} (phys 0x{:x}+{} len {})",
+        pid, fd, region_phys, offset_usize, len_usize);
+    fd as u64
 }
 
 /// Aşama 6.3: Zero-Copy L2 Frame Gönderim Köprüsü.
