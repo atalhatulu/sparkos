@@ -317,6 +317,18 @@ static IRQ_BINDINGS: Mutex<BTreeMap<u8, IrqBinding>> = Mutex::new(BTreeMap::new(
 /// kapısı. Bağ yokken her IRQ olayı tek atomic load ile no-op'tur.
 static IRQ_BINDINGS_NONEMPTY: AtomicBool = AtomicBool::new(false);
 /// (irq, payload) çiftleri — lock-free, interrupt-safe. Doluysa düşer
+/// Aşama 7.1: Cooperative IPC İptali.
+/// Endpoint kanalındaki bekleyen in-flight transferleri iptal eder ve temizler.
+pub fn cancel_endpoint(ep_id: u32, cap: CapHandle) -> cap::Result<usize> {
+    let guard = ENDPOINTS.lock();
+    let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
+    let mut count = 0;
+    while let Ok(Some(_)) = channel.try_recv(cap) {
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// (add_scancode ile aynı dayanıklılık kuralı: olay kaybı IPC kilitlenmesinden iyidir).
 static IRQ_EVENTS: Once<ArrayQueue<(u8, u8)>> = Once::new();
 
@@ -650,5 +662,25 @@ mod tests {
         let delivered_cap = msg.capability.unwrap();
         // Ancak taşınan capability Revoked olarak tespit edilir
         assert_eq!(cap::check_rights(delivered_cap, Rights::empty()).err(), Some(CapError::Revoked));
+    }
+
+    #[test]
+    fn test_cancel_endpoint_clears_queue() {
+        cap::init();
+        let (ep_id, ep_root) = create_raw_endpoint(16).unwrap();
+        let writer = cap::grant(ep_root, Rights::WRITE).unwrap();
+        let reader = cap::grant(ep_root, Rights::READ).unwrap();
+
+        // 3 mesaj gönder
+        assert!(raw_ipc_try_send(ep_id, writer, b"msg1", None, TransferMode::None).is_ok());
+        assert!(raw_ipc_try_send(ep_id, writer, b"msg2", None, TransferMode::None).is_ok());
+        assert!(raw_ipc_try_send(ep_id, writer, b"msg3", None, TransferMode::None).is_ok());
+
+        // Cancel çağrısı 3 mesajı temizler
+        let canceled = cancel_endpoint(ep_id, reader).unwrap();
+        assert_eq!(canceled, 3);
+
+        // Kuyruk artık boş
+        assert!(raw_ipc_try_recv(ep_id, reader).unwrap().is_none());
     }
 }

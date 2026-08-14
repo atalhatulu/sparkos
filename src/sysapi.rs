@@ -35,6 +35,16 @@ pub const SYS_IPC_RECV: u64 = 21;
 pub const SYS_IOPERM: u64 = 22;
 /// Non-blocking IPC alımı (Aşama 5): kuyruk boşsa EAGAIN döner, CPU'yu kilitlemez.
 pub const SYS_IPC_TRY_RECV: u64 = 23;
+pub const SYS_IPC_CREATE_ENDPOINT: u64 = 24;
+pub const SYS_IPC_BIND_IRQ: u64 = 25;
+/// Capability-Gated DMA bölgesi eşleme (Aşama 6.2).
+pub const SYS_MAP_DMA: u64 = 26;
+/// Zero-Copy L2 Frame Gönderimi (Aşama 6.3).
+pub const SYS_NET_SEND_FRAME: u64 = 27;
+/// Zero-Copy L2 Frame Alımı (Aşama 6.3).
+pub const SYS_NET_RECV_FRAME: u64 = 28;
+/// Cooperative IPC İptali (Aşama 7.1).
+pub const SYS_IPC_CANCEL: u64 = 29;
 
 /// Static table of all supported system calls in SparkOS 1.0.
 pub static SYSCALLS: &[SyscallInfo] = &[

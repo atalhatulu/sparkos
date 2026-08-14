@@ -377,6 +377,43 @@ pub fn reclaim(cap: CapHandle) -> Result<()> {
     revoke(cap) // reclaim işlemi revoke ile özdeştir
 }
 
+// -----------------------------------------------------------------------------
+// Aşama 7.2: Lend Expiry Registry (Zamanlayıcı Tabanlı Capability İptali)
+// -----------------------------------------------------------------------------
+
+static LEND_EXPIRIES: Mutex<BTreeMap<u32, (u32, u64)>> = Mutex::new(BTreeMap::new());
+
+/// Aşama 7.2: Lend Expiry (Timer-Temelli Süreli Capability Ödünç Verme).
+pub fn lend_with_expiry(parent: CapHandle, req: Rights, expiry_tick: u64) -> Result<CapHandle> {
+    let handle = lend(parent, req)?;
+    LEND_EXPIRIES.lock().insert(handle.slot, (handle.generation, expiry_tick));
+    Ok(handle)
+}
+
+/// Timer tick sırasında çağrılır; süresi dolan ödünç capability'leri otomatik iptal (revoke) eder.
+pub fn expire_lent_capabilities(current_tick: u64) -> usize {
+    let mut to_revoke = Vec::new();
+    {
+        let mut guard = LEND_EXPIRIES.lock();
+        let expired_slots: Vec<u32> = guard.iter()
+            .filter(|(_, &(_, expiry))| expiry <= current_tick)
+            .map(|(&slot, _)| slot)
+            .collect();
+        for slot in expired_slots {
+            if let Some((gen, _)) = guard.remove(&slot) {
+                to_revoke.push(CapHandle { slot, generation: gen });
+            }
+        }
+    }
+    let mut count = 0;
+    for handle in to_revoke {
+        if revoke(handle).is_ok() {
+            count += 1;
+        }
+    }
+    count
+}
+
 pub fn close(cap: CapHandle) -> Result<()> {
     let mut state_guard = STATE.lock();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
@@ -833,5 +870,33 @@ mod tests {
 
         // root capability etkilenmez
         assert!(deref(root, Rights::all()).is_ok());
+    }
+
+    #[test]
+    fn test_lend_expiry_revokes_expired_handles() {
+        setup();
+        let root = create_object(ObjectKind::Memory).unwrap();
+
+        // 100. tick'te süresi dolacak bir capability ödünç ver
+        let lent1 = lend_with_expiry(root, Rights::READ, 100).unwrap();
+        // 200. tick'te süresi dolacak bir capability ödünç ver
+        let lent2 = lend_with_expiry(root, Rights::READ, 200).unwrap();
+
+        assert!(check_rights(lent1, Rights::READ).is_ok());
+        assert!(check_rights(lent2, Rights::READ).is_ok());
+
+        // 50. tick: Henüz hiçbiri dolmadı
+        assert_eq!(expire_lent_capabilities(50), 0);
+        assert!(check_rights(lent1, Rights::READ).is_ok());
+        assert!(check_rights(lent2, Rights::READ).is_ok());
+
+        // 100. tick: lent1 süresi doldu ve revoke edildi
+        assert_eq!(expire_lent_capabilities(100), 1);
+        assert_eq!(check_rights(lent1, Rights::READ).err(), Some(CapError::Revoked));
+        assert!(check_rights(lent2, Rights::READ).is_ok());
+
+        // 250. tick: lent2 süresi doldu ve revoke edildi
+        assert_eq!(expire_lent_capabilities(250), 1);
+        assert_eq!(check_rights(lent2, Rights::READ).err(), Some(CapError::Revoked));
     }
 }

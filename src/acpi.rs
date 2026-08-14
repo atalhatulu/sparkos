@@ -147,11 +147,13 @@ pub fn get_madt() -> Option<Madt> {
         return None;
     }
     
-    let entries_count = (rsdt.length as usize - size_of::<AcpiHeader>()) / 4;
+    let header_size = size_of::<AcpiHeader>();
+    let entries_count = (rsdt.length as usize).saturating_sub(header_size) / 4;
     let ptr = rsdt as *const _ as *const u8;
-    let entries = unsafe { core::slice::from_raw_parts(ptr.add(size_of::<AcpiHeader>()) as *const u32, entries_count) };
+    let entries_start = unsafe { ptr.add(header_size) };
     
-    for &entry_phys in entries {
+    for i in 0..entries_count {
+        let entry_phys = unsafe { core::ptr::read_unaligned(entries_start.add(i * 4) as *const u32) };
         let table = unsafe { &*(phys_to_virt(entry_phys as u64) as *const AcpiHeader) };
         if table.verify_checksum() && &table.signature == b"APIC" {
             return Some(Madt::parse(table));
@@ -172,11 +174,13 @@ pub fn get_fadt() -> Option<Fadt> {
         return None;
     }
     
-    let entries_count = (rsdt.length as usize - size_of::<AcpiHeader>()) / 4;
+    let header_size = size_of::<AcpiHeader>();
+    let entries_count = (rsdt.length as usize).saturating_sub(header_size) / 4;
     let ptr = rsdt as *const _ as *const u8;
-    let entries = unsafe { core::slice::from_raw_parts(ptr.add(size_of::<AcpiHeader>()) as *const u32, entries_count) };
+    let entries_start = unsafe { ptr.add(header_size) };
     
-    for &entry_phys in entries {
+    for i in 0..entries_count {
+        let entry_phys = unsafe { core::ptr::read_unaligned(entries_start.add(i * 4) as *const u32) };
         let table = unsafe { &*(phys_to_virt(entry_phys as u64) as *const AcpiHeader) };
         if table.verify_checksum() && &table.signature == b"FACP" {
             return Some(Fadt::parse(table));

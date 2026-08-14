@@ -216,4 +216,27 @@ mod tests {
         assert_ne!(kind2, ObjectKind::Device);
         assert!(cap::check_rights(stdio, Rights(512)).is_err());
     }
+
+    #[test]
+    fn test_netdrv_dma_and_port_fd_provision_and_gate() {
+        cap::init();
+        let mut table = Vec::new();
+        seed_new_process(&mut table).unwrap();
+
+        // DMA memory cap
+        let mem = cap::create_object(ObjectKind::Memory).unwrap();
+        // Rights::MAP(4) | Rights::DMA(16) | Rights::READ(1) | Rights::WRITE(2)
+        let dma_cap = cap::grant(mem, Rights(4 | 16 | 1 | 2)).unwrap();
+        let dma_fd: u32 = u32::MAX - 3;
+        table.push((dma_fd, dma_cap));
+
+        let found_dma = find_fd_in_table(&table, dma_fd).unwrap();
+        let (kind, _) = cap::object_identity(found_dma).unwrap();
+        assert_eq!(kind, ObjectKind::Memory);
+        assert!(cap::check_rights(found_dma, Rights(4 | 16)).is_ok());
+
+        // Hak zayıflatma: EXECUTE(256) veya MANAGE(512) olmamalı
+        assert!(cap::check_rights(found_dma, Rights(256)).is_err());
+        assert!(cap::check_rights(found_dma, Rights(512)).is_err());
+    }
 }

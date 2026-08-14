@@ -177,6 +177,43 @@ pub fn map_user_range(virt: u64, count: u64, writable: bool) -> Result<u64, &'st
     Ok(count)
 }
 
+/// Maps a specific physical frame range to a user virtual address range.
+/// Used for capability-gated DMA region mapping (Aşama 6.2).
+pub fn map_user_phys_range(
+    virt: u64,
+    phys_start: PhysAddr,
+    count: u64,
+    writable: bool,
+) -> Result<(), &'static str> {
+    if !is_canonical(virt) || virt >= USER_ADDR_LIMIT {
+        return Err("user mapping target outside user space");
+    }
+    let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+    let mut mapper = unsafe { init(phys_offset) };
+
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    let parent = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+
+    for i in 0..count {
+        let v = virt + i * 4096;
+        let p = phys_start + i * 4096;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(v));
+        let frame = PhysFrame::<Size4KiB>::containing_address(p);
+
+        unsafe {
+            match mapper.map_to_with_table_flags(page, frame, flags, parent, &mut UserFrameAllocatorAdapter) {
+                Ok(tlb) => tlb.flush(),
+                Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {},
+                Err(_) => return Err("failed to map phys page to user"),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Frame allocator adapter multiplexing to the dedicated user pool.
 /// Only internal page-table table frames are allocated through this path.
 struct UserFrameAllocatorAdapter;

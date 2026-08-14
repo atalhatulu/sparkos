@@ -224,6 +224,25 @@ impl DmaRegion {
 }
 
 // ---------------------------------------------------------------------------
+// Global DMA Region Registry (Capability Slot -> (PhysAddr, Pages))
+// ---------------------------------------------------------------------------
+
+use alloc::collections::BTreeMap;
+use spin::Mutex;
+
+pub static DMA_REGIONS: Mutex<BTreeMap<u32, (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+/// Registers a DMA region physical address and page count associated with a capability slot.
+pub fn register_dma_region(cap_slot: u32, phys_addr: u64, pages: u64) {
+    DMA_REGIONS.lock().insert(cap_slot, (phys_addr, pages));
+}
+
+/// Looks up registered DMA region (phys_addr, pages).
+pub fn lookup_dma_region(cap_slot: u32) -> Option<(u64, u64)> {
+    DMA_REGIONS.lock().get(&cap_slot).copied()
+}
+
+// ---------------------------------------------------------------------------
 // §4. Capability Katmanı Entegrasyon Şeması (Sözleşme Referansı)
 // ---------------------------------------------------------------------------
 //

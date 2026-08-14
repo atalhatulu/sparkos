@@ -85,9 +85,14 @@ pub fn init_smp() {
         }
     };
     
-    let _lapic_base_phys = madt.local_apic_addr as u64;
-    // let lapic_base_virt = unsafe { _lapic_base_phys + crate::gui::PHYS_OFFSET };
+    let lapic_base_phys = madt.local_apic_addr as u64;
+    let lapic_base_virt = unsafe { lapic_base_phys + crate::gui::PHYS_OFFSET };
     
+    let mut bsp_lapic = LocalApic::new(lapic_base_virt);
+    bsp_lapic.enable_lapic();
+    let bsp_apic_id = bsp_lapic.read_apic_id();
+    crate::serial_println!("SMP: Local APIC initialized at {:#x}, BSP APIC ID: {}", lapic_base_virt, bsp_apic_id);
+
     let mut cpu_count = 0;
     
     madt.iterate_entries(|entry_type, _len, data| {
@@ -97,7 +102,8 @@ pub fn init_smp() {
                 let flags = unsafe { core::ptr::read_unaligned(data.as_ptr().add(2) as *const u32) };
                 
                 if (flags & 1) != 0 {
-                    crate::serial_println!("SMP: Found CPU APIC ID {}", apic_id);
+                    let is_bsp = apic_id == bsp_apic_id;
+                    crate::serial_println!("SMP: Found CPU APIC ID {} (BSP: {})", apic_id, is_bsp);
                     cpu_count += 1;
                 }
             }

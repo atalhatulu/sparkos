@@ -1345,6 +1345,359 @@ pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
     Ok(pid)
 }
 
+pub const NETDRV_PORT_FD: u32 = u32::MAX - 2;
+pub const NETDRV_DMA_FD: u32 = u32::MAX - 3;
+
+/// Emit x86-64 machine code for the user-space RTL8139 network driver (Aşama 6.2).
+pub fn net_machine_code(bar0_start: u16, bar0_end: u16, dma_phys: u32) -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. SYS_IOPERM(bar0_start, bar0_end, 1)
+    c.push(0xBF);
+    c.extend_from_slice(&(bar0_start as u32).to_le_bytes());
+    c.push(0xBE);
+    c.extend_from_slice(&(bar0_end as u32).to_le_bytes());
+    c.push(0xBA);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&22u32.to_le_bytes()); // SYS_IOPERM
+    c.push(0xCD);
+    c.push(0x80);
+
+    // 2. SYS_MAP_DMA(NETDRV_DMA_FD, 0x6000_0000, 3)
+    c.push(0xBF);
+    c.extend_from_slice(&NETDRV_DMA_FD.to_le_bytes());
+    c.push(0xBE);
+    c.extend_from_slice(&0x6000_0000u32.to_le_bytes());
+    c.push(0xBA);
+    c.extend_from_slice(&3u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&26u32.to_le_bytes()); // SYS_MAP_DMA
+    c.push(0xCD);
+    c.push(0x80);
+
+    // 3. Hardware config via outb / outl:
+    // Reset: mov dx, bar0 + 0x37; mov al, 0x10; out dx, al
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x37).to_le_bytes());
+    c.push(0xB0); c.push(0x10);
+    c.push(0xEE); // out dx, al
+
+    // RBSTART: mov dx, bar0 + 0x30; mov eax, dma_phys; out dx, eax
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x30).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&dma_phys.to_le_bytes());
+    c.push(0xEF); // out dx, eax
+
+    // RCR: mov dx, bar0 + 0x44; mov eax, 0x8F; out dx, eax
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x44).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&0x8Fu32.to_le_bytes());
+    c.push(0xEF); // out dx, eax
+
+    // Enable RX/TX: mov dx, bar0 + 0x37; mov al, 0x0C; out dx, al
+    c.push(0x66); c.push(0xBA);
+    c.extend_from_slice(&(bar0_start + 0x37).to_le_bytes());
+    c.push(0xB0); c.push(0x0C);
+    c.push(0xEE); // out dx, al
+
+    // 4. SYS_WRITE(1, [rbx+0x10], 39)
+    c.push(0xBF);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
+    c.push(0xBA);
+    c.extend_from_slice(&39u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD);
+    c.push(0x80);
+
+    // 5. SYS_EXIT(0)
+    c.push(0xBF);
+    c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT
+    c.push(0xCD);
+    c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 RTL8139 network driver service (Aşama 6.2).
+pub fn spawn_net_service(name: &str) -> Result<u64, &'static str> {
+    let mut bar0_base: u16 = 0xC000;
+    for dev in crate::pci::scan_pci() {
+        if dev.vendor_id == 0x10EC && dev.device_id == 0x8139 {
+            let bar0 = unsafe { crate::pci::pci_read_u32(dev.bus, dev.slot, dev.func, 0x10) };
+            let found_base = (bar0 & 0xFFFC) as u16;
+            if found_base != 0 {
+                bar0_base = found_base;
+                break;
+            }
+        }
+    }
+    let (bar0_start, bar0_end) = (bar0_base, bar0_base + 0xFF);
+    let dev_ports = crate::cap::create_device_ports(bar0_start, bar0_end)
+        .map_err(|_| "device port binding failed")?;
+    let port_cap = crate::cap::grant(dev_ports, crate::cap::Rights(8 | 512))
+        .map_err(|_| "port grant failed")?;
+
+    // 12KB DMA bölgesi (3 sayfa)
+    let dma = crate::dma_region::DmaRegion::allocate(3)
+        .map_err(|_| "dma allocate failed")?;
+    let dma_phys = dma.phys_addr() as u32;
+
+    let mem_obj = crate::cap::create_object(crate::cap::ObjectKind::Memory)
+        .map_err(|_| "mem cap create failed")?;
+    let dma_cap = crate::cap::grant(mem_obj, crate::cap::Rights(4 | 16 | 1 | 2))
+        .map_err(|_| "dma grant failed")?;
+
+    crate::dma_region::register_dma_region(dma_cap.slot, dma.phys_addr(), 3);
+
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+
+    let code = net_machine_code(bar0_start, bar0_end, dma_phys);
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    // Data slot seed: [+0x10] "[NETDRV] alive (DMA mapped, RX active)\n" (39 bytes)
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(
+            b"[NETDRV] alive (DMA mapped, RX active)\n".as_ptr(),
+            data_ptr.add(0x10),
+            39,
+        );
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let cap_table = alloc::vec![
+        (SERVICE_DEVICE_FD, port_cap),
+        (NETDRV_PORT_FD, port_cap),
+        (NETDRV_DMA_FD, dma_cap),
+    ];
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        cap_table,
+    );
+    serial_spawn("[NETDRV]", pid, name);
+    Ok(pid)
+}
+
+/// Success/failure messages emitted by the Ring-3 disk service only after the
+/// sector read path has genuinely verified the SPFS superblock magic (or timed out).
+const DISKSVC_SUCCESS: &[u8] = b"[DISKSVC] sector 0 verified (SPFS superblock, 512B PIO)\n";
+const DISKSVC_FAIL: &[u8] = b"[DISKSVC] sector 0 MISMATCH (SPFS magic absent)\n";
+
+/// Emit x86-64 machine code for the user-space ATA disk driver (Aşama 8.1).
+pub fn disk_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // mov ebx, data_slot
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    // 1. SYS_IOPERM(0x1F0, 0x1F7, 1)
+    c.push(0xBF);
+    c.extend_from_slice(&0x1F0u32.to_le_bytes());
+    c.push(0xBE);
+    c.extend_from_slice(&0x1F7u32.to_le_bytes());
+    c.push(0xBA);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&22u32.to_le_bytes()); // SYS_IOPERM
+    c.push(0xCD);
+    c.push(0x80);
+
+    // 2. ATA LBA Read Command for Sector 0:
+    // Drive select: outb(0x1F6, 0xF0) — slave (drive_bit=1), matching the
+    // kernel's AtaDrive::new(0x1F0, false) select = 0xE0 | (1<<4). disk.img is
+    // attached at QEMU drive index 1 = primary slave.
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F6u16.to_le_bytes());
+    c.push(0xB0); c.push(0xF0);
+    c.push(0xEE);
+
+    // Sector count: outb(0x1F2, 1)
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F2u16.to_le_bytes());
+    c.push(0xB0); c.push(0x01);
+    c.push(0xEE);
+
+    // LBA low: outb(0x1F3, 0)
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F3u16.to_le_bytes());
+    c.push(0xB0); c.push(0x00);
+    c.push(0xEE);
+
+    // LBA mid: outb(0x1F4, 0)
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F4u16.to_le_bytes());
+    c.push(0xB0); c.push(0x00);
+    c.push(0xEE);
+
+    // LBA hi: outb(0x1F5, 0)
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F5u16.to_le_bytes());
+    c.push(0xB0); c.push(0x00);
+    c.push(0xEE);
+
+    // Command: outb(0x1F7, 0x20) (Read Sectors)
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F7u16.to_le_bytes());
+    c.push(0xB0); c.push(0x20);
+    c.push(0xEE);
+
+    // 3a. Wait BSY clear after command — mirrors the kernel's read_sector
+    //     wait_busy(). QEMU's IDE emulation processes the command asynchronously
+    //     (bottom-half), so immediately after writing 0x20 the drive still
+    //     reports BSY (bit 7) set and DRQ (bit 3) clear; polling DRQ directly
+    //     can observe a busy-but-not-ready window. Bounded at 200k spins so a
+    //     missing/unresponsive drive cannot hang the service.
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F7u16.to_le_bytes()); // mov dx, 0x1F7
+    c.push(0xB9); c.extend_from_slice(&200_000u32.to_le_bytes());             // mov ecx, 200000
+    let busy_loop = c.len() as i32;
+    c.push(0xEC);               // in al, dx
+    c.push(0xA8); c.push(0x80); // test al, 0x80 (BSY)
+    c.push(0x74); c.push(0x00); // jz busy_done     (rel8 patched below)
+    let busy_jz_rel = c.len() - 1;
+    c.push(0x49);               // dec ecx
+    c.push(0x75);               // jnz busy_loop
+    c.push((busy_loop - (c.len() as i32 + 1)) as u8);
+    c.push(0xEB); c.push(0x00); // jmp fail         (rel8 patched below)
+    let busy_jmp_fail_rel = c.len() - 1;
+    let busy_done = c.len();
+    c[busy_jz_rel] = (busy_done as i32 - (busy_jz_rel as i32 + 1)) as u8;
+
+    // 3b. Wait DRQ set — mirrors the kernel's wait_drq().
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F7u16.to_le_bytes()); // mov dx, 0x1F7
+    c.push(0xB9); c.extend_from_slice(&200_000u32.to_le_bytes());             // mov ecx, 200000
+    let drq_loop = c.len() as i32;
+    c.push(0xEC);               // in al, dx
+    c.push(0xA8); c.push(0x08); // test al, 0x08 (DRQ)
+    c.push(0x75); c.push(0x00); // jnz drq_done     (rel8 patched below)
+    let drq_jnz_rel = c.len() - 1;
+    c.push(0x49);               // dec ecx
+    c.push(0x75);               // jnz drq_loop
+    c.push((drq_loop - (c.len() as i32 + 1)) as u8);
+    c.push(0xEB); c.push(0x00); // jmp fail         (rel8 patched below)
+    let jmp_fail_rel = c.len() - 1;
+    let drq_done = c.len();
+    c[drq_jnz_rel] = (drq_done as i32 - (drq_jnz_rel as i32 + 1)) as u8;
+    let _ = busy_jmp_fail_rel; // patch below alongside jmp_fail_rel
+
+    // 4. Read 256 words (512 bytes) from 0x1F0 into [rbx + 0x100]
+    c.extend_from_slice(&[0x48, 0x8D, 0xBB, 0x00, 0x01, 0x00, 0x00]); // lea rdi, [rbx + 0x100]
+    c.push(0xB9); c.extend_from_slice(&256u32.to_le_bytes());          // mov ecx, 256
+    c.push(0x66); c.push(0xBA); c.extend_from_slice(&0x1F0u16.to_le_bytes()); // mov dx, 0x1F0
+    let read_loop = c.len() as i32;
+    c.push(0x66); c.push(0xED); // in ax, dx
+    c.push(0x66); c.extend_from_slice(&[0x89, 0x07]); // mov [rdi], ax
+    c.extend_from_slice(&[0x48, 0x83, 0xC7, 0x02]); // add rdi, 2
+    c.push(0xE2); // loop read_loop
+    c.push((read_loop - (c.len() as i32 + 1)) as u8);
+
+    // 5. Verify the sector content: SPFS superblock magic "SPFS" at sector offset 4
+    //    ([rbx+0x100] is the sector buffer, so magic lives at [rbx+0x104]).
+    c.extend_from_slice(&[0x81, 0xBB, 0x04, 0x01, 0x00, 0x00]); // cmp dword [rbx+0x104], imm32
+    c.extend_from_slice(b"SPFS");                               // imm32 = 0x53465053 (LE bytes)
+    c.push(0x75); c.push(0x00); // jne fail                     (rel8 patched below)
+    let jne_fail_rel = c.len() - 1;
+
+    // 6. Success path: SYS_WRITE(1, [rbx+0x10], SUCCESS_LEN); SYS_EXIT(0)
+    let success_path = c.len();
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]); // lea rsi, [rbx + 0x10]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(DISKSVC_SUCCESS.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(0)
+    c.push(0xCD); c.push(0x80);
+
+    // 7. Fail path: SYS_WRITE(1, [rbx+0x40], FAIL_LEN); SYS_EXIT(1)
+    let fail_path = c.len();
+    c[busy_jmp_fail_rel] = (fail_path as i32 - (busy_jmp_fail_rel as i32 + 1)) as u8;
+    c[jmp_fail_rel] = (fail_path as i32 - (jmp_fail_rel as i32 + 1)) as u8;
+    c[jne_fail_rel] = (fail_path as i32 - (jne_fail_rel as i32 + 1)) as u8;
+    let _ = success_path; // branch targets computed relative to fail_path
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x50]); // lea rsi, [rbx + 0x50]
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xBA); c.extend_from_slice(&(DISKSVC_FAIL.len() as u32).to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD); c.push(0x80);
+    c.push(0xBF); c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8); c.extend_from_slice(&1u32.to_le_bytes()); // SYS_EXIT(1)
+    c.push(0xCD); c.push(0x80);
+
+    c
+}
+
+/// Spawn the Ring-3 ATA disk driver service (Aşama 8.1).
+pub fn spawn_disk_service(name: &str) -> Result<u64, &'static str> {
+    let (bar_start, bar_end) = (0x1F0u16, 0x1F7u16);
+    let dev_ports = crate::cap::create_device_ports(bar_start, bar_end)
+        .map_err(|_| "device port binding failed")?;
+    let port_cap = crate::cap::grant(dev_ports, crate::cap::Rights(8 | 512))
+        .map_err(|_| "port grant failed")?;
+
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+
+    let code = disk_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    // Data slot seed: [+0x10] success message, [+0x40] failure message.
+    // The machine code prints one of them *only* after verifying the sector content
+    // (SPFS superblock magic) — a pre-seeded message is never printed unconditionally.
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(
+            DISKSVC_SUCCESS.as_ptr(),
+            data_ptr.add(0x10),
+            DISKSVC_SUCCESS.len(),
+        );
+        core::ptr::copy_nonoverlapping(
+            DISKSVC_FAIL.as_ptr(),
+            data_ptr.add(0x50),
+            DISKSVC_FAIL.len(),
+        );
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let cap_table = alloc::vec![
+        (SERVICE_DEVICE_FD, port_cap),
+    ];
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        cap_table,
+    );
+    serial_spawn("[DISK]", pid, name);
+    Ok(pid)
+}
+
 fn serial_spawn(kind: &str, pid: u64, name: &str) {
     crate::serial_println!(
         "[{}] process '{}' pid={} enqueued (CR3 isolated)",

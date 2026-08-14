@@ -38,6 +38,10 @@ pub const SYS_IPC_CREATE_ENDPOINT: u64 = 24;
 /// User-space servis: bir cihaz capability'siyle IRQ'yu kendi endpoint'ine bağlar
 /// (Aşama 5.2). Device cap üzerinde MANAGE hakkı + endpoint'te WRITE gerekir.
 pub const SYS_IPC_BIND_IRQ: u64 = 25;
+pub const SYS_MAP_DMA: u64 = 26;
+pub const SYS_NET_SEND_FRAME: u64 = 27;
+pub const SYS_NET_RECV_FRAME: u64 = 28;
+pub const SYS_IPC_CANCEL: u64 = 29;
 
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
@@ -156,6 +160,10 @@ pub extern "C" fn syscall_dispatcher(
         // altında çalışmalı — kernel executor içinden çağrılırsa EACCES.
         SYS_IPC_CREATE_ENDPOINT => sys_ipc_create_endpoint(arg1),
         SYS_IPC_BIND_IRQ => sys_ipc_bind_irq(arg1, arg2, arg3),
+        SYS_MAP_DMA => sys_map_dma(arg1, arg2, arg3),
+        SYS_NET_SEND_FRAME => sys_net_send_frame(arg1, arg2),
+        SYS_NET_RECV_FRAME => sys_net_recv_frame(arg1, arg2),
+        SYS_IPC_CANCEL => sys_ipc_cancel(arg1),
         _ => {
             serial_println!("[SYSCALL] Unknown syscall number: {}", syscall_num);
             u64::MAX
@@ -508,4 +516,131 @@ fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     
     crate::serial_println!("[SYSCALL] sys_write Error: Unsupported fd {}", fd);
     u64::MAX
+}
+
+/// Aşama 6.2: Capability-Gated DMA bölgesi eşleme köprüsü.
+/// Sürücü süreci kendi Ring-3 adres alanına tahsisli DMA bölgesini eşler.
+fn sys_map_dma(dma_slot: u64, virt_addr: u64, pages: u64) -> u64 {
+    if !crate::task::process::current_is_user_process() {
+        serial_println!("[SYSCALL] SYS_MAP_DMA EACCES: not a user process");
+        return EACCES;
+    }
+    let pid = crate::task::process::current_pid();
+
+    let total_bytes = match (pages as usize).checked_mul(4096) {
+        Some(b) => b,
+        None => return EFAULT,
+    };
+
+    if !crate::memory::is_user_range(virt_addr, total_bytes) {
+        serial_println!("[SYSCALL] SYS_MAP_DMA EFAULT: virt_addr 0x{:x} outside user space", virt_addr);
+        return EFAULT;
+    }
+
+    if !crate::dma_region::is_page_aligned(virt_addr) {
+        serial_println!("[SYSCALL] SYS_MAP_DMA EFAULT: virt_addr 0x{:x} not page aligned", virt_addr);
+        return EFAULT;
+    }
+
+    let cap_handle = match crate::task::process::with_cap_table(pid, |t| {
+        crate::syscall_cap::find_fd_in_table(t, dma_slot as u32)
+    }) {
+        Some(Some(h)) => h,
+        _ => return EACCES,
+    };
+
+    // Rights::MAP(4) | Rights::DMA(16) kontrolü
+    if crate::cap::check_rights(cap_handle, crate::cap::Rights(4 | 16)).is_err() {
+        serial_println!("[SYSCALL] SYS_MAP_DMA EACCES: missing MAP|DMA rights");
+        return EACCES;
+    }
+
+    let (phys_addr, max_pages) = match crate::dma_region::lookup_dma_region(cap_handle.slot) {
+        Some(pair) => pair,
+        None => {
+            serial_println!("[SYSCALL] SYS_MAP_DMA EACCES: no registered DMA region for cap slot {}", cap_handle.slot);
+            return EACCES;
+        }
+    };
+
+    if pages > max_pages {
+        serial_println!("[SYSCALL] SYS_MAP_DMA EFAULT: requested {} pages exceeds region capacity {}", pages, max_pages);
+        return EFAULT;
+    }
+
+    match crate::memory::map_user_phys_range(virt_addr, x86_64::PhysAddr::new(phys_addr), pages, true) {
+        Ok(_) => {
+            serial_println!("[SYSCALL] SYS_MAP_DMA: mapped {} pages at virt 0x{:x} -> phys 0x{:x} for pid {}",
+                pages, virt_addr, phys_addr, pid);
+            0
+        }
+        Err(e) => {
+            serial_println!("[SYSCALL] SYS_MAP_DMA failed: {}", e);
+            EFAULT
+        }
+    }
+}
+
+/// Aşama 6.3: Zero-Copy L2 Frame Gönderim Köprüsü.
+#[allow(static_mut_refs)]
+fn sys_net_send_frame(buf_ptr: u64, len: u64) -> u64 {
+    if !crate::task::process::current_is_user_process() {
+        return EACCES;
+    }
+    let bytes = match crate::sec_mem::validate_user_ptr(buf_ptr, len as usize) {
+        Ok(b) => b,
+        Err(_) => return EFAULT,
+    };
+    unsafe {
+        if let Some(dev) = &mut crate::rtl8139::RTL8139_DEV {
+            dev.send_packet(bytes);
+            return len;
+        }
+    }
+    EACCES
+}
+
+/// Aşama 6.3: Zero-Copy / Direct L2 Frame Alım Köprüsü.
+#[allow(static_mut_refs)]
+fn sys_net_recv_frame(buf_ptr: u64, max_len: u64) -> u64 {
+    if !crate::task::process::current_is_user_process() {
+        return EACCES;
+    }
+    let user_buf = match crate::sec_mem::validate_user_ptr_mut(buf_ptr, max_len as usize) {
+        Ok(b) => b,
+        Err(_) => return EFAULT,
+    };
+    unsafe {
+        if let Some(dev) = &mut crate::rtl8139::RTL8139_DEV {
+            if let Some(packet) = dev.poll_rx() {
+                let copy_len = packet.len().min(max_len as usize);
+                user_buf[..copy_len].copy_from_slice(&packet[..copy_len]);
+                return copy_len as u64;
+            }
+        }
+    }
+    EAGAIN
+}
+
+/// Aşama 7.1: Cooperative IPC İptal Köprüsü.
+fn sys_ipc_cancel(ep_id: u64) -> u64 {
+    let pid = crate::task::process::current_pid();
+    let cap_handle = match crate::task::process::with_cap_table(pid, |t| {
+        crate::syscall_cap::find_fd_in_table(t, ep_id as u32)
+    }) {
+        Some(Some(h)) => h,
+        _ => return EACCES,
+    };
+
+    if crate::cap::check_rights(cap_handle, crate::cap::Rights(1 | 2)).is_err() {
+        return EACCES;
+    }
+
+    match crate::ipc::cancel_endpoint(ep_id as u32, cap_handle) {
+        Ok(canceled_count) => {
+            serial_println!("[SYSCALL] sys_ipc_cancel: canceled {} in-flight messages on ep {}", canceled_count, ep_id);
+            0
+        }
+        Err(_) => EACCES,
+    }
 }

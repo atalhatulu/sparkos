@@ -187,6 +187,34 @@ async fn fault_demo() {
     }
 }
 
+/// Aşama 6.2 boot regresyonu: user-space RTL8139 network driver.
+async fn net_demo() {
+    match crate::task::process::spawn_net_service("netdrv") {
+        Ok(pid) => {
+            crate::serial_println!("[NETDRV] netdrv pid={} entering (cooperative)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[NETDRV] demo complete (Ring-3 RTL8139 + DMA mapped).");
+        }
+        Err(e) => {
+            crate::serial_println!("[NETDRV] spawn failed: {}", e);
+        }
+    }
+}
+
+/// Aşama 8.1 boot regresyonu: user-space ATA disk driver.
+async fn disk_demo() {
+    match crate::task::process::spawn_disk_service("disksvc") {
+        Ok(pid) => {
+            crate::serial_println!("[DISK] disksvc pid={} entering (cooperative)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[DISK] demo complete (Ring-3 ATA PIO 0x1F0 verified).");
+        }
+        Err(e) => {
+            crate::serial_println!("[DISK] spawn failed: {}", e);
+        }
+    }
+}
+
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::SerialWriter::init();
     serial_println!("[OK] Serial port ready");
@@ -295,6 +323,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("[OK] Initializing timer...");
     interrupts::init_timer();
     serial_println!("[OK] Timer (1000 Hz) ready");
+
+    // Aşama 9: SMP Keşfi ve APIC Başlatma
+    smp::init_smp();
     
     // Klavye handler'ını keyboard IRQ'ya bağla
     // keyboard_handler zaten interrupts.rs'de, onu güncellemek lazım
@@ -314,7 +345,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "\n[OK] Loading filesystem from ATA disk...\n").unwrap();
     fs::load_from_disk();
-    
+
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
     
     let mut executor = task::simple_executor::SimpleExecutor::new();
@@ -353,6 +384,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // frame'ini kullanmaz. Boot log'unda "[USER-FAULT]" ve "[FAULT] demo
     // complete" görülmeli; "[PANIC] Kernel Page Fault" OLMAMALI.
     executor.spawn(task::Task::new("fault_demo", fault_demo()));
+    executor.spawn(task::Task::new("net_demo", net_demo()));
+    executor.spawn(task::Task::new("disk_demo", disk_demo()));
 
     // NOTE: GUI devre dışı — kullanıcı planı: GUI EN SONA, önce terminali
     // Linux terminali kadar güçlü yap. GUI backbuffer alloc + init şu an
