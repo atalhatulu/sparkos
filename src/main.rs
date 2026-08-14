@@ -42,6 +42,7 @@ pub mod security;
 pub mod sec_mem;
 pub mod cap;
 pub mod syscall_cap; // Asama 2 — syscall yetki kontrolü köprüsü
+pub mod dma_region;  // Asama 6.1 — Capability-gated DMA bolgesi
 pub mod acpi;
 pub mod smp;
 pub mod klog;
