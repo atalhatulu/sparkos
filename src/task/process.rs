@@ -47,6 +47,10 @@ use spin::Mutex;
 pub const QUANTUM_TICKS: u64 = 5;
 /// Size of a per-process private kernel stack.
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
+/// fd at which a spawned service's provisioned capability handle is inserted
+/// (Aşama 5.2). `u32::MAX` is taken by the process-exec sentinel in
+/// `seed_new_process`, so services live one below it.
+pub const SERVICE_DEVICE_FD: u32 = u32::MAX - 1;
 
 // ---------------------------------------------------------------------------
 // Global scheduler state
@@ -65,9 +69,37 @@ static SCHED_TICK: AtomicU64 = AtomicU64::new(0);
 /// The scheduler core state.
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::uninit());
 
+/// Cooperative-resume slot (Aşama 5.2). A Ring-3 service entered via
+/// [`enter_service`] saves the executor's kernel context here; when the service
+/// calls SYS_EXIT, [`exit_current`] jumps back to this saved context so the
+/// executor continues exactly where it left off. Only meaningful while a
+/// cooperative service holds the CPU (preemption stays off), so the value lives
+/// on the CPU unguarded during the service run; the Mutex only serializes the
+/// brief set/take windows around the switch.
+pub static EXECUTOR_RESUME: Mutex<Option<RegisterContext>> = Mutex::new(None);
+
 /// Reference to the dynamically-allocated idle kernel-stack array. Kept so the
 /// idle process's `ctx.rsp` stays valid for the kernel's lifetime.
 static IDLE_STACK: spin::Once<Box<[u8]>> = spin::Once::new();
+
+/// Physical address of the shared kernel page table (CR3), captured the first
+/// time the kernel switches away from its own address space: [`enter_service`]
+/// (cooperative) or [`alloc_idle`] (preemptive). [`exit_current`] uses it to
+/// resume the cooperative executor in the kernel's own table instead of a
+/// terminated process's cloned table — never letting kernel execution run in a
+/// dead process's address space.
+static SHARED_KERNEL_CR3: spin::Once<u64> = spin::Once::new();
+
+/// Record the current CR3 as the shared kernel address space. Both capture
+/// points run in the kernel's own table, and `spin::Once` keeps the first
+/// (pristine) capture, so a later call made inside a process's cloned table is
+/// a no-op.
+fn capture_shared_kernel_cr3() {
+    SHARED_KERNEL_CR3.call_once(|| {
+        let (frame, _) = x86_64::registers::control::Cr3::read();
+        frame.start_address().as_u64()
+    });
+}
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -223,8 +255,17 @@ fn user_process_stub() -> ! {
 /// Saves current callee-saved registers + kernel RSP/RIP into `*current`,
 /// then loads `*next` and resumes there. Called as a normal C-ABI function
 /// (SysV: arg0 `current` in RDI, arg1 `next` in RSI).
+///
+/// Returns `()` (NOT `!`) on purpose. The saved `rip` is the return address of
+/// the `call` site; when the switched-away context is later resumed (the
+/// cooperative executor via `exit_current`'s `jump_to_initial`, or a preempted
+/// process via `schedule`) control returns *through that same `call`* and
+/// executes the caller's continuation. If this were `-> !` the compiler would
+/// treat the bytes after every `call` as unreachable and pad them with `int3`
+/// filler, so resume would land on a breakpoint and fall through into the next
+/// function (observed: 6 breakpoints then a page fault at the next symbol).
 #[unsafe(naked)]
-extern "C" fn switch_context(current: *mut RegisterContext, next: *const RegisterContext) -> ! {
+extern "C" fn switch_context(current: *mut RegisterContext, next: *const RegisterContext) {
     naked_asm!(
             // Save callee-saved registers into *current (rdi).
             "mov [rdi + 0],  rbx",
@@ -332,6 +373,30 @@ pub fn create_user_process(
     user_cs: u16,
     user_ss: u16,
 ) -> u64 {
+    create_user_process_with_caps(
+        name,
+        user_rip,
+        user_rsp,
+        user_cr3,
+        user_cs,
+        user_ss,
+        Vec::new(),
+    )
+}
+
+/// `create_user_process`'in servis-varyantı: seed'den SONRA ek capability'ler
+/// (ör. Device MANAGE handle) cap_table'a eklenir. Aşama 5.2: Ring-3 servis
+/// kendi cihaz yetkisini (SYS_IPC_BIND_IRQ device_fd) kendi fd'sinden görür.
+#[allow(clippy::too_many_arguments)]
+pub fn create_user_process_with_caps(
+    name: &str,
+    user_rip: u64,
+    user_rsp: u64,
+    user_cr3: u64,
+    user_cs: u16,
+    user_ss: u16,
+    extra_caps: Vec<(u32, crate::cap::CapHandle)>,
+) -> u64 {
     let pid = insert_process(name);
     {
         let mut s = SCHEDULER.lock();
@@ -346,6 +411,9 @@ pub fn create_user_process(
         // Asama 2 (B1): user process doğduğu anda stdio (0/1/2) + process-exec seed'le.
         // Aksi halde SYS_WRITE fd 1/2 dahil tüm fd syscall'lar EACCES döner (sistem kullanılamaz).
         let _ = crate::syscall_cap::seed_new_process(&mut p.cap_table);
+        // Aşama 5.2: servise özel provision'lu capability'ler (seed'den sonra,
+        // SERVICE_DEVICE_FD fd'sinde). Ep_id slot'ları bunlarla çakışamaz.
+        p.cap_table.extend(extra_caps);
         p.ctx = RegisterContext {
             rbx: 0,
             rbp: 0,
@@ -361,6 +429,49 @@ pub fn create_user_process(
     }
     crate::task::PROCESS_LIST.lock().insert(pid, name.to_string());
     pid
+}
+
+// ---------------------------------------------------------------------------
+// Cooperative service entry (Aşama 5.2)
+// ---------------------------------------------------------------------------
+
+/// Run a service process to completion cooperatively, then return to the
+/// caller (the executor) exactly where it left off.
+///
+/// The executor context is saved into [`EXECUTOR_RESUME`] and control is
+/// switched to `pid`'s kernel context. When the service calls SYS_EXIT,
+/// [`exit_current`]'s resume branch marks it terminated and `jump_to_initial`s
+/// back to the saved executor context; this function then returns normally and
+/// the executor's async task continues (e.g. unbinding the IRQs).
+///
+/// # Locking
+/// `switch_context` is `-> !`, so a MutexGuard held across the switch would
+/// stay locked inside the frozen executor frame while the service runs — and
+/// `exit_current`'s `EXECUTOR_RESUME.lock().take()` would deadlock against it.
+/// The guard is therefore taken, its target written, a raw pointer captured,
+/// and the guard dropped BEFORE switching. Single-CPU cooperative model means
+/// nothing races during the service run.
+pub fn enter_service(pid: u64) {
+    // We are about to switch away from the kernel's own address space; remember
+    // it so `exit_current` can resume the executor here (see `exit_current`).
+    capture_shared_kernel_cr3();
+    let target_ctx: *const RegisterContext = {
+        let mut s = SCHEDULER.lock();
+        s.current = Some(pid);
+        if let Some(p) = s.table.get_mut(&pid) {
+            p.state = ProcessState::Running;
+        }
+        &s.table[&pid].ctx as *const RegisterContext
+    };
+    let save_ctx: *mut RegisterContext = {
+        let mut guard = EXECUTOR_RESUME.lock();
+        *guard = Some(RegisterContext::default());
+        guard.as_mut().unwrap() as *mut RegisterContext
+    };
+    // Guard dropped here; `save_ctx` still points into the static's storage.
+    unsafe {
+        switch_context(save_ctx, target_ctx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -565,8 +676,13 @@ pub fn schedule() {
 
 /// Variant of the switcher used when there is no previous context to save
 /// into (very first preemption). Still restores `*next`.
+///
+/// Same `()` return type rationale as [`switch_context`]: the saved `rip`
+/// points at this function's `call` site, and on a later resume the code
+/// continues through that `call` into the caller's epilogue. A `-> !` type
+/// would fill the resume target with `int3` filler.
 #[unsafe(naked)]
-extern "C" fn switch_context_null_save(next: *const RegisterContext) -> ! {
+extern "C" fn switch_context_null_save(next: *const RegisterContext) {
     naked_asm!(
             "mov rbx, [rdi + 0]",
             "mov rbp, [rdi + 8]",
@@ -584,9 +700,44 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) -> ! {
         )
 }
 
-/// Terminate the running process and switch to the next ready one (or idle).
-/// Never returns. Used by kernel threads when they finish.
+/// Terminate the running process and switch to the next ready one (or idle),
+/// or — Aşama 5.2 — resume the cooperative executor that entered a service via
+/// [`enter_service`]. Never returns.
 pub fn exit_current() -> ! {
+    // Cooperative-resume branch: if the running context was entered by
+    // `enter_service`, `EXECUTOR_RESUME` holds the executor's saved kernel
+    // context. Take it in its own statement (the temporary guard is dropped
+    // immediately — holding it across the jump would deadlock the executor's
+    // later `lock()` in enter_service's save pointer). Then mark the service
+    // terminated and jump straight back to the executor, skipping the ready
+    // queue (the executor is not a schedulable process; it resumes inline).
+    let exec_ctx: Option<RegisterContext> = EXECUTOR_RESUME.lock().take();
+    if let Some(mut ctx) = exec_ctx {
+        {
+            let mut s = SCHEDULER.lock();
+            if let Some(pid) = s.current {
+                if let Some(p) = s.table.get_mut(&pid) {
+                    p.state = ProcessState::Terminated;
+                    p.exited = true;
+                    crate::task::KILLED_PROCESSES.lock().push(pid);
+                }
+            }
+            // Executor is not a process; nothing is "current" after the resume.
+            s.current = None;
+        }
+        // Resume the executor in the shared kernel address space, never in the
+        // terminating process's cloned table. The executor's saved context
+        // carries cr3=0 ("keep current"), which would otherwise strand kernel
+        // execution in a dead process's address space.
+        if let Some(kcr3) = SHARED_KERNEL_CR3.get().copied() {
+            ctx.cr3 = kcr3;
+        }
+        // Cooperative model: preemption stays off so no quantum is armed for
+        // the executor and the service cannot be preempted mid-poll.
+        set_preemption_enabled(false);
+        jump_to_initial(&ctx);
+    }
+
     let next_ctx: *const RegisterContext = {
         let mut s = SCHEDULER.lock();
         if let Some(pid) = s.current {
@@ -806,6 +957,365 @@ fn demo_machine_code(_tag: u8, writes: u32, delay: u32) -> Vec<u8> {
     c
 }
 
+/// Emit x86-64 machine code for the hardware-less service demo process.
+///
+/// The service runs cooperatively in Ring 3 (entered via [`enter_service`],
+/// never preempted). Flow:
+///   1. SYS_IPC_CREATE_ENDPOINT(16) — Ring-3 kendi endpoint'ini oluşturur.
+///   2. SYS_IPC_BIND_IRQ(SERVICE_DEVICE_FD, 0) + (…, 1) — timer + klavye IRQ'ları.
+///   3. Banner'ı stdout'a yazar ("SVC UP").
+///   4. Poll döngüsü: SYS_IPC_TRY_RECV → EAGAIN ise tekrar; olay gelince ilk
+///      baytı '0'..'9' aralığına (0x30 ekle) çevirip yazar. 64 olay sonra SYS_EXIT.
+///
+/// Data slot `USER_ADDR_BASE + 0x2000`'de (spawn_service writable haritalar):
+///   [+0x00] ep_id (u32), [+0x04] counter (u32), [+0x08] "SVC UP\r\n" (8 bayt),
+///   [+0x10] recv buffer (64 bayt), [+0x60] echo tmp (1 bayt).
+///
+/// ABI (syscall.rs dispatcher): num=rax, arg1=rdi, arg2=rsi, arg3=rdx, arg4=r10.
+/// int 0x80 sonrası caller-saved regs clobber olur — her yinelemede arg'lar
+/// yeniden kurulur; yalnızca callee-saved rbx (data slot tabanı) sağ kalır.
+pub fn service_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // --- init: endpoint oluştur (SYS_IPC_CREATE_ENDPOINT = 24, capacity 16) ---
+    // mov ebx, data_slot          (data slot tabanı — callee-saved)
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+    // mov edi, 16                 (capacity)
+    c.push(0xBF);
+    c.extend_from_slice(&16u32.to_le_bytes());
+    // mov eax, 24                 (SYS_IPC_CREATE_ENDPOINT)
+    c.push(0xB8);
+    c.extend_from_slice(&24u32.to_le_bytes());
+    // int 0x80
+    c.push(0xCD);
+    c.push(0x80);
+    // mov [rbx+0], eax            (ep_id sakla)
+    c.extend_from_slice(&[0x89, 0x43, 0x00]);
+
+    // --- bind IRQ 0 (timer) ---
+    // mov edi, SERVICE_DEVICE_FD
+    c.push(0xBF);
+    c.extend_from_slice(&SERVICE_DEVICE_FD.to_le_bytes());
+    // mov esi, 0
+    c.push(0xBE);
+    c.extend_from_slice(&0u32.to_le_bytes());
+    // mov edx, [rbx+0]
+    c.extend_from_slice(&[0x8B, 0x13]);
+    // mov eax, 25                 (SYS_IPC_BIND_IRQ)
+    c.push(0xB8);
+    c.extend_from_slice(&25u32.to_le_bytes());
+    // int 0x80
+    c.push(0xCD);
+    c.push(0x80);
+
+    // --- bind IRQ 1 (keyboard) ---
+    c.push(0xBF);
+    c.extend_from_slice(&SERVICE_DEVICE_FD.to_le_bytes());
+    c.push(0xBE);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.extend_from_slice(&[0x8B, 0x13]);
+    c.push(0xB8);
+    c.extend_from_slice(&25u32.to_le_bytes());
+    c.push(0xCD);
+    c.push(0x80);
+
+    // --- banner: sys_write(1, [rbx+8], 8) ---
+    c.push(0xBF);
+    c.extend_from_slice(&1u32.to_le_bytes()); // fd = stdout
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x08]); // lea rsi, [rbx+8]
+    c.push(0xBA);
+    c.extend_from_slice(&8u32.to_le_bytes()); // len = 8
+    c.push(0xB8);
+    c.extend_from_slice(&4u32.to_le_bytes()); // SYS_WRITE
+    c.push(0xCD);
+    c.push(0x80);
+
+    let loop_start = c.len() as i32;
+
+    // --- poll döngüsü ---
+    // mov edi, [rbx+0]             (ep_id)
+    c.extend_from_slice(&[0x8B, 0x3B]);
+    // lea rsi, [rbx+0x10]          (recv buffer)
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x10]);
+    // mov edx, 64                  (max_len)
+    c.push(0xBA);
+    c.extend_from_slice(&64u32.to_le_bytes());
+    // mov r10d, 0                  (out_cap_ptr)
+    c.push(0x41);
+    c.push(0xBA);
+    c.extend_from_slice(&0u32.to_le_bytes());
+    // mov eax, 23                  (SYS_IPC_TRY_RECV)
+    c.push(0xB8);
+    c.extend_from_slice(&23u32.to_le_bytes());
+    // int 0x80
+    c.push(0xCD);
+    c.push(0x80);
+    // cmp eax, EAGAIN (0xFFFFFFF5)
+    c.push(0x3D);
+    c.extend_from_slice(&0xFFFFFFF5u32.to_le_bytes());
+    // je loop
+    c.push(0x74);
+    c.push((loop_start - (c.len() as i32 + 1)) as u8);
+    // cmp eax, 0
+    c.extend_from_slice(&[0x83, 0xF8, 0x00]);
+    // jle loop  (0 / EACCES / u64::MAX → tekrar dene)
+    c.push(0x7E);
+    c.push((loop_start - (c.len() as i32 + 1)) as u8);
+
+    // --- echo: al = [buf] + 0x30 → stdout ---
+    // mov al, [rbx+0x10]
+    c.extend_from_slice(&[0x8A, 0x43, 0x10]);
+    // add al, 0x30
+    c.extend_from_slice(&[0x04, 0x30]);
+    // mov [rbx+0x60], al
+    c.extend_from_slice(&[0x88, 0x43, 0x60]);
+    // sys_write(1, [rbx+0x60], 1)
+    c.push(0xBF);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x8D, 0x73, 0x60]);
+    c.push(0xBA);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&4u32.to_le_bytes());
+    c.push(0xCD);
+    c.push(0x80);
+
+    // --- counter++ → 64 olay sonra çık ---
+    // inc dword [rbx+4]
+    c.extend_from_slice(&[0xFF, 0x43, 0x04]);
+    // cmp dword [rbx+4], 64
+    c.extend_from_slice(&[0x83, 0x7B, 0x04, 0x40]);
+    // jl loop
+    c.push(0x7C);
+    c.push((loop_start - (c.len() as i32 + 1)) as u8);
+
+    // --- sys_exit(0) ---
+    c.push(0xBF);
+    c.extend_from_slice(&0u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.push(0xCD);
+    c.push(0x80);
+    // Safety net: SYS_EXIT normalde dönmez ama hlt/ud2 Ring 3'te GPF üretip
+    // kernel'i dondururdu; burada loop'a geri dönülür.
+    c.push(0xEB);
+    c.push((loop_start - (c.len() as i32 + 1)) as u8);
+
+    c
+}
+
+/// Spawn a Ring-3 user-space service (Aşama 5.2).
+///
+/// `dev` (Device capability) tabanından servise MANAGE (512) haklı bir Device
+/// handle grant edilir ve [`SERVICE_DEVICE_FD`] fd'sine yerleştirilir. Kod +
+/// data slotu (`USER_ADDR_BASE + 0x2000`, WRITABLE — servis kendi data slotunu
+/// yazar) + stack, klonlanmış bir CR3 içine haritalanır. `build_code` ile
+/// üretilen makine kodu servis başlangıcıdır; servis [`enter_service`] ile
+/// cooperative çalıştırılır (preemption değil).
+pub fn spawn_service<F>(
+    name: &str,
+    dev: crate::cap::CapHandle,
+    build_code: F,
+) -> Result<u64, &'static str>
+where
+    F: FnOnce() -> Vec<u8>,
+{
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+    // Sadece MANAGE: SYS_IPC_BIND_IRQ'un tek ihtiyaç duyduğu hak. Tüm hakkı
+    // (Rights::all) servise vermek gerekmez — least privilege.
+    let dev_manage = crate::cap::grant(dev, crate::cap::Rights(512))
+        .map_err(|_| "service device grant failed")?;
+
+    let code = build_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    // Data slotu dahil 0x3000'lik bölge writable: servis [rbx] data slotuna
+    // yazar (spawn_raw_user'ın `false`'undan farklı — zorunlu).
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+    // Data slotu (code_base+0x2000) seed et: [+0x08] "SVC UP\r\n". Bump
+    // allocator'ın verdiği fiziksel frame'ler sıfırlı değil; banner'ın
+    // deterministik olması ve counter'ın [+0x04] 0'dan başlaması için bölgeyi
+    // sıfırlayıp banner'ı yazmak zorunlu. (ep_id [+0x00] ve counter [+0x04]
+    // servis tarafından kendisi yazılır.) Eşleme ortak L3 üzerinden aktif
+    // tabloda da görünür; tıpkı code yazımı gibi doğrudan yazılabilir.
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(b"SVC UP\r\n".as_ptr(), data_ptr.add(8), 8);
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![(SERVICE_DEVICE_FD, dev_manage)],
+    );
+    serial_spawn("[SERVICE]", pid, name);
+    Ok(pid)
+}
+
+/// Emit x86-64 machine code for the user-space serial driver demo (Aşama 5.3).
+///
+/// The driver runs cooperatively in Ring 3 (entered via [`enter_service`],
+/// never preempted). Flow:
+///   1. SYS_IOPERM(0x3F8, 0x3FF, 1) — COM1 port aralığını capability-gated
+///      olarak açar. Kernel'de gate: process'in cap_table'ında Device cap var
+///      (SERVICE_DEVICE_FD) VE istenen aralık o cihaza bağlı aralığın
+///      (create_device_ports ile 0x3F8..=0x3FF) alt kümesi. Başarılıysa TSS
+///      IOPB'de 0x3F8..=0x3FF Ring-3 için izinli yapılır.
+///   2. UART TX: "[SERDRV] alive\r\n" (16 bayt) bayt bayt COM1'e yazılır.
+///      Her bayttan önce LSR (0x3FD) bit 5 (THR empty) poll edilir — ham `inb`/
+///      `outb`, syscall yok. Yazılan baytlar QEMU `-serial stdio` üzerinden
+///      boot log'una düşer (Ring-3 port I/O'nun canlı kanıtı).
+///   3. SYS_EXIT(0) — process modelinden temiz çıkış.
+///
+/// Data slot `USER_ADDR_BASE + 0x2000`'de (spawn_serial_service seed eder):
+///   [+0x00] ioperm sonucu (u32), [+0x10] TX string (16 bayt).
+///
+/// ABI (syscall.rs dispatcher): num=rax, arg1=rdi, arg2=rsi, arg3=rdx.
+/// int 0x80 sonrası caller-saved regs clobber olur; yalnızca callee-saved rbx
+/// (data slot tabanı) sağ kalır. TX döngüsü syscall içermez, ecx döngüde canlıdır.
+pub fn serial_machine_code() -> Vec<u8> {
+    let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;
+    let mut c: Vec<u8> = Vec::new();
+
+    // --- mov ebx, data_slot (callee-saved) ---
+    c.push(0xBB);
+    c.extend_from_slice(&data_slot.to_le_bytes());
+
+    let loop_start = c.len() as i32;
+
+    // --- sys_ioperm(0x3F8, 0x3FF, 1) ---
+    c.push(0xBF);
+    c.extend_from_slice(&0x3F8u32.to_le_bytes()); // mov edi, 0x3F8 (start_port)
+    c.push(0xBE);
+    c.extend_from_slice(&0x3FFu32.to_le_bytes()); // mov esi, 0x3FF (end_port)
+    c.push(0xBA);
+    c.extend_from_slice(&1u32.to_le_bytes());     // mov edx, 1 (enable)
+    c.push(0xB8);
+    c.extend_from_slice(&22u32.to_le_bytes());    // mov eax, SYS_IOPERM
+    c.push(0xCD);
+    c.push(0x80);                                 // int 0x80
+    // mov [rbx+0], eax           (sonucu sakla)
+    c.extend_from_slice(&[0x89, 0x43, 0x00]);
+
+    // --- UART TX loop: 16 bayt [rbx+0x10] → COM1 ---
+    // mov ecx, 0                (index)
+    c.push(0xB9);
+    c.extend_from_slice(&0u32.to_le_bytes());
+    let tx_loop = c.len() as i32;
+    // mov edx, 0x3FD            (LSR)
+    c.push(0xBA);
+    c.extend_from_slice(&0x3FDu32.to_le_bytes());
+    let tx_wait = c.len() as i32;
+    c.push(0xEC);                                 // in al, dx
+    c.push(0xA8);
+    c.push(0x20);                                 // test al, 0x20 (THR empty)
+    c.push(0x74);
+    c.push((tx_wait - (c.len() as i32 + 1)) as u8); // jz tx_wait
+    // mov al, [rbx+ecx+0x10]     (yazılacak bayt)
+    c.extend_from_slice(&[0x8A, 0x44, 0x0B, 0x10]);
+    // mov edx, 0x3F8            (THR)
+    c.push(0xBA);
+    c.extend_from_slice(&0x3F8u32.to_le_bytes());
+    c.push(0xEE);                                 // out dx, al
+    c.extend_from_slice(&[0xFF, 0xC1]);           // inc ecx
+    c.extend_from_slice(&[0x83, 0xF9, 16]);       // cmp ecx, 16
+    c.push(0x72);
+    c.push((tx_loop - (c.len() as i32 + 1)) as u8); // jb tx_loop
+
+    // --- sys_exit(0) ---
+    c.push(0xBF);
+    c.extend_from_slice(&0u32.to_le_bytes());     // mov edi, 0
+    c.push(0xB8);
+    c.extend_from_slice(&1u32.to_le_bytes());     // mov eax, SYS_EXIT
+    c.push(0xCD);
+    c.push(0x80);
+    // Safety net: SYS_EXIT process modelinde dönmez; yine de dönerse başa sar.
+    c.push(0xEB);
+    c.push((loop_start - (c.len() as i32 + 1)) as u8);
+
+    c
+}
+
+/// Emit x86-64 machine code for the fault-recovery regression (Aşama 5.4).
+///
+/// İlk komut: `mov eax, [0x5000_0000]` — user yarısının ortasında, her klonlanmış
+/// CR3'te deterministik olarak eşlenmemiş bir adrese okuma. Bu, P=0 user page
+/// fault üretir (CR2 = 0x5000_0000). Kernel bu fault'u process modeli altında
+/// kurtarmalıdır ([`recover_user_fault`] → `exit_current`), legacy
+/// `user::KERNEL_RSP`/`KERNEL_RIP` frame'ini asla kullanmamalıdır.
+///
+/// Sondaki `hlt` emniyet ağı: load her nasılsa fault vermezse Ring 3'te hlt
+/// ayrıcalıklı komut olduğu için #GP üretir; GPF handler'ı da aynı kurtarma
+/// yolundan geçirir (belt-and-braces).
+///
+/// `mov eax, [disp32]` kodlaması `8B 04 25` + 4 bayt little-endian disp32
+/// (ModRM SIB, base yok) — disp32 = 0x5000_0000 → `00 00 00 50`.
+pub fn fault_machine_code() -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    // mov eax, [0x5000_0000] — deterministic P=0 user page fault
+    c.extend_from_slice(&[0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x50]);
+    // Safety net: hlt Ring 3'te #GP üretir (ayrıcalıklı komut); GPF handler'ı
+    // da recover_user_fault üzerinden aynı şekilde kurtarır.
+    c.push(0xF4);
+    c
+}
+
+/// Spawn the Ring-3 serial driver service (Aşama 5.3).
+///
+/// `create_device_ports(0x3F8, 0x3FF)` COM1 aralığına bağlı bir Device capability
+/// üretir (MANAGE|IO). Servise IO|MANAGE haklı handle grant edilir ve
+/// [`SERVICE_DEVICE_FD`]'ye yerleştirilir — sys_ioperm gate'i (`device_io_range`)
+/// IO hakkı arar, bu yüzden MANAGE tek başına yetmez (spawn_service'ten fark).
+/// Kod + data slot + stack klonlanmış CR3'e haritalanır; data slotunda TX
+/// stringi seed edilir (bump allocator frame'leri sıfırlı değildir).
+pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
+    let dev_ports = crate::cap::create_device_ports(0x3F8, 0x3FF)
+        .map_err(|_| "device port binding failed")?;
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+    // IO (8) | MANAGE (512): sys_ioperm gate'i ve provisioning yönetimi.
+    let dev_io = crate::cap::grant(dev_ports, crate::cap::Rights(8 | 512))
+        .map_err(|_| "service device grant failed")?;
+
+    let code = serial_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+    // Data slot (code_base+0x2000) seed: [+0x10] "[SERDRV] alive\r\n" (16 bayt).
+    // Bump allocator'ın verdiği fiziksel frame'ler sıfırlı değil; deterministik
+    // TX için bölgeyi sıfırlayıp stringi yazmak zorunlu. (ioperm sonucu [+0x00]
+    // servis tarafından kendisi yazılır.)
+    let data_ptr = (code_base + 0x2000) as *mut u8;
+    unsafe {
+        core::ptr::write_bytes(data_ptr, 0, 0x1000);
+        core::ptr::copy_nonoverlapping(b"[SERDRV] alive\r\n".as_ptr(), data_ptr.add(0x10), 16);
+    }
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![(SERVICE_DEVICE_FD, dev_io)],
+    );
+    serial_spawn("[SERIAL]", pid, name);
+    Ok(pid)
+}
+
 fn serial_spawn(kind: &str, pid: u64, name: &str) {
     crate::serial_println!(
         "[{}] process '{}' pid={} enqueued (CR3 isolated)",
@@ -813,6 +1323,41 @@ fn serial_spawn(kind: &str, pid: u64, name: &str) {
         name,
         pid
     );
+}
+
+/// Spawn a Ring-3 service that deterministically page-faults (Aşama 5.4).
+///
+/// Fault-recovery regresyonu: servis `mov eax, [0x5000_0000]` çalıştırır —
+/// user yarısında eşlenmemiş bir adrese okuma → deterministik P=0 page fault.
+/// Kernel fault'u process modeli altında kurtarmalıdır ([`recover_user_fault`]
+/// → `exit_current` → Terminated + KILLED_PROCESSES + executor devam),
+/// legacy `user::KERNEL_RSP`/`KERNEL_RIP` frame'ini kullanmamalıdır (o frame
+/// yalnızca `user::execute_ring3_app`/`exec_elf` yolunda kurulur).
+///
+/// Kod + stack klonlanmış CR3'e haritalanır; capability verilmez (fault'u
+/// tetiklemek için I/O veya endpoint hakkı gerekmez).
+pub fn spawn_fault_service(name: &str) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for fault service")?;
+
+    let code = fault_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![],
+    );
+    serial_spawn("[FAULT]", pid, name);
+    Ok(pid)
 }
 
 /// Demo: bootstrap the scheduler (idle) and run two user processes with real
@@ -845,6 +1390,9 @@ pub fn init_user_test() -> (u64, u64) {
 /// The idle process owns a private stack and parks the CPU via `hlt` when
 /// nothing else is runnable.
 fn alloc_idle() {
+    // Arming the preemptive scheduler happens from the kernel's own address
+    // space; remember it for `exit_current` (see `enter_service`).
+    capture_shared_kernel_cr3();
     IDLE_STACK.call_once(|| alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice());
     let stack_top =
         IDLE_STACK.get().unwrap().as_ptr() as u64 + KERNEL_STACK_SIZE as u64;

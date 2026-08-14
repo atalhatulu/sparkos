@@ -4,6 +4,7 @@ use x86_64::PrivilegeLevel;
 use crate::serial_println;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::format;
 
 pub static IDT: Mutex<Option<InterruptDescriptorTable>> = Mutex::new(None);
 
@@ -101,7 +102,12 @@ pub fn init_timer() {
 
 // ========== Exception Handlers (no error code) ==========
 
-extern "x86-interrupt" fn divide_error_handler(_stack: InterruptStackFrame) {
+extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
+    // User-mode divide errors recover the faulting process under the process
+    // model; only kernel-mode faults halt the kernel.
+    if fault_from_user(&stack) {
+        recover_user_fault(&stack, 0, "#DE divide-by-zero");
+    }
     serial_println!("[PANIC] Divide-by-zero");
     loop { x86_64::instructions::hlt(); }
 }
@@ -128,12 +134,18 @@ extern "x86-interrupt" fn bound_range_handler(_stack: InterruptStackFrame) {
     loop { x86_64::instructions::hlt(); }
 }
 
-extern "x86-interrupt" fn invalid_opcode_handler(_stack: InterruptStackFrame) {
+extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
+    if fault_from_user(&stack) {
+        recover_user_fault(&stack, 0, "#UD invalid opcode");
+    }
     serial_println!("[PANIC] Invalid opcode");
     loop { x86_64::instructions::hlt(); }
 }
 
-extern "x86-interrupt" fn device_not_available_handler(_stack: InterruptStackFrame) {
+extern "x86-interrupt" fn device_not_available_handler(stack: InterruptStackFrame) {
+    if fault_from_user(&stack) {
+        recover_user_fault(&stack, 0, "#NM device not available");
+    }
     serial_println!("[PANIC] Device not available (no FPU/SSE)");
     loop { x86_64::instructions::hlt(); }
 }
@@ -157,26 +169,35 @@ extern "x86-interrupt" fn segment_not_present_handler(
 }
 
 extern "x86-interrupt" fn stack_segment_handler(
-    _stack: InterruptStackFrame,
-    _error_code: u64,
+    stack: InterruptStackFrame,
+    error_code: u64,
 ) {
-    serial_println!("[PANIC] Stack segment fault (error={:#x})", _error_code);
+    if fault_from_user(&stack) {
+        recover_user_fault(&stack, 0, &alloc::format!("#SS err={:#x}", error_code));
+    }
+    serial_println!("[PANIC] Stack segment fault (error={:#x})", error_code);
     loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
-    _stack: InterruptStackFrame,
-    _error_code: u64,
+    stack: InterruptStackFrame,
+    error_code: u64,
 ) {
-    serial_println!("[PANIC] GPF (error={:#x})", _error_code);
+    if fault_from_user(&stack) {
+        recover_user_fault(&stack, 0, &alloc::format!("#GP err={:#x}", error_code));
+    }
+    serial_println!("[PANIC] GPF (error={:#x})", error_code);
     loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn alignment_check_handler(
-    _stack: InterruptStackFrame,
-    _error_code: u64,
+    stack: InterruptStackFrame,
+    error_code: u64,
 ) {
-    serial_println!("[PANIC] Alignment check (error={:#x})", _error_code);
+    if fault_from_user(&stack) {
+        recover_user_fault(&stack, 0, &alloc::format!("#AC err={:#x}", error_code));
+    }
+    serial_println!("[PANIC] Alignment check (error={:#x})", error_code);
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -237,12 +258,15 @@ fn fault_from_user(stack: &InterruptStackFrame) -> bool {
     stack.code_segment.rpl() == PrivilegeLevel::Ring3
 }
 
-/// Aborts the faulting user task without returning to it.
+/// Aborts a faulting legacy user task without returning to it.
 ///
 /// Mirrors `sys_exit`: it clobbers the interrupt stack frame's implicit return
 /// by restoring the kernel's saved RSP/RIP (recorded by `user.rs` just before
 /// `iretq` into Ring 3). Control therefore resumes in the kernel loop and the
-/// kernel keeps running even though the user process died of a page fault.
+/// kernel keeps running even though the user process died of a fault. This is
+/// only valid for the legacy synchronous `user::execute_ring3_app`/`exec_elf`
+/// path, which sets `user::KERNEL_RSP`/`user::KERNEL_RIP`. Process-model
+/// processes must be recovered through [`recover_user_fault`] instead.
 fn kill_user_task() -> ! {
     unsafe {
         core::arch::asm!(
@@ -256,6 +280,55 @@ fn kill_user_task() -> ! {
     }
 }
 
+/// Recover a Ring-3 fault under the process model: terminate the faulting
+/// process and resume the kernel (cooperative executor or next ready process)
+/// instead of halting. `why` is a short human-readable fault description.
+///
+/// Falls back to the legacy [`kill_user_task`] only when no process-model
+/// process is current — i.e. a legacy `user::execute_ring3_app`/`exec_elf` app
+/// faulted and its `user::KERNEL_RSP`/`KERNEL_RIP` frame is valid.
+///
+/// Safety: the faulting process runs in Ring 3, so no kernel `Mutex` guard is
+/// held by it (`SCHEDULER`/`EXECUTOR_RESUME` guards are dropped before every
+/// `iretq`). The handler executes on TSS RSP0 — the faulting process's own
+/// kernel stack — and `exit_current` abandons that stack via `jump_to_initial`
+/// once the process is terminated, which is sound.
+fn recover_user_fault(stack: &InterruptStackFrame, addr: u64, why: &str) -> ! {
+    if crate::task::process::current_is_user_process() {
+        if let Some((pid, name)) = crate::task::process::current_process_info() {
+            crate::serial_println!(
+                "[USER-FAULT] process {} ('{}') faulted: rip={:#x}, addr={:#x}, {}",
+                pid,
+                name,
+                stack.instruction_pointer,
+                addr,
+                why,
+            );
+        } else {
+            crate::serial_println!(
+                "[USER-FAULT] user fault recovered: rip={:#x}, addr={:#x}, {}",
+                stack.instruction_pointer,
+                addr,
+                why,
+            );
+        }
+        // Diverges: marks the process Terminated, pushes it to
+        // KILLED_PROCESSES, and resumes the cooperative executor (or switches
+        // to the next ready process under the preemptive scheduler).
+        crate::task::process::exit_current();
+    }
+
+    // Legacy path: no process-model process is current; restore the legacy
+    // kernel frame so the kernel loop continues after the faulting app.
+    crate::serial_println!(
+        "[USER-FAULT] killed user task (legacy): rip={:#x}, addr={:#x}, {}",
+        stack.instruction_pointer,
+        addr,
+        why,
+    );
+    kill_user_task()
+}
+
 extern "x86-interrupt" fn page_fault_handler(
     stack: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -264,20 +337,13 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Distinguish user vs kernel faults using the saved code-segment RPL.
     if fault_from_user(&stack) {
-        // User fault: the process touched memory it is not allowed to. Kill the
-        // task and let the kernel continue running. `kill_user_task` diverges.
-        serial_println!(
-            "[USER-FAULT] killed user task: rip={:#x}, addr={:#x}, err={:?}",
-            stack.instruction_pointer,
-            addr,
-            error_code,
-        );
-        kill_user_task();
+        // User fault: the process touched memory it is not allowed to. Recover
+        // it under the process model. `recover_user_fault` diverges.
+        recover_user_fault(&stack, addr, &alloc::format!("err={:?}", error_code));
     }
 
-    // Kernel-space fault (and any survivable non-user path): this is a real
-    // kernel bug; halt and panic. Reached only for kernel faults because the
-    // user branch above diverged.
+    // Kernel-space fault: this is a real kernel bug; halt and panic. Reached
+    // only for kernel faults because the user branch above diverged.
     serial_println!(
         "[PANIC] Kernel Page Fault at {:#x}, access={:#x}",
         stack.instruction_pointer,
@@ -297,6 +363,11 @@ extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
     // Preemptive timer hook: drives the round-robin process scheduler when
     // it has been armed (default off, so existing behavior is unchanged).
     crate::task::process::timer_tick();
+
+    // Aşama 5.1: IRQ notification (IRQ 0). Bağ yoksa irq_event tek atomic load
+    // ile no-op'tur — timer her tick'te boş push yapmaz. Headless QEMU regresyonu
+    // için deterministik olay kaynağı da burasıdır.
+    crate::ipc::irq_event(0, 0);
 
     // Tick çıktısı kaldırıldı — debug için serial_println vardı
 

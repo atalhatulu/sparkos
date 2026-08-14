@@ -25,6 +25,17 @@ pub const SYS_CONNECT: u64 = 11;
 pub const SYS_SEND: u64 = 12;
 pub const SYS_RECV: u64 = 13;
 
+// Process syscalls (Linux-compatible numbers).
+pub const SYS_FORK: u64 = 14;
+pub const SYS_EXEC: u64 = 15;
+
+// Microkernel IPC & Device Port syscalls (Aşama 4 & 5).
+pub const SYS_IPC_SEND: u64 = 20;
+pub const SYS_IPC_RECV: u64 = 21;
+pub const SYS_IOPERM: u64 = 22;
+/// Non-blocking IPC alımı (Aşama 5): kuyruk boşsa EAGAIN döner, CPU'yu kilitlemez.
+pub const SYS_IPC_TRY_RECV: u64 = 23;
+
 /// Static table of all supported system calls in SparkOS 1.0.
 pub static SYSCALLS: &[SyscallInfo] = &[
     SyscallInfo {
@@ -81,6 +92,36 @@ pub static SYSCALLS: &[SyscallInfo] = &[
         number: SYS_RECV,
         name: "sys_recv",
         description: "Receive data from a socket into a buffer.",
+    },
+    SyscallInfo {
+        number: SYS_FORK,
+        name: "sys_fork",
+        description: "Fork the current process (requires EXECUTE capability).",
+    },
+    SyscallInfo {
+        number: SYS_EXEC,
+        name: "sys_exec",
+        description: "Replace the current process with a fresh ELF image (requires EXECUTE capability).",
+    },
+    SyscallInfo {
+        number: SYS_IPC_SEND,
+        name: "sys_ipc_send",
+        description: "Send a byte payload + optional capability over an IPC endpoint (WRITE right).",
+    },
+    SyscallInfo {
+        number: SYS_IPC_RECV,
+        name: "sys_ipc_recv",
+        description: "Blocking receive from an IPC endpoint (READ right).",
+    },
+    SyscallInfo {
+        number: SYS_IPC_TRY_RECV,
+        name: "sys_ipc_try_recv",
+        description: "Non-blocking receive from an IPC endpoint; EAGAIN when empty.",
+    },
+    SyscallInfo {
+        number: SYS_IOPERM,
+        name: "sys_ioperm",
+        description: "Bind a port I/O range to the calling process (requires IO right).",
     },
 ];
 

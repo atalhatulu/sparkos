@@ -53,6 +53,15 @@ pub fn close_fd_in_table(table: &mut Vec<(u32, CapHandle)>, fd: u32) -> cap::Res
     Ok(())
 }
 
+/// Dilimden FD'ye karşılık gelen handle'ı döner. (Aşama 5.2)
+/// IPC syscall'ları (sys_ipc_send/recv/try_recv, sys_ipc_create_endpoint,
+/// sys_ipc_bind_irq) ep_id'nin cap_table fd'si olduğu kuralına dayanır; bu helper
+/// üç ayrı yerde tekrarlanan `.iter().find(|(fd, _)| *fd == ep_id as u32)` aramasını
+/// tek noktada toplar. Handle yoksa (cap yok) `None` → çağıran EACCES döner.
+pub fn find_fd_in_table(table: &[(u32, CapHandle)], fd: u32) -> Option<CapHandle> {
+    table.iter().find(|(t_fd, _)| *t_fd == fd).map(|(_, h)| *h)
+}
+
 /// Process stdio seed (B1). fd 0/1/2'ye READ|WRITE capability verir.
 /// `create_user_process` / spawn sonunda bir kez çağrılır; aksi halde tüm user çıktısı
 /// (SYS_WRITE fd 1/2) EACCES alır ve sistem "bozulur".
@@ -160,5 +169,51 @@ mod tests {
         // fd 1 zaten seed'li → AlreadyExists
         let parent = cap::create_object(ObjectKind::Fd).unwrap();
         assert!(matches!(grant_fd_in_table(&mut table, 1, parent, Rights(1)), Err(CapError::AlreadyExists)));
+    }
+
+    // fcc #8: negatif testler — capability yoksa IPC syscall'ları EACCES döndürür.
+    // find_fd_in_table bunu `None` ile temsil eder; syscall tarafı None → EACCES.
+
+    #[test]
+    fn test_find_fd_unseeded_and_seeded() {
+        cap::init();
+        let mut table = Vec::new();
+        // Cap yok → None (syscall tarafında EACCES).
+        assert!(find_fd_in_table(&table, 5).is_none());
+
+        seed_new_process(&mut table).unwrap();
+        // stdio fd'leri seed'li → handle var.
+        assert!(find_fd_in_table(&table, 1).is_some());
+        // Seed'lenmemiş fd → None.
+        assert!(find_fd_in_table(&table, 7).is_none());
+        // Process exec sentinel'i u32::MAX'te durur.
+        assert!(find_fd_in_table(&table, u32::MAX).is_some());
+    }
+
+    #[test]
+    fn test_device_manage_fd_provision_and_gate() {
+        cap::init();
+        let mut table = Vec::new();
+        seed_new_process(&mut table).unwrap();
+
+        // spawn_service provisioning yolunu taklit et: Device objesi → MANAGE (512)
+        // hakkıyla grant → SERVICE_DEVICE_FD (u32::MAX - 1) tabloya.
+        let dev = cap::create_object(ObjectKind::Device).unwrap();
+        let dev_manage = cap::grant(dev, Rights(512)).unwrap();
+        let fd: u32 = u32::MAX - 1; // SERVICE_DEVICE_FD
+        table.push((fd, dev_manage));
+
+        // Pozitif: bulunan handle Device tipinde ve MANAGE hakkı taşıyor.
+        let found = find_fd_in_table(&table, fd).unwrap();
+        let (kind, _) = cap::object_identity(found).unwrap();
+        assert_eq!(kind, ObjectKind::Device);
+        assert!(cap::check_rights(found, Rights(512)).is_ok());
+
+        // Negatif (confused deputy): stdio fd1 handle'ı Device DEĞİL ve MANAGE yok.
+        // sys_ipc_bind_irq bunu EACCES ile reddetmek zorunda.
+        let stdio = find_fd_in_table(&table, 1).unwrap();
+        let (kind2, _) = cap::object_identity(stdio).unwrap();
+        assert_ne!(kind2, ObjectKind::Device);
+        assert!(cap::check_rights(stdio, Rights(512)).is_err());
     }
 }

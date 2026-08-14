@@ -138,7 +138,12 @@ pub fn map_user_page(virt: u64, writable: bool) -> Result<u64, &'static str> {
         flags |= PageTableFlags::WRITABLE;
     }
     unsafe {
-        match mapper.map_to_with_table_flags(page, frame, flags, PageTableFlags::empty(), &mut UserFrameAllocatorAdapter) {
+        // parent_table_flags ara katman (L3/L2/L1) girişlerine yazılır; boş bırakılırsa
+        // girişler PRESENT'siz ama adresli kalır → ikinci sayfa eşlenirken
+        // mapped_page_table "entry should be mapped" panikler. Ayrıca USER_ACCESSIBLE
+        // olmadan Ring-3 erişimi (tüm seviyelerde U/S=1 gerekir) page fault verirdi.
+        let parent = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+        match mapper.map_to_with_table_flags(page, frame, flags, parent, &mut UserFrameAllocatorAdapter) {
             Ok(tlb) => {
                 tlb.flush();
                 Ok(virt)
@@ -242,7 +247,11 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
         flags |= PageTableFlags::WRITABLE;
     }
     unsafe {
-        match mapper.map_to_with_table_flags(page, frame, flags, PageTableFlags::empty(), &mut UserFrameAllocatorAdapter) {
+        // Aynı kök neden: parent_table_flags boş kalırsa ara katman girişleri
+        // PRESENT'siz olur ve ikinci sayfada mapped_page_table panikler. Ring-3
+        // erişimi için ara katmanlarda da USER_ACCESSIBLE + WRITABLE gerekir.
+        let parent = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+        match mapper.map_to_with_table_flags(page, frame, flags, parent, &mut UserFrameAllocatorAdapter) {
             Ok(tlb) => {
                 tlb.flush();
                 Ok(virt)

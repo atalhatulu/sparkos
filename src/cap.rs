@@ -5,7 +5,8 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use alloc::collections::BTreeMap;
+use spin::{Mutex, Once};
 
 // --- FROZEN DATA STRUCTURES ---
 
@@ -21,7 +22,7 @@ pub enum CapError {
 
 pub type Result<T> = core::result::Result<T, CapError>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapHandle {
     pub slot: u32,
     pub generation: u32,
@@ -99,6 +100,21 @@ struct CoreState {
 // Tüm mutasyonlar TEK spinlock altındadır.
 static STATE: Mutex<Option<CoreState>> = Mutex::new(None);
 
+/// Boot'ta `bootstrap_root` ile oluşturulan root capability'nin handle'ı.
+///
+/// Kernel-resident tutulur: hiçbir process'e verilmez, ama capability
+/// hiyerarşisinin kök yetkisi olarak izlenebilir kalır (Aşama 5: kernel-resident
+/// device registry / root process, türetmeler buradan başlar). `Once` — root
+/// tam olarak bir kez, boot sırasında ve tek thread'de kurulur; sonra okunur.
+pub static ROOT_CAP: Once<CapHandle> = Once::new();
+
+/// Kayıtlı root capability handle'ını döner; `bootstrap_root` henüz çalışmadıysa
+/// `None`. Capability sisteminin kök yetkisine erişmek isteyen kernel bileşenleri
+/// (device registry, root process) bunu kullanır.
+pub fn root_cap() -> Option<CapHandle> {
+    ROOT_CAP.get().copied()
+}
+
 // --- HELPER FUNCTIONS ---
 
 fn allocate_slot(state: &mut CoreState) -> usize {
@@ -143,15 +159,24 @@ pub fn init() {
         nodes: Vec::new(),
         objects: Vec::new(),
     });
+    // Device port bağlama kaydını da sıfırla — init() capability dünyasını
+    // tazelediğinde eski bağlamalar (object_idx yeniden numaralanır) geçersizdir.
+    DEVICE_PORT_BINDINGS.lock().clear();
 }
 
 /// Root capability'sini olusturup dondurur. Boot'ta root process'e verilir.
 /// ObjectKind::Process tipinde bir obje yaratir ve temel yetkileri (READ|WRITE|
 /// MAP|EXECUTE) ile bir handle doner. Asama 2.0 (fcc ön koşulu): capability core'un
 /// boot'ta aktiflesmesi icin cagrilir — main.rs'te `cap::init()` + `bootstrap_root()`.
+///
+/// Dönen handle yalnizca izlenebilirlik icin ayni zamanda `ROOT_CAP` statigine
+/// kaydedilir; kernel-resident kalir ve `root_cap()` ile erisilir. Cagiran
+/// process yoktur — bu handle kernel'in kendi kok yetkisidir.
 pub fn bootstrap_root() -> Result<CapHandle> {
     let root = create_object(ObjectKind::Process)?;
-    grant(root, Rights(1 | 2 | 4 | 256)) // READ|WRITE|MAP|EXECUTE
+    let handle = grant(root, Rights(1 | 2 | 4 | 256))?; // READ|WRITE|MAP|EXECUTE
+    ROOT_CAP.call_once(|| handle);
+    Ok(handle)
 }
 
 pub fn create_object(kind: ObjectKind) -> Result<CapHandle> {
@@ -419,6 +444,122 @@ pub fn check_rights(cap: CapHandle, needed: Rights) -> Result<()> {
     Ok(())
 }
 
+/// Belirli bir hedef nesneye (target) ait yetkiyi doğrular.
+/// `cap`'in işaret ettiği CapObject ile `target` nesnesinin aynı olduğunu
+/// denetleyerek yetki sızıntısını ve Confused Deputy açıklarını önler.
+pub fn check_rights_for_object(cap: CapHandle, target: CapHandle, needed: Rights) -> Result<()> {
+    let state_guard = STATE.lock();
+    let state = state_guard.as_ref().ok_or(CapError::Invalid)?;
+    
+    let slot_idx = cap.slot as usize;
+    let target_idx = target.slot as usize;
+    if slot_idx >= state.slots.len() || target_idx >= state.slots.len() {
+        return Err(CapError::Invalid);
+    }
+    let slot = &state.slots[slot_idx];
+    let target_slot = &state.slots[target_idx];
+    if slot.free || slot.generation != cap.generation || target_slot.free || target_slot.generation != target.generation {
+        return Err(CapError::Invalid);
+    }
+    // Nesne kimliği doğrulaması (Capability-Resource eşleşmesi)
+    if slot.object_idx != target_slot.object_idx {
+        return Err(CapError::NoRights);
+    }
+    if !slot.rights.contains(needed) {
+        return Err(CapError::NoRights);
+    }
+    if is_revoked(state, slot.node_idx) {
+        return Err(CapError::Revoked);
+    }
+    let obj_idx = slot.object_idx as usize;
+    if !state.objects[obj_idx].valid {
+        return Err(CapError::Invalid);
+    }
+    Ok(())
+}
+
+/// Handle'ın işaret ettiği nesnenin tipini ve object_idx'ini doğrulanmış olarak
+/// döndürür. `check_rights` gibi pasiftir — refcount'a dokunmaz, obje'yi free etmez.
+/// Device port bağlama kaydı (Asama 4/5) object_idx'i anahtar olarak kullanır:
+/// CapObject payload taşımadığı için cihaz→port aralığı eşlemesi kernel tarafında
+/// bu anahtarla tutulur.
+pub fn object_identity(cap: CapHandle) -> Result<(ObjectKind, u32)> {
+    let state_guard = STATE.lock();
+    let state = state_guard.as_ref().ok_or(CapError::Invalid)?;
+    let slot_idx = cap.slot as usize;
+    if slot_idx >= state.slots.len() {
+        return Err(CapError::Invalid);
+    }
+    let slot = &state.slots[slot_idx];
+    if slot.free || slot.generation != cap.generation {
+        return Err(CapError::Invalid);
+    }
+    if is_revoked(state, slot.node_idx) {
+        return Err(CapError::Revoked);
+    }
+    let obj_idx = slot.object_idx as usize;
+    if !state.objects[obj_idx].valid {
+        return Err(CapError::Invalid);
+    }
+    Ok((state.objects[obj_idx].kind, slot.object_idx))
+}
+
+// -----------------------------------------------------------------------------
+// Device Port Binding Registry (Asama 4/5: per-device port I/O)
+// -----------------------------------------------------------------------------
+//
+// CapObject payload taşımadığı için, bir Device nesnesinin yetkili olduğu port
+// aralığı `object_idx` anahtarıyla kernel tarafında tutulur. sys_ioperm bu kaydı
+// kullanarak istenen [start..=end] aralığının, process'in elinde tuttuğu Device
+// capability'sine bağlı aralığın alt kümesi olduğunu doğrular.
+//
+// ÖNEMLİ (güvenlik düzeltmesi): sys_ioperm'deki eski boolean gate (`Rights::IO`
+// taşıyan HERHANGİ bir handle yeterliydi) bir ayrıcalık yükseltme açığıydı — socket
+// fd'leri de `Rights::IO` (8) taşır (SYS_CONNECT/SEND/RECV gate'i). Ağ erişimli bir
+// process, hiçbir cihaza bağlı olmadan TÜM port aralıklarına erişim isteyebilirdi.
+// Bu kayıt port erişimini yalnızca bağlı Device nesnelerine kısıtlar.
+
+static DEVICE_PORT_BINDINGS: Mutex<BTreeMap<u32, (u16, u16)>> = Mutex::new(BTreeMap::new());
+
+/// Yeni bir Device capability'si oluşturur ve `[start..=end_inclusive]` port
+/// aralığına bağlar. Dönen handle MANAGE|IO yetkileri taşır; kernel bu handle'ı
+/// `add_fd_to_current` ile ilgili driver process'ine grant eder (Asama 5.3).
+pub fn create_device_ports(start: u16, end_inclusive: u16) -> Result<CapHandle> {
+    let dev = create_object(ObjectKind::Device)?;
+    let (kind, object_idx) = object_identity(dev)?;
+    debug_assert_eq!(kind, ObjectKind::Device);
+    DEVICE_PORT_BINDINGS.lock().insert(object_idx, (start, end_inclusive));
+    // MANAGE (512): provisioning yönetimi; IO (8): sys_ioperm erişim gate'i.
+    grant(dev, Rights(8 | 512))
+}
+
+/// `cap`'in işaret ettiği Device nesnesinin bağlı port aralığını doğrular:
+/// cap canlı + IO yetkili + ObjectKind::Device olmalı ve kayıtlı aralığı olmalı.
+/// Socket fd gibi IO yetkili ama Device olmayan nesneler NoRights ile reddedilir
+/// (confused deputy: ağ fd'si port erişimi vermemelidir).
+pub fn device_io_range(cap: CapHandle) -> Result<(u16, u16)> {
+    check_rights(cap, Rights::IO)?;
+    let (kind, object_idx) = object_identity(cap)?;
+    if kind != ObjectKind::Device {
+        return Err(CapError::NoRights);
+    }
+    DEVICE_PORT_BINDINGS
+        .lock()
+        .get(&object_idx)
+        .copied()
+        .ok_or(CapError::NoRights)
+}
+
+/// İstenen `[start..=end_inclusive]` aralığı, `cap`'in bağlı cihaz aralığının alt
+/// kümesi mi? Değilse NoRights — sınır dışı port erişimi reddedilir.
+pub fn port_range_allowed(cap: CapHandle, start: u16, end_inclusive: u16) -> Result<()> {
+    let (bound_start, bound_end) = device_io_range(cap)?;
+    if start < bound_start || end_inclusive > bound_end {
+        return Err(CapError::NoRights);
+    }
+    Ok(())
+}
+
 // FIX-1: deref claim = generation check + epoch check + refcount++ AYNI KRİTİK DİLİMDE
 pub fn deref(cap: CapHandle, flags: Rights) -> Result<CapAccess> {
     let mut state_guard = STATE.lock(); // Atomik dilim başlangıcı
@@ -606,5 +747,54 @@ mod tests {
         drop(state_guard);
         
         assert_eq!(deref(root, Rights::READ).err(), Some(CapError::Invalid));
+    }
+
+    // --- Asama 4: Device port binding registry ---
+
+    #[test]
+    fn test_device_port_binding_subset_check() {
+        setup();
+        // Serial: 0x3F8..=0x3FF
+        let serial = create_device_ports(0x3F8, 0x3FF).unwrap();
+        // Alt küme: geçerli
+        assert!(port_range_allowed(serial, 0x3F8, 0x3FF).is_ok());
+        assert!(port_range_allowed(serial, 0x3F9, 0x3FA).is_ok());
+        // Sınır dışı: reddedilir (NoRights)
+        assert_eq!(port_range_allowed(serial, 0x3F0, 0x3FF).err(), Some(CapError::NoRights));
+        assert_eq!(port_range_allowed(serial, 0x3F8, 0x400).err(), Some(CapError::NoRights));
+    }
+
+    #[test]
+    fn test_device_io_range_rejects_non_device() {
+        setup();
+        // Socket fd simülasyonu: IO (8) yetkili ama Device olmayan bir nesne.
+        // Eski boolean gate bunu geçirirdi (ayrıcalık yükseltmesi); artık reddedilmeli.
+        let sock = create_object(ObjectKind::Fd).unwrap();
+        let sock_io = grant(sock, Rights(8)).unwrap();
+        assert_eq!(device_io_range(sock_io).err(), Some(CapError::NoRights));
+        assert_eq!(port_range_allowed(sock_io, 0x40, 0x43).err(), Some(CapError::NoRights));
+    }
+
+    #[test]
+    fn test_device_port_binding_revoked_on_revoke() {
+        setup();
+        let dev = create_device_ports(0x3F8, 0x3FF).unwrap();
+        assert!(device_io_range(dev).is_ok());
+        revoke(dev).unwrap();
+        // Kesilen lineage → Revoked (bağlama erişimi de ölür)
+        assert_eq!(device_io_range(dev).err(), Some(CapError::Revoked));
+        assert_eq!(port_range_allowed(dev, 0x3F8, 0x3FF).err(), Some(CapError::Revoked));
+    }
+
+    // --- Asama 5: root capability kernel-resident tutulur (Task #10) ---
+
+    #[test]
+    fn test_bootstrap_root_records_root_cap() {
+        setup();
+        let handle = bootstrap_root().unwrap();
+        // bootstrap_root dönen handle'ı ROOT_CAP'e kaydeder — çöpe atılmaz.
+        assert_eq!(root_cap(), Some(handle));
+        // Handle hala geçerli bir Process objesine işaret eder (deref ok).
+        assert!(deref(handle, Rights::READ).is_ok());
     }
 }

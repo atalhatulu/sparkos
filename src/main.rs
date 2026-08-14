@@ -124,6 +124,68 @@ async fn ipc_producer_2() {
     }
 }
 
+/// Aşama 5.2 boot regresyonu: user-space servis çerçevesini canlı doğrular.
+/// Bir Device capability üretir, `keysvc` servisini Ring 3'te spawn eder ve
+/// cooperative girer. Servis kendi endpoint'ini (SYS_IPC_CREATE_ENDPOINT) kurar,
+/// timer + klavye IRQ'larını bağlar (SYS_IPC_BIND_IRQ), 64 olayı poll'layıp
+/// echo'lar ve SYS_EXIT ile kapanır; `enter_service` geri dönünce IRQ'lar
+/// unbind edilir. Headless QEMU'da timer her tick deterministik olay üretir.
+async fn service_demo() {
+    let dev = crate::cap::create_object(crate::cap::ObjectKind::Device).unwrap();
+    match crate::task::process::spawn_service("keysvc", dev, crate::task::process::service_machine_code) {
+        Ok(pid) => {
+            crate::serial_println!("[SERVICE] keysvc pid={} entering (cooperative)", pid);
+            crate::task::process::enter_service(pid);
+            crate::ipc::unbind_irq(dev, 0).unwrap();
+            crate::ipc::unbind_irq(dev, 1).unwrap();
+            crate::serial_println!("[SERVICE] demo complete (IRQs unbound).");
+        }
+        Err(e) => {
+            crate::serial_println!("[SERVICE] spawn failed: {}", e);
+        }
+    }
+}
+
+/// Aşama 5.3 boot regresyonu: user-space serial driver. `create_device_ports`
+/// COM1 (0x3F8..=0x3FF) aralığına bağlı bir Device capability üretir ve servise
+/// IO|MANAGE haklı handle provision edilir. Servis Ring 3'te `sys_ioperm` ile
+/// portları açar (capability-gated; TSS IOPB'de 0x3F8..=0x3FF izinli yapılır),
+/// sonra raw `outb` ile COM1'e "[SERDRV] alive\r\n" yazar (LSR poll) ve SYS_EXIT
+/// ile kapanır. Yazılan baytlar QEMU `-serial stdio` üzerinden boot log'una
+/// düşer — Ring-3 port I/O'nun canlı kanıtı.
+async fn serial_demo() {
+    match crate::task::process::spawn_serial_service("serdrv") {
+        Ok(pid) => {
+            crate::serial_println!("[SERIAL] serdrv pid={} entering (cooperative)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[SERIAL] demo complete (Ring-3 COM1 TX verified).");
+        }
+        Err(e) => {
+            crate::serial_println!("[SERIAL] spawn failed: {}", e);
+        }
+    }
+}
+
+/// Aşama 5.4 boot regresyonu: user-space fault recovery. `faultsvc` Ring 3'te
+/// `mov eax, [0x5000_0000]` çalıştırır — user yarısında deterministik olarak
+/// eşlenmemiş bir adres. Kernel fault'u process modeli altında kurtarmalı
+/// (`exit_current` → Terminated + KILLED_PROCESSES + executor devam), legacy
+/// `user::KERNEL_RSP`/`KERNEL_RIP` çerçevesine asla dokunmamalı. Başarı: boot
+/// log'unda "[USER-FAULT] process N ('faultsvc') faulted" ve "[FAULT] demo
+/// complete" görülmeli; "[PANIC] Kernel Page Fault" OLMAMALI.
+async fn fault_demo() {
+    match crate::task::process::spawn_fault_service("faultsvc") {
+        Ok(pid) => {
+            crate::serial_println!("[FAULT] faultsvc pid={} entering (cooperative)", pid);
+            crate::task::process::enter_service(pid);
+            crate::serial_println!("[FAULT] demo complete (user fault recovered, executor resumed).");
+        }
+        Err(e) => {
+            crate::serial_println!("[FAULT] spawn failed: {}", e);
+        }
+    }
+}
+
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::SerialWriter::init();
     serial_println!("[OK] Serial port ready");
@@ -211,8 +273,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ROOT capability (ObjectKind::Process) olusturulur. Bu olmadan capability
     // core tum syscall'lar icin pasifti.
     cap::init();
-    if let Ok(_root) = cap::bootstrap_root() {
-        serial_println!("[OK] Capability core initialized (root capability)");
+    if let Some(root) = cap::root_cap().or_else(|| cap::bootstrap_root().ok()) {
+        // Root handle kaybolmaz: bootstrap_root onu kernel-resident ROOT_CAP
+        // static'ine kaydeder (cap::root_cap() ile erişilir) — capability
+        // hiyerarşisinin kök yetkisi izlenebilir kalır.
+        serial_println!("[OK] Capability core initialized (root capability slot={}, gen={})",
+            root.slot, root.generation);
     } else {
         serial_println!("[ERR] Capability core init FAILED");
     }
@@ -237,6 +303,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Initialize async keyboard scancode queue BEFORE enabling interrupts
     // so the first timer/keyboard IRQ never sees an uninitialized queue.
     task::keyboard::init();
+    // Aşama 5.1: IRQ notification event kuyruğu da interrupt'lardan önce hazır
+    // olmalı — irq_event push yapmadan önce kuyruğun varlığını kontrol eder ama
+    // init eksikse ilk timer IRQ'ları düşer.
+    ipc::init_irq_notify();
 
     x86_64::instructions::interrupts::enable();
     serial_println!("[OK] Interrupts enabled");
@@ -262,6 +332,26 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     executor.spawn(task::Task::new("ipc_prod_2", ipc_producer_2()));
     
     executor.spawn(task::Task::new("mouse", mouse::mouse_task())); // Mouse task (GUI sonraki faz)
+
+    // Aşama 5.2 boot regresyonu: user-space servis çerçevesi. keysvc servisi
+    // Ring 3'te spawn edilir, cooperative çalışır, timer IRQ'larını kendi
+    // endpoint'ine bağlar, 64 olayı echo'lar ve kapanır; sonra executor
+    // shell/clock'a geri döner. Headless QEMU'da klavye girişi yoktur; timer
+    // her tick'te deterministik olay üretir (1000 Hz).
+    executor.spawn(task::Task::new("service_demo", service_demo()));
+
+    // Aşama 5.3 boot regresyonu: user-space serial driver. keysvc'ten farklı
+    // olarak servise COM1 (0x3F8..=0x3FF) aralığına bağlı Device capability
+    // provision edilir; servis sys_ioperm ile portları açıp (TSS IOPB) raw
+    // outb ile COM1'e yazar. Boot log'unda "[SERDRV] alive" görülmesi gerekir.
+    executor.spawn(task::Task::new("serial_demo", serial_demo()));
+
+    // Aşama 5.4 boot regresyonu: user-space fault recovery. faultsvc Ring 3'te
+    // eşlenmemiş user adresine okur → deterministik page fault. Kernel onu
+    // process modeli altında kurtarır (exit_current), legacy KERNEL_RSP/KERNEL_RIP
+    // frame'ini kullanmaz. Boot log'unda "[USER-FAULT]" ve "[FAULT] demo
+    // complete" görülmeli; "[PANIC] Kernel Page Fault" OLMAMALI.
+    executor.spawn(task::Task::new("fault_demo", fault_demo()));
 
     // NOTE: GUI devre dışı — kullanıcı planı: GUI EN SONA, önce terminali
     // Linux terminali kadar güçlü yap. GUI backbuffer alloc + init şu an
