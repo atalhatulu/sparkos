@@ -5,7 +5,6 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 // --- FROZEN DATA STRUCTURES ---
@@ -123,11 +122,8 @@ fn allocate_slot(state: &mut CoreState) -> usize {
 fn is_revoked(state: &CoreState, node_idx: u32) -> bool {
     let mut curr = node_idx as usize;
     loop {
-        // Contract: "deref path doğrulaması: çıkmadan önce lineage zinciri boyunca
-        // her node'un epoch'unu snapshot ile doğrula. Kırık -> Err(Revoked)"
-        let ptr = &state.nodes[curr].epoch as *const u64 as *const AtomicU64;
-        let epoch = unsafe { &*ptr }.load(Ordering::Acquire);
-        if epoch > 0 {
+        // Lineage zinciri boyunca her node'un epoch'unu doğrula. Kırık -> Revoked
+        if state.nodes[curr].epoch > 0 {
             return true;
         }
         if let Some(p) = state.nodes[curr].parent {
@@ -388,12 +384,7 @@ pub fn revoke(cap: CapHandle) -> Result<()> {
     }
     
     let node_idx = slot.node_idx as usize;
-    
-    // Epoch değişimi Ordering::AcqRel.
-    // u64 field'ını AtomicU64 gibi davranması için pointer-cast ile güncelliyoruz,
-    // böylece struct'ın kontratındaki field tipi değişmeden kalıyor.
-    let ptr = &state.nodes[node_idx].epoch as *const u64 as *const AtomicU64;
-    unsafe { &*ptr }.fetch_add(1, Ordering::AcqRel);
+    state.nodes[node_idx].epoch = state.nodes[node_idx].epoch.saturating_add(1);
     
     Ok(())
 }

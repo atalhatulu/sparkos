@@ -35,16 +35,7 @@ pub fn init() {
     serial_println!("[OK] Syscall dispatcher initialized");
 }
 
-/// Validates that `ptr..ptr+len` is a readable user buffer (canonical, in the
-/// user half, within USER_RANGE, and every page is user-mapped). On failure
-/// returns `-EFAULT` rather than touching the buffer.
-fn check_user_read(buf_ptr: u64, len: usize) -> Result<(), u64> {
-    if crate::sec_mem::validate_user_ptr(buf_ptr, len).is_ok() {
-        Ok(())
-    } else {
-        Err(EFAULT)
-    }
-}
+
 
 #[no_mangle]
 pub extern "C" fn syscall_dispatcher(
@@ -112,16 +103,15 @@ pub extern "C" fn syscall_dispatcher(
             if syscall_cap::check_process_exec().is_err() {
                 return EACCES;
             }
-            // Asama 2.0 (fcc exploit tespiti): kernel adresini vererek kernel'ın
-            // o adresi ELF olarak okumasini engelle. User pointer zorunlu.
-            if check_user_read(arg1, arg2 as usize).is_err() {
-                serial_println!("[SYSCALL] SYS_EXEC Error: invalid user buffer (EFAULT)");
-                return EFAULT;
-            }
-            match crate::task::process::exec_elf_proc(
-                "execd",
-                unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) },
-            ) {
+            // Asama 2.0 / 3: kernel adresini ve geçersiz kullanıcı tamponlarını engelle.
+            let elf_bytes = match crate::sec_mem::validate_user_ptr(arg1, arg2 as usize) {
+                Ok(b) => b,
+                Err(_) => {
+                    serial_println!("[SYSCALL] SYS_EXEC Error: invalid user buffer (EFAULT)");
+                    return EFAULT;
+                }
+            };
+            match crate::task::process::exec_elf_proc("execd", elf_bytes) {
                 Ok(pid) => pid,
                 Err(e) => {
                     serial_println!("[SYSCALL] SYS_EXEC failed: {}", e);
@@ -193,14 +183,14 @@ fn sys_yield() -> u64 {
 
 fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if fd == 1 || fd == 2 { // stdout or stderr
-        // Validate the user buffer before touching it: canonical address, user
-        // half, in-range length, every page user-mapped. Reject with -EFAULT.
         let len_usize = len as usize;
-        if check_user_read(buf_ptr, len_usize).is_err() {
-            serial_println!("[SYSCALL] sys_write Error: invalid user buffer (EFAULT)");
-            return EFAULT;
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len_usize) };
+        let bytes = match crate::sec_mem::validate_user_ptr(buf_ptr, len_usize) {
+            Ok(b) => b,
+            Err(_) => {
+                serial_println!("[SYSCALL] sys_write Error: invalid user buffer (EFAULT)");
+                return EFAULT;
+            }
+        };
         if let Ok(s) = core::str::from_utf8(bytes) {
             let mut w = x86_64::instructions::interrupts::without_interrupts(|| crate::vga_buffer::WRITE_LOCK.lock());
             let color = if fd == 1 { crate::vga_buffer::Color::LightGreen } else { crate::vga_buffer::Color::LightRed };
