@@ -149,8 +149,8 @@ pub extern "C" fn syscall_dispatcher(
             }
         }
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3, arg4, arg5),
-        SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
-        SYS_IPC_TRY_RECV => sys_ipc_try_recv(arg1, arg2, arg3, arg4),
+        SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4, arg5),
+        SYS_IPC_TRY_RECV => sys_ipc_try_recv(arg1, arg2, arg3, arg4, arg5),
         SYS_IOPERM => sys_ioperm(arg1, arg2, arg3),
         // Aşama 5.2: user-space servis çerçevesi. Her ikisi de process modeli
         // altında çalışmalı — kernel executor içinden çağrılırsa EACCES.
@@ -198,29 +198,66 @@ fn sys_ipc_send(ep_id: u64, buf_ptr: u64, len: u64, attach_slot: u64, mode_val: 
     }
 }
 
-/// Alınan IPC mesajını kullanıcı tamponuna kopyalar; capability varsa handle'ını
-/// (slot + generation, 8 bayt) out_cap_ptr adresine yazar. Kopyalanan bayt sayısını döndürür.
+/// Alınan IPC mesajını kullanıcı tamponuna kopyalar;
+/// - Payload her zaman kullanıcı tamponuna kopyalanır ve kopyalanan bayt sayısı (payload len) döndürülür.
+/// - Capability durumu ayrık olarak raporlanır (CAP_INV-7/11, Görev B):
+///   - Meşru (valid) ise: `out_cap_ptr`'ye (slot + gen, 8 bayt) yazılır; `out_status_ptr`'ye 0 (OK) yazılır.
+///   - Mesaj kuyruktayken revoke edilmişse: `out_cap_ptr`'ye 0 yazılır; `out_status_ptr`'ye 1 (CAP_REVOKED) yazılır.
+///     SESSİZ DROP YOKTUR: Revoke edilmiş capability taşıyan mesajda dahi payload veri kaybı olmadan teslim edilir.
+///   - Geçersiz (invalid) ise: `out_cap_ptr`'ye 0 yazılır; `out_status_ptr`'ye 2 (CAP_INVALID) yazılır.
+///   - Capability yoksa: `out_status_ptr`'ye 0 yazılır.
 fn copy_ipc_msg_to_user(
     msg: crate::ipc::CapMessage<alloc::vec::Vec<u8>>,
     out_buf: &mut [u8],
     out_cap_ptr: u64,
+    out_status_ptr: u64,
     max_len: u64,
 ) -> u64 {
     let n = core::cmp::min(msg.payload.len(), max_len as usize);
     out_buf[..n].copy_from_slice(&msg.payload[..n]);
 
-    if out_cap_ptr != 0 {
-        if let Some(cap) = msg.capability {
-            if let Ok(cap_bytes) = crate::sec_mem::validate_user_ptr_mut(out_cap_ptr, 8) {
-                cap_bytes[..4].copy_from_slice(&cap.slot.to_le_bytes());
-                cap_bytes[4..8].copy_from_slice(&cap.generation.to_le_bytes());
+    let mut cap_status: u32 = 0; // 0 = OK / No cap, 1 = CAP_REVOKED, 2 = CAP_INVALID
+
+    if let Some(cap) = msg.capability {
+        match crate::cap::check_rights(cap, crate::cap::Rights::empty()) {
+            Ok(_) => {
+                if out_cap_ptr != 0 {
+                    if let Ok(cap_bytes) = crate::sec_mem::validate_user_ptr_mut(out_cap_ptr, 8) {
+                        cap_bytes[..4].copy_from_slice(&cap.slot.to_le_bytes());
+                        cap_bytes[4..8].copy_from_slice(&cap.generation.to_le_bytes());
+                    }
+                }
+                cap_status = 0;
+            }
+            Err(crate::cap::CapError::Revoked) => {
+                if out_cap_ptr != 0 {
+                    if let Ok(cap_bytes) = crate::sec_mem::validate_user_ptr_mut(out_cap_ptr, 8) {
+                        cap_bytes.fill(0);
+                    }
+                }
+                cap_status = 1; // CAP_REVOKED
+            }
+            Err(_) => {
+                if out_cap_ptr != 0 {
+                    if let Ok(cap_bytes) = crate::sec_mem::validate_user_ptr_mut(out_cap_ptr, 8) {
+                        cap_bytes.fill(0);
+                    }
+                }
+                cap_status = 2; // CAP_INVALID
             }
         }
     }
+
+    if out_status_ptr != 0 {
+        if let Ok(status_bytes) = crate::sec_mem::validate_user_ptr_mut(out_status_ptr, 4) {
+            status_bytes.copy_from_slice(&cap_status.to_le_bytes());
+        }
+    }
+
     n as u64
 }
 
-fn sys_ipc_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64) -> u64 {
+fn sys_ipc_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64, out_status_ptr: u64) -> u64 {
     // Aşama 5.1: interrupt context'te birikmiş IRQ olaylarını (interrupt dışı) boşalt.
     // Aksi halde servis recv döngüsü bağlı olayları IRQ'lar arasında göremezdi.
     crate::ipc::deliver_pending_irqs();
@@ -239,7 +276,7 @@ fn sys_ipc_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64) -> u64
     };
 
     match crate::ipc::raw_ipc_recv(ep_id as u32, receiver_cap) {
-        Ok(msg) => copy_ipc_msg_to_user(msg, out_buf, out_cap_ptr, max_len),
+        Ok(msg) => copy_ipc_msg_to_user(msg, out_buf, out_cap_ptr, out_status_ptr, max_len),
         Err(crate::cap::CapError::NoRights) => EACCES,
         Err(_) => u64::MAX,
     }
@@ -247,7 +284,7 @@ fn sys_ipc_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64) -> u64
 
 /// Non-blocking IPC alımı. Kuyruk boşsa EAGAIN döner (CPU kilitlemez, bekletmez).
 /// User-space servisler bunu poll edip SYS_YIELD ile zaman dilimlerini verir.
-fn sys_ipc_try_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64) -> u64 {
+fn sys_ipc_try_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64, out_status_ptr: u64) -> u64 {
     // Aşama 5.1: recv öncesi birikmiş IRQ olaylarını boşalt — try_recv poll döngüsü
     // (Aşama 5.2 keysvc) her iterasyonda buraya gelir, olayı hemen görür.
     crate::ipc::deliver_pending_irqs();
@@ -266,7 +303,7 @@ fn sys_ipc_try_recv(ep_id: u64, buf_ptr: u64, max_len: u64, out_cap_ptr: u64) ->
     };
 
     match crate::ipc::raw_ipc_try_recv(ep_id as u32, receiver_cap) {
-        Ok(Some(msg)) => copy_ipc_msg_to_user(msg, out_buf, out_cap_ptr, max_len),
+        Ok(Some(msg)) => copy_ipc_msg_to_user(msg, out_buf, out_cap_ptr, out_status_ptr, max_len),
         Ok(None) => EAGAIN,
         Err(crate::cap::CapError::NoRights) => EACCES,
         Err(_) => u64::MAX,
@@ -311,6 +348,7 @@ fn sys_ipc_create_endpoint(capacity: u64) -> u64 {
     });
 
     if inserted == Some(true) {
+        crate::ipc::register_endpoint_owner(ep_id, pid as u32);
         ep_id as u64
     } else {
         serial_println!("[SYSCALL] SYS_IPC_CREATE_ENDPOINT EACCES: fd {} already taken", ep_id);

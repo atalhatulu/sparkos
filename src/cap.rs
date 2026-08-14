@@ -414,6 +414,23 @@ pub fn revoke(cap: CapHandle) -> Result<()> {
     Ok(())
 }
 
+/// Sürecin sahip olduğu bir capability'yi ve ona bağlı tüm türetilmiş soy ağacını (lineage)
+/// deterministik olarak temizler (CAP_INV-13).
+/// - `revoke(cap)` ile tüm alt dal geçersiz kılınır.
+/// - `close(cap)` ile kendi handle slotu serbest bırakılır.
+pub fn destroy_owned(cap: CapHandle) -> Result<()> {
+    let _ = revoke(cap);
+    close(cap)
+}
+
+/// Süreç sonlandığında (exit_current) CSpace tablosundaki tüm handle'ları temizler.
+pub fn destroy_process_cspace(table: &mut alloc::vec::Vec<(u32, CapHandle)>) {
+    for (_, handle) in table.iter() {
+        let _ = destroy_owned(*handle);
+    }
+    table.clear();
+}
+
 /// Pasif erişim kontrolü: capability `needed` rights'ı içeriyor mu ve hâlâ canlı mı?
 /// `deref`'ten farkı: refcount ARTTIRMAZ, CapAccess guard üretmez, object'i FREE
 /// ETMEZ. fd-capability gibi KALICI kaynaklar için kullanılır — "check" bir syscall
@@ -796,5 +813,25 @@ mod tests {
         assert_eq!(root_cap(), Some(handle));
         // Handle hala geçerli bir Process objesine işaret eder (deref ok).
         assert!(deref(handle, Rights::READ).is_ok());
+    }
+
+    #[test]
+    fn test_destroy_owned_cleans_subtree_and_handle() {
+        setup();
+        let root = create_object(ObjectKind::Memory).unwrap();
+        let child = grant(root, Rights::READ).unwrap();
+        let grandchild = grant(child, Rights::READ).unwrap();
+
+        // child üzerinde destroy_owned çağrılır
+        assert!(destroy_owned(child).is_ok());
+
+        // child handle'ı artık geçersizdir (closed/invalid)
+        assert_eq!(deref(child, Rights::READ).err(), Some(CapError::Invalid));
+
+        // grandchild soy ağacı öldürülmüştür (revoked)
+        assert_eq!(deref(grandchild, Rights::READ).err(), Some(CapError::Revoked));
+
+        // root capability etkilenmez
+        assert!(deref(root, Rights::all()).is_ok());
     }
 }

@@ -3,6 +3,7 @@ use spin::Mutex;
 
 pub struct AtaDrive {
     data: Port<u16>,
+    #[allow(dead_code)]
     error: PortReadOnly<u8>,
     sec_count: Port<u8>,
     lba_lo: Port<u8>,

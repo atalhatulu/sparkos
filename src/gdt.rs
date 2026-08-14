@@ -114,7 +114,7 @@ pub static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
         TSS_DATA.tss.iomap_base = 104;
     }
 
-    let (tss_low, tss_high) = create_tss_descriptor(unsafe { &raw const TSS_DATA });
+    let (tss_low, tss_high) = create_tss_descriptor(&raw const TSS_DATA);
     let tss_selector = gdt.append(Descriptor::SystemSegment(tss_low, tss_high));
     
     (gdt, Selectors {

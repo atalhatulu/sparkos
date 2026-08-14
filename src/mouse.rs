@@ -8,7 +8,7 @@ pub static MOUSE_LEFT_CLICK: AtomicBool = AtomicBool::new(false);
 
 
 #[derive(Debug)]
-struct MouseState {
+pub struct MouseState {
     cycle: u8,
     packet: [u8; 3],
 }

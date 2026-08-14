@@ -157,36 +157,61 @@ use spin::{Mutex, Once};
 pub type RawCapChannel = CapChannel<Vec<u8>>;
 
 pub static ENDPOINTS: Mutex<BTreeMap<u32, RawCapChannel>> = Mutex::new(BTreeMap::new());
+pub static ENDPOINT_OWNERS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 
 /// Monotonik (asla yeniden kullanılmayan) endpoint ID kaynağı.
-///
-/// `ep_id` iki rolde birden çalışır: (1) ENDPOINTS kayıt defterinin anahtarı ve
-/// (2) syscall köprüsünün per-process cap_table'ındaki fd değeri (bkz.
-/// syscall.rs `sys_ipc_create_endpoint` ve syscall_cap.rs `find_fd_in_table`).
-/// Bu yüzden ep_id, capability object store'un `handle.slot`'undan — serbest
-/// listeyle yeniden kullanılabilen dahili bir indeks — TÜRETİLEMEZ: slot'un
-/// yeniden kullanımı, çoktan sonlanmış bir endpoint'in ep_id'sinin canlı bir
-/// endpoint'e atanmasına yol açardı ve fd çakışması / yanlış kuyruk erişimi
-/// üretirdi. Bu sayaç, object store slot'larından tamamen bağımsız, monotonik
-/// ve uygulama ömrü boyunca asla çakışmayan bir ep_id ad alanı sağlar.
-///
-/// Başlangıç değeri: stdio fd'leri (0,1,2) ile service/exec sentinellerinden
-/// (process.rs: `SERVICE_DEVICE_FD = u32::MAX - 1`, exec = u32::MAX) uzak
-/// tutar; sarılma (wrap) pratikte imkânsızdır (u32 aralığı).
 static NEXT_EP_ID: AtomicU32 = AtomicU32::new(8);
 
 /// Yeni bir mikroçekirdek IPC Endpoint'i oluşturur ve kayıt eder.
-///
-/// Dönen `ep_id` monotonik ad alanından gelir (`NEXT_EP_ID`) — capability
-/// object store'un serbest-listeyle yeniden kullanılabilen slot'undan değil.
-/// `ep_id` aynı zamanda syscall'un cap_table'a fd olarak yerleştirdiği değerdir;
-/// arama kuralı (`find_fd_in_table`) ep_id == fd denkliğini koruduğu sürece
-/// değişmez.
 pub fn create_raw_endpoint(capacity: usize) -> cap::Result<(u32, CapHandle)> {
     let (channel, handle) = RawCapChannel::new(capacity)?;
     let ep_id = NEXT_EP_ID.fetch_add(1, Ordering::Relaxed);
     ENDPOINTS.lock().insert(ep_id, channel);
     Ok((ep_id, handle))
+}
+
+/// Endpoint'in sahibi olan süreci (PID) kaydeder.
+pub fn register_endpoint_owner(ep_id: u32, pid: u32) {
+    ENDPOINT_OWNERS.lock().insert(ep_id, pid);
+}
+
+/// Bir sürecin sahip olduğu tüm endpoint'leri kapatır (hangup).
+/// - Endpoint ENDPOINTS tablosundan silinir (sonraki send çağrıları NotFound döner).
+/// - Bu endpoint'e bağlı tüm IRQ kesme bağları deterministik olarak kaldırılır.
+pub fn hangup_channel_for_pid(pid: u32) {
+    let to_remove: Vec<u32> = {
+        let owners = ENDPOINT_OWNERS.lock();
+        owners.iter()
+            .filter(|(_, &owner_pid)| owner_pid == pid)
+            .map(|(&ep_id, _)| ep_id)
+            .collect()
+    };
+
+    if to_remove.is_empty() {
+        return;
+    }
+
+    let mut endpoints = ENDPOINTS.lock();
+    let mut owners = ENDPOINT_OWNERS.lock();
+    let mut irq_guard = IRQ_BINDINGS.lock();
+
+    for ep_id in to_remove {
+        owners.remove(&ep_id);
+        endpoints.remove(&ep_id);
+
+        // Bu endpoint'e bağlı IRQ'ları unbind et
+        let irqs: Vec<u8> = irq_guard.iter()
+            .filter(|(_, b)| b.ep_id == ep_id)
+            .map(|(&irq, _)| irq)
+            .collect();
+        for irq in irqs {
+            irq_guard.remove(&irq);
+        }
+    }
+
+    if irq_guard.is_empty() {
+        IRQ_BINDINGS_NONEMPTY.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Syscall için ham bayt IPC gönderimi
@@ -582,5 +607,48 @@ mod tests {
         assert!(raw_ipc_try_recv(ep_id, ep_root).unwrap().is_none());
 
         unbind_irq(dev, 0).unwrap();
+    }
+
+    #[test]
+    fn test_hangup_channel_for_pid() {
+        cap::init();
+        let (ep_id, ep_root) = create_raw_endpoint(16).unwrap();
+        register_endpoint_owner(ep_id, 42);
+
+        // Gönderim başarılı
+        assert!(raw_ipc_try_send(ep_id, ep_root, b"hello", None, TransferMode::None).is_ok());
+
+        // Process 42 sonlanır → hangup
+        hangup_channel_for_pid(42);
+
+        // Artık kanal bulunamaz (deterministik NotFound, sessiz drop yok)
+        assert_eq!(
+            raw_ipc_try_send(ep_id, ep_root, b"world", None, TransferMode::None).err(),
+            Some(CapError::NotFound)
+        );
+    }
+
+    #[test]
+    fn test_revoked_cap_in_msg_preserves_payload() {
+        cap::init();
+        let (channel, ep_root) = CapChannel::<&'static str>::new(10).unwrap();
+        let writer = cap::grant(ep_root, Rights::WRITE).unwrap();
+        let reader = cap::grant(ep_root, Rights::READ).unwrap();
+
+        let mem_obj = cap::create_object(ObjectKind::Memory).unwrap();
+        let lent_cap = cap::lend(mem_obj, Rights::READ).unwrap();
+
+        // Mesaj kuyruğa giriyor
+        channel.send(writer, "critical_data", Some(lent_cap), TransferMode::Lend).unwrap();
+
+        // Mesaj kuyruktayken parent revoke ediliyor
+        cap::revoke(mem_obj).unwrap();
+
+        // Dequeue anında payload teslim edilir (SESSİZ DROP YOKTUR)
+        let msg = channel.recv(reader).unwrap();
+        assert_eq!(msg.payload, "critical_data");
+        let delivered_cap = msg.capability.unwrap();
+        // Ancak taşınan capability Revoked olarak tespit edilir
+        assert_eq!(cap::check_rights(delivered_cap, Rights::empty()).err(), Some(CapError::Revoked));
     }
 }

@@ -455,23 +455,31 @@ pub fn enter_service(pid: u64) {
     // We are about to switch away from the kernel's own address space; remember
     // it so `exit_current` can resume the executor here (see `exit_current`).
     capture_shared_kernel_cr3();
-    let target_ctx: *const RegisterContext = {
+    let (target_ctx, allowed_ports) = {
         let mut s = SCHEDULER.lock();
         s.current = Some(pid);
         if let Some(p) = s.table.get_mut(&pid) {
             p.state = ProcessState::Running;
         }
-        &s.table[&pid].ctx as *const RegisterContext
+        let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
+        (&s.table[&pid].ctx as *const RegisterContext, ports)
     };
+
+    // TSS IOPB senkronizasyonu (Görev C, CAP_INV-14):
+    if let Some((start, end)) = allowed_ports {
+        crate::gdt::reset_io_bitmap();
+        crate::gdt::allow_port_range(start, end);
+    } else {
+        crate::gdt::reset_io_bitmap();
+    }
+
     let save_ctx: *mut RegisterContext = {
         let mut guard = EXECUTOR_RESUME.lock();
         *guard = Some(RegisterContext::default());
         guard.as_mut().unwrap() as *mut RegisterContext
     };
     // Guard dropped here; `save_ctx` still points into the static's storage.
-    unsafe {
-        switch_context(save_ctx, target_ctx);
-    }
+    switch_context(save_ctx, target_ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -719,12 +727,20 @@ pub fn exit_current() -> ! {
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Terminated;
                     p.exited = true;
+                    // Görev A (CAP_INV-13): CSpace otomatik temizliği
+                    crate::cap::destroy_process_cspace(&mut p.cap_table);
+                    // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
+                    crate::ipc::hangup_channel_for_pid(pid as u32);
+                    p.allowed_ports = None;
                     crate::task::KILLED_PROCESSES.lock().push(pid);
                 }
             }
             // Executor is not a process; nothing is "current" after the resume.
             s.current = None;
         }
+        // Görev C (CAP_INV-14): Executor'a dönerken tüm IO portlarını sıfırla/kapat
+        crate::gdt::reset_io_bitmap();
+
         // Resume the executor in the shared kernel address space, never in the
         // terminating process's cloned table. The executor's saved context
         // carries cr3=0 ("keep current"), which would otherwise strand kernel
@@ -744,6 +760,11 @@ pub fn exit_current() -> ! {
             if let Some(p) = s.table.get_mut(&pid) {
                 p.state = ProcessState::Terminated;
                 p.exited = true;
+                // Görev A (CAP_INV-13): CSpace otomatik temizliği
+                crate::cap::destroy_process_cspace(&mut p.cap_table);
+                // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
+                crate::ipc::hangup_channel_for_pid(pid as u32);
+                p.allowed_ports = None;
                 crate::task::KILLED_PROCESSES.lock().push(pid);
             }
         }
@@ -753,11 +774,19 @@ pub fn exit_current() -> ! {
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Running;
                 }
+                let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
+                if let Some((start, end)) = ports {
+                    crate::gdt::reset_io_bitmap();
+                    crate::gdt::allow_port_range(start, end);
+                } else {
+                    crate::gdt::reset_io_bitmap();
+                }
                 arm_quantum();
                 &s.table[&pid].ctx as *const RegisterContext
             }
             None => {
                 s.current = Some(0);
+                crate::gdt::reset_io_bitmap();
                 &s.table[&0].ctx as *const RegisterContext
             }
         }
@@ -795,7 +824,7 @@ pub fn current_process_info() -> Option<(u64, String)> {
 /// `-1` if the current process is not a user process.
 pub fn fork_current() -> i64 {
     let (cur, name, u_rip, u_rsp, u_cs, u_ss) = {
-        let mut s = SCHEDULER.lock();
+        let s = SCHEDULER.lock();
         let cur = match s.current {
             Some(p) if p != 0 => p,
             _ => return -1,

@@ -4,7 +4,6 @@ use x86_64::PrivilegeLevel;
 use crate::serial_println;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
-use alloc::format;
 
 pub static IDT: Mutex<Option<InterruptDescriptorTable>> = Mutex::new(None);
 
@@ -213,35 +212,33 @@ extern "x86-interrupt" fn double_fault_handler(
 
 #[unsafe(naked)]
 extern "C" fn syscall_entry() {
-    unsafe {
-        core::arch::naked_asm!(
-            "push rbp",
-            "mov rbp, rsp",
-            "push rbx",
-            "push r12",
-            "push r13",
-            "push r14",
-            "push r15",
-            
-            // SysV ABI: arg1=rdi, arg2=rsi, arg3=rdx, arg4=rcx, arg5=r8, arg6=r9
-            // Linux Syscall: num=rax, arg1=rdi, arg2=rsi, arg3=rdx, arg4=r10, arg5=r8
-            "mov r9, r8",   // arg5 -> r9 (C arg6)
-            "mov r8, r10",  // arg4 -> r8 (C arg5)
-            "mov rcx, rdx", // arg3 -> rcx (C arg4)
-            "mov rdx, rsi", // arg2 -> rdx (C arg3)
-            "mov rsi, rdi", // arg1 -> rsi (C arg2)
-            "mov rdi, rax", // num  -> rdi (C arg1)
-            
-            "call syscall_handler_inner",
-            "pop r15",
-            "pop r14",
-            "pop r13",
-            "pop r12",
-            "pop rbx",
-            "pop rbp",
-            "iretq",
-        )
-    }
+    core::arch::naked_asm!(
+        "push rbp",
+        "mov rbp, rsp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        
+        // SysV ABI: arg1=rdi, arg2=rsi, arg3=rdx, arg4=rcx, arg5=r8, arg6=r9
+        // Linux Syscall: num=rax, arg1=rdi, arg2=rsi, arg3=rdx, arg4=r10, arg5=r8
+        "mov r9, r8",   // arg5 -> r9 (C arg6)
+        "mov r8, r10",  // arg4 -> r8 (C arg5)
+        "mov rcx, rdx", // arg3 -> rcx (C arg4)
+        "mov rdx, rsi", // arg2 -> rdx (C arg3)
+        "mov rsi, rdi", // arg1 -> rsi (C arg2)
+        "mov rdi, rax", // num  -> rdi (C arg1)
+        
+        "call syscall_handler_inner",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "iretq"
+    );
 }
 
 #[no_mangle]

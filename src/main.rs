@@ -136,8 +136,8 @@ async fn service_demo() {
         Ok(pid) => {
             crate::serial_println!("[SERVICE] keysvc pid={} entering (cooperative)", pid);
             crate::task::process::enter_service(pid);
-            crate::ipc::unbind_irq(dev, 0).unwrap();
-            crate::ipc::unbind_irq(dev, 1).unwrap();
+            let _ = crate::ipc::unbind_irq(dev, 0);
+            let _ = crate::ipc::unbind_irq(dev, 1);
             crate::serial_println!("[SERVICE] demo complete (IRQs unbound).");
         }
         Err(e) => {
