@@ -31,34 +31,49 @@ yeni syscall'lar (kesin atama uygulama anında) — plan boyunca `(SYS_<X> = 26+
 > Amaç: 5.x altyapısını ilk GERÇEK donanım sürücüsünde doğrulamak.
 > 6.1 kapandı (DmaRegion). Gerisi aşağıda.
 
-### 6.2 — netdrv user-space servisi (DİP AMBİT: L2 frame RX/TX, üst yığın bağsız)
+### 6.2 — netdrv user-space servisi + SYS_MAP_DMA köprüsü (DİP AMBİT: L2 RX/TX)
 
 **Amaç:** RTL8139 RX'i `DmaRegion`'a taşımak + Ring-3 `netdrv` servisine almak;
+DmaRegion fiziksel sayfalarını netdrv'in CR3'üne **yalnızca dar capability ile** eşlemek.
 IRQ → endpoint üzerinden L2 frame RX kanıtı. Üst yığın (net_socket) **bağlanmaz** (6.3).
+
+**[Mimari Analiz — A (P0)] Eksik eşleme köprüsü:** 6.1 DmaRegion'ı çekirdek ayırır ama
+netdrv'in bu sayfaları Ring-3'te görmesi için `SYS_MAP_DMA` ZORUNLU:
+
+```text
+SYS_MAP_DMA(cap_handle, user_virt_addr) = 26
+  → cap::check_rights(cap_handle, Rights::MAP | Rights::DMA)
+  → YALNIZCA o DmaRegion'a ait fiziksel sayfaları USER_ACCESSIBLE bayrağıyla
+    sürücünün CR3 sayfa tablosuna eşle
+  → başka hiçbir kernel sayfası görünmez (dar scope; rastgele eşleme yasağı)
+```
 
 | # | İş | Dosya | Defter |
 |---|---|---|---|
 | a | RX'i `Vec` → `DmaRegion` (frame allocator, 3 sayfa); RBSTART hizalanır | `rtl8139.rs` | fcc |
-| b | `sys_ioperm`+`create_device_ports` ile BAR0 (0xC000..=0xC0FF, PCI keşfiyle teyit) netdrv'e | `syscall.rs`, `sysapi.rs` | fcc |
-| c | `netdrv` Ring-3 servis: `spawn_service`, CR3-izole, DMA cap + port cap | `process.rs`, yeni demo | fcc |
+| a′ | **`SYS_MAP_DMA` (26)** — cap-doğrulamalı, dar-escapeli CR3 eşleme | `syscall.rs`, `sysapi.rs`, `memory.rs` | fcc |
+| b | `sys_ioperm`+`create_device_ports` ile **PCI dinamik BAR0** (Analiz-C) netdrv'e | `pci.rs`, `syscall.rs` | fcc |
+| c | `netdrv` Ring-3 servis: `spawn_service`, CR3-izole, DMA cap + port cap; RX DmaSlot okur | `process.rs`, yeni demo | fcc |
 | d | RX IRQ → 5.1 endpoint (`sys_ipc_bind_irq`), frame teslim | `ipc.rs` | fcc |
-| e | Host test: DmaRegion entegrasyonu, slot/rights; QEMU: `[NETDRV] alive` + L2 frame | test + run.sh | Hermes |
+| e | Host test: MAP_DMA right doğrulaması, slot/rights; QEMU: `[NETDRV] alive` + L2 frame | test + run.sh | Hermes |
 
 **Doğrulama:** build 0 hata · test artar (33+) · QEMU `[NETDRV] alive`, RX ring frame,
 PANIC yok, EXIT=124.
 **Risk:** RX DMA fiziksel adresi sayfa-uyumlu değilse RBSTART bozuk → fault. Netdrv'i
 fault-recovery'ye bağla (5.4 altyapısı hazır).
-**Alt karar:** BAR0 değeri QEMU'da deterministik değil — PCI config keşfi ile,
-sabit değil.
+**Alt karar:** BAR0 değeri QEMU'da deterministik değil — PCI config keşfi ile (Analiz-C).
 
-### 6.3 — Üst ağ yığını IPC bağı (`net_socket` ↔ `netdrv`)
+### 6.3 — Üst ağ yığını IPC bağı (`net_socket` ↔ `netdrv`) — ZERO-COPY (Analiz-B)
 
-**Amaç:** Kernel'deki tek parça TCP/UDP/ARP işlemini `netdrv` üzerinden tüketmek;
+**Amaç:** Kernel'deki TCP/UDP/ARP işlemini `netdrv` üzerinden tüketmek;
 `net_socket.rs`'i **servis-istemciye** çevirmek (kendi NIC erişimi yok — IPC çağırır).
+**[Analiz-B] Çift iş önlemi:** L2 çerçevesi `Vec<u8>` ile kopyalanmaz — 6.3 baştan
+`DmaSlot` (offset+len) üzerinden **buffer capability** teslim eder. Böylece 7.3
+(Zero-copy) AYRI aşama olmaktan çıkar, buraya gömülür → **7.3 İPTAL (gereksiz).**
 
 | # | İş | Dosya | Defter |
 |---|---|---|---|
-| a | `netdrv` → üst yığın istemci API: `SYS_NET_SEND_FRAME`/`SYS_NET_RECV_FRAME` (26+) | `syscall.rs`, `net_socket.rs` | fcc |
+| a | `netdrv` → üst yığın istemci API: `SYS_NET_SEND_FRAME(27)`/`SYS_NET_RECV_FRAME(28)` (buffer-cap) | `syscall.rs`, `net_socket.rs` | fcc |
 | b | `handle_incoming_frame` IPC üzerinden netdrv'e yönlendir; TCP/UDP state net_socket'te kalır | `net.rs`, `net_socket.rs` | agy (izole) |
 | c | L3 IP ayrıştırıcıyı netdrv'den ayır, net_socket'e taşı | `net_socket.rs` | agy |
 | d | QEMU: TCP handshake + UDP `ping 8.8.8.8` uçtan uca | run.sh | Hermes |
@@ -94,13 +109,8 @@ serviste kaynak (RX buffer, socket) iade edilmezse scheduler/zamanlayıcı geri 
 **Worker:** agy (izole lenişletme), ana zamanlayıcı fcc.
 **Risk:** Zamanlayıcı saat kaynağı — PIT/APIC timer (smp.rs'ten I/O APIC hazır).
 
-### 7.3 — Zero-copy IPC / buffer handle (büyük DMA verisinde)
-
-**Amaç:** netdrv frame → üst yığın kopyasız geçiş; `DmaRegion::define_slot` → endpoint'e
-buffer handle teslimi (`handle` + offset, kopyalama yok; yetki dar).
-- Yeni syscall `SYS_IPC_SEND_BUF`/`SYS_IPC_RECV_BUF` (27–28).
-- FROZEN: buffer paylaşımı capability-gated, `Rights::DMA` sarmalı.
-**Worker:** fcc.
+### 7.3 — ~~Zero-copy IPC / buffer handle~~ → **İPTAL** (6.3 Analiz-B'ye gömüldü)
+> Zero-copy baştan 6.3'te yapılıyor; ayrı aşama gereksiz, kopyalama yükü en baştan önlendi.
 
 ---
 
@@ -148,6 +158,9 @@ servis-istemciye; `disksvc` üzerinde blok okuyan **FS servisi** (`fssvc`).
 - Uyumlu (spinlock→per-cpu sorunlu kesitler: allocator, scheduler, TSS, cap table).
 - **Ön koşul:** 6.1 DmaRegion + allocator izolasyonu. Tek global lock darboğazını
   per-cpu'ya dağıt.
+- **[Analiz-D] Kilit mimarisi şart:** cap.rs tekil `STATE` spinlock + scheduler kilidi
+  SMP'de yüksek contention yaratır → 9.1'de **per-CPU runqueue** + **nesne bazlı
+  granüler kilitler** (nesne başına lock, global tek kilit KALMAZ).
 **Worker:** fcc (en derin).
 
 ### 9.2 — IRQ routing (her CPU'ya IRQ)
@@ -202,9 +215,14 @@ geçişi. **Son çare önlemi:** 9.1'den önce allocator'ı per-cpu yap (6.1 hab
    capability. — YALNIZ 10.2 proptest bu invariantleri KAPSAR.
 
 ## Öncelikli Sıra (Uygulama)
-6.2 → 6.3 → 7.1 → 7.2 → 7.3 → 8.1 → 8.2 → 8.3 → 9.1 → 9.2 → 9.3 → 9.4 → 10.1 → 10.2 → 10.3
-6.2 ve 6.3 bağımlı; 7.x zincire paralel (6.3'ün deadlock ihtiyacı 7.1'i de tetikleyebilir)
-kurgulanabilir — fcc tek akış tutarlı ilerler.
+6.2 → 6.3 → 7.1 → 7.2 → 8.1 → 8.2 → 8.3 → 9.1 → 9.2 → 9.3 → 9.4 → 10.1 → 10.2 → 10.3
+(6.3, Analiz-B gereğince zero-copy'ı içerir — 7.3 ayrı yok.)
+
+## Analiz Entegrasyonu (EVOLUTION_PLAN_V4_ANALIZ, 2026-08-14)
+- **[A P0]** 6.2'ye `SYS_MAP_DMA` (=26) eklendi — dar-escapeli CR3 eşleme, `Rights::MAP|DMA`.
+- **[B]** 6.3 = zero-copy (`DmaSlot` buffer-cap) → 7.3 İPTAL.
+- **[C]** 6.2'ye PCI dinamik BAR0 tespiti (`pci.rs`) işlendi.
+- **[D]** 9.1'e per-CPU runqueue + nesne-granüler kilit mimarisi şartı işlendi.
 
 ---
 
