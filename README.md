@@ -29,12 +29,13 @@ SparkOS önce **L0–L12** modeliyle stabilize edildi (1.0 FINAL), ardından **c
 | **Aşama 2** | SYS_CAP — syscall yetki kontrolü köprüsü (`syscall_cap.rs`, dispatcher gating) | `5c92526` | ✅ Tamamlandı |
 | **Aşama 3** | Bellek & pointer güvenliği sertleştirmesi (UB temizliği, `validate_user_ptr`) | `c8253f8` | ✅ Tamamlandı |
 | **Aşama 4** | Capability-based IPC (`CapChannel`, Transfer/Lend) | `c8253f8` | ✅ Tamamlandı |
-| **Aşama 5** | Driver/service ayrıştırması → microkernel | — | 🔴 Sırada |
+| **Aşama 5** | Driver/service ayrıştırması → microkernel | `e52301a` | ✅ Tamamlandı |
 
 **Doğrulama standardı (her aşama):** `cargo build` **0 hata** + host unit test + QEMU boot regression.
 
-> ✅ Test durumu: **14/14 host test** (9 capability invariant + 3 syscall_cap PURE + 2 IPC);
-> QEMU boot + IPC Producer/Consumer sıfır regresyon.
+> ✅ Test durumu: **24/24 host test** (capability invariant + syscall_cap PURE + IPC +
+> IRQ delivery chain + root capability); tek iplikte (`--test-threads=1`) deterministik;
+> QEMU boot + Aşama 5 servis/serial/fault regresyonları sıfır regresyon.
 
 ---
 
@@ -112,7 +113,7 @@ cargo bootimage  # bootimage-sparkos.bin üretir
 ### Host unit testleri (capability + IPC, harici harness)
 
 ```bash
-scratch/run_cap_tests.sh   # 14/14 — cap invariant + syscall_cap PURE + IPC
+scratch/run_cap_tests.sh   # 15/15 — cap invariant + syscall_cap PURE + IPC (tek iplik)
 ```
 
 ---
@@ -171,17 +172,17 @@ sparkos/
 
 ---
 
-## 🎯 Yol Haritası (Aşama 5 — Sıradaki)
+## 🎯 Yol Haritası (Aşama 5 — Tamamlandı)
 
-Capability microkernel'e kalan büyük adım — **microkernel driver izolasyonu**:
+Capability microkernel'in büyük adımı — **microkernel driver izolasyonu** — tamamlandı:
 
-1. **IRQ Notification Endpoint:** Sürücülerin user-space'e taşınabilmesi için kernel kesmelerinin IPC bildirimine dönüştürülmesi
-2. **Port I/O & MMIO izinleri:** Serial sürücüsü için I/O port (`0x3F8`) veya bellek sayfalarının capability ile sürece bağlanması
-3. **Donanımsız servis önce** (ör. `keyboard` / `fb_query`), ilk donanım adayı **serial** (rtl8139 QEMU'da yok)
-4. Driver/servis crash → kernel etkilenmeden restart (fault recovery)
+1. ✅ **IRQ Notification Endpoint:** Kernel kesmeleri IPC bildirimine dönüştürülür — `sys_ipc_create_endpoint` + `sys_ipc_bind_irq` ile timer/klavye IRQ olayları capability endpoint'ine (RawCapChannel) push edilir, user-space servisler poll eder.
+2. ✅ **Port I/O & MMIO izinleri:** Serial sürücüsü için I/O port (`0x3F8`) capability ile sürece bağlanır — `create_device_ports` + `sys_ioperm` (TSS IOPB, capability-gated).
+3. ✅ **Donanımsız servis önce:** `keysvc` (Ring-3 user-space servis çerçevesi, IRQ olaylarını echo'lar); ilk donanım adayı **serial** (`serdrv` — Ring-3 `outb` ile COM1 TX).
+4. ✅ Driver/servis crash → kernel etkilenmeden kurtarma: `faultsvc` eşlenmemiş adrese okur, kernel `exit_current` ile kurtarır; `[PANIC] Kernel Page Fault` yok.
 
 > **Not:** Aşama 4 tamamlanmadan Aşama 5'e girilmez (IPC capability tabanlı olmalıdır) — bu kural sağlanmıştır.
 
 ---
 
-*Son güncelleme: 2026-08-14 · Aşama 1 → 4 tamamlandı, Aşama 5 bekliyor.*
+*Son güncelleme: 2026-08-14 · Aşama 1 → 5 tamamlandı (Aşama 5: IRQ notification endpoint, user-space servis çerçevesi, capability-gated port I/O, fault recovery).*
