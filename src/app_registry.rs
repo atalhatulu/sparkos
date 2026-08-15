@@ -26,7 +26,7 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
     AppDescriptor {
         id: 1,
         name: "Terminal",
-        exec_name: "/bin/hello",
+        exec_name: "terminal.app",
         icon: AppIcon::Terminal,
         default_w: 380,
         default_h: 140,
@@ -34,7 +34,7 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
     AppDescriptor {
         id: 2,
         name: "Demo App",
-        exec_name: "/bin/echo",
+        exec_name: "live_demo_app",
         icon: AppIcon::Demo,
         default_w: 260,
         default_h: 140,
@@ -42,10 +42,26 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
     AppDescriptor {
         id: 3,
         name: "Files",
-        exec_name: "/bin/ls",
+        exec_name: "files.app",
         icon: AppIcon::Files,
-        default_w: 220,
-        default_h: 110,
+        default_w: 320,
+        default_h: 180,
+    },
+    AppDescriptor {
+        id: 4,
+        name: "Settings",
+        exec_name: "settings.app",
+        icon: AppIcon::Generic,
+        default_w: 300,
+        default_h: 180,
+    },
+    AppDescriptor {
+        id: 5,
+        name: "Task Manager",
+        exec_name: "taskmgr.app",
+        icon: AppIcon::Generic,
+        default_w: 360,
+        default_h: 200,
     },
 ];
 
@@ -60,8 +76,12 @@ pub fn find_app_by_name(name: &str) -> Option<&'static AppDescriptor> {
 /// Spawns a registered application as an isolated Ring-3 process with its own CR3,
 /// real ELF entry point, CSpace, Shmem Surface, and WM Window.
 pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
-    if app_id == 1 {
-        return crate::terminal_app::spawn_terminal_app("terminal.app");
+    match app_id {
+        1 => return crate::terminal_app::spawn_terminal_app("terminal.app"),
+        3 => return crate::files_app::spawn_files_app("files.app"),
+        4 => return crate::settings_app::spawn_settings_app("settings.app"),
+        5 => return crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"),
+        _ => {}
     }
     let app = find_app_by_id(app_id).ok_or("Unknown application ID")?;
 

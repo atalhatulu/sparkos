@@ -128,3 +128,138 @@ pub static FONT: [[u8; 8]; 128] = [
     [0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
+
+#[derive(Debug, Clone, Copy)]
+pub struct FontMetrics {
+    pub glyph_width: u32,
+    pub glyph_height: u32,
+}
+
+pub const DEFAULT_FONT: FontMetrics = FontMetrics {
+    glyph_width: 8,
+    glyph_height: 8,
+};
+
+/// Safe UTF-8 character iterator with malformed byte recovery
+pub struct Utf8CharIter<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl<'a> Utf8CharIter<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, index: 0 }
+    }
+}
+
+impl<'a> Iterator for Utf8CharIter<'a> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.bytes.len() {
+            return None;
+        }
+
+        let first = self.bytes[self.index];
+        if first < 0x80 {
+            self.index += 1;
+            return Some(first as char);
+        }
+
+        // Multi-byte sequence validation
+        let seq_len = if (first & 0xE0) == 0xC0 { 2 }
+        else if (first & 0xF0) == 0xE0 { 3 }
+        else if (first & 0xF8) == 0xF0 { 4 }
+        else { 1 }; // Invalid byte fallback
+
+        if self.index + seq_len <= self.bytes.len() {
+            if let Ok(s) = core::str::from_utf8(&self.bytes[self.index..self.index + seq_len]) {
+                if let Some(c) = s.chars().next() {
+                    self.index += seq_len;
+                    return Some(c);
+                }
+            }
+        }
+
+        // Fallback for invalid sequence
+        self.index += 1;
+        Some('?')
+    }
+}
+
+/// Measures text width and height in pixels.
+pub fn measure_text(text: &str) -> (u32, u32) {
+    let mut max_line_width = 0u32;
+    let mut current_line_width = 0u32;
+    let mut line_count = 1u32;
+
+    for c in text.chars() {
+        if c == '\n' {
+            line_count += 1;
+            if current_line_width > max_line_width {
+                max_line_width = current_line_width;
+            }
+            current_line_width = 0;
+        } else {
+            current_line_width += DEFAULT_FONT.glyph_width;
+        }
+    }
+
+    if current_line_width > max_line_width {
+        max_line_width = current_line_width;
+    }
+
+    (max_line_width, line_count * (DEFAULT_FONT.glyph_height + 2))
+}
+
+/// Draws a single glyph into a raw surface buffer with strict clipping.
+pub fn draw_glyph(surface: *mut u32, surf_w: u32, surf_h: u32, x: u32, y: u32, c: char, fg: u32, bg: u32) {
+    if surface.is_null() || x >= surf_w || y >= surf_h {
+        return;
+    }
+
+    let ascii = (c as u32).min(127) as usize;
+    let bitmap = &FONT[ascii];
+
+    for row in 0..8u32 {
+        let py = y + row;
+        if py >= surf_h { break; }
+        let byte = bitmap[row as usize];
+
+        for col in 0..8u32 {
+            let px = x + col;
+            if px >= surf_w { break; }
+
+            let color = if (byte & (1 << (7 - col))) != 0 { fg } else { bg };
+            let offset = (py as usize) * (surf_w as usize) + (px as usize);
+            unsafe {
+                core::ptr::write_volatile(surface.add(offset), color);
+            }
+        }
+    }
+}
+
+/// Draws a string into a raw surface buffer with newline handling and clipping.
+pub fn draw_text(surface: *mut u32, surf_w: u32, surf_h: u32, start_x: u32, start_y: u32, text: &str, fg: u32, bg: u32) {
+    if surface.is_null() { return; }
+
+    let mut cx = start_x;
+    let mut cy = start_y;
+
+    for c in text.chars() {
+        if c == '\n' {
+            cx = start_x;
+            cy += DEFAULT_FONT.glyph_height + 2;
+            if cy + DEFAULT_FONT.glyph_height > surf_h {
+                break;
+            }
+            continue;
+        }
+
+        if cx + DEFAULT_FONT.glyph_width <= surf_w && cy + DEFAULT_FONT.glyph_height <= surf_h {
+            draw_glyph(surface, surf_w, surf_h, cx, cy, c, fg, bg);
+        }
+        cx += DEFAULT_FONT.glyph_width;
+    }
+}
+

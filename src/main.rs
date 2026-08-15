@@ -61,6 +61,13 @@ pub mod app_registry;
 pub mod cursor;
 pub mod shell_service;
 pub mod terminal_app;
+pub mod theme;
+pub mod files_app;
+pub mod app_manager;
+pub mod notification;
+pub mod settings_app;
+pub mod taskmgr_app;
+pub mod damage;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
