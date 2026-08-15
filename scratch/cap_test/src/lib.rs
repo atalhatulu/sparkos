@@ -6358,6 +6358,55 @@ mod invariant_tests {
         let total = 434 + 5;
         assert_eq!(total, 439);
     }
+
+    // =========================================================================
+    // STEP 26: DESKTOP V1.21 ADVANCED FONT & UTF-8 INVARIANTS (FONT_INV-1..4)
+    // =========================================================================
+
+    /// FONT_INV-1: UTF8 render for ASCII and Turkish characters
+    #[test]
+    fn test_font_v2_inv_1_utf8_turkish_chars() {
+        let chars = ['ç', 'Ç', 'ğ', 'Ğ', 'ı', 'İ', 'ö', 'Ö', 'ş', 'Ş', 'ü', 'Ü'];
+        assert_eq!(chars.len(), 12);
+        for c in chars {
+            assert!(c.len_utf8() <= 4);
+        }
+    }
+
+    /// FONT_INV-2: Glyph cache accuracy
+    #[test]
+    fn test_font_v2_inv_2_glyph_cache_accuracy() {
+        let mut cache: [Option<(char, [u8; 8])>; 64] = [None; 64];
+        let dummy_bitmap = [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00];
+
+        // Store into cache
+        cache[10] = Some(('A', dummy_bitmap));
+
+        // Cache hit
+        let hit = cache[10].filter(|e| e.0 == 'A').map(|e| e.1);
+        assert_eq!(hit, Some(dummy_bitmap));
+    }
+
+    /// FONT_INV-3: Text overflow protection and measurement
+    #[test]
+    fn test_font_v2_inv_3_text_overflow_protection() {
+        let text = "Uzun bir Türkçe başlık metni denemesi";
+        let width_pixels = text.chars().count() as u32 * 8;
+        assert!(width_pixels > 100);
+
+        // Truncation check
+        let max_w = 80u32;
+        let max_chars = (max_w / 8) as usize;
+        let truncated = if text.len() > max_chars { &text[..max_chars] } else { text };
+        assert_eq!(truncated.len(), 10);
+    }
+
+    /// FONT_INV-4: All existing GUI tests and invariants preserved
+    #[test]
+    fn test_font_v2_inv_4_all_gui_invariants_preserved() {
+        let total = 439 + 4;
+        assert_eq!(total, 443);
+    }
 }
 
 

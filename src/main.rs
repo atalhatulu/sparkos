@@ -72,6 +72,7 @@ pub mod event;
 pub mod animation;
 pub mod permission;
 pub mod libspark_ui;
+pub mod text;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
