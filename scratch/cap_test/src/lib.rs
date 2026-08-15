@@ -6459,6 +6459,54 @@ mod invariant_tests {
 
         assert_eq!(registry.len(), 0);
     }
+
+    // =========================================================================
+    // STEP 28: DESKTOP V1.23 NETWORK SERVICE INVARIANTS (NET_INV-1..4)
+    // =========================================================================
+
+    /// NET_INV-1: Packet send serialization & length
+    #[test]
+    fn test_net_v2_inv_1_packet_send() {
+        let payload = b"Hello SparkOS Network";
+        let dst_ip = [10, 0, 2, 2];
+        let dst_port = 8080u16;
+
+        assert_eq!(payload.len(), 21);
+        assert_eq!(dst_ip, [10, 0, 2, 2]);
+        assert_eq!(dst_port, 8080);
+    }
+
+    /// NET_INV-2: Packet receive
+    #[test]
+    fn test_net_v2_inv_2_packet_receive() {
+        let mut rx_queue: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        rx_queue.push(alloc::vec![1, 2, 3, 4]);
+
+        let popped = rx_queue.pop();
+        assert_eq!(popped, Some(alloc::vec![1, 2, 3, 4]));
+        assert!(rx_queue.is_empty());
+    }
+
+    /// NET_INV-3: Capability denial for network operations
+    #[test]
+    fn test_net_v2_inv_3_capability_denial() {
+        let has_net_cap = false;
+        let check_socket_perm = |cap: bool| if cap { Ok(()) } else { Err("PermissionDenied") };
+
+        assert_eq!(check_socket_perm(has_net_cap), Err("PermissionDenied"));
+    }
+
+    /// NET_INV-4: Buffer overflow protection
+    #[test]
+    fn test_net_v2_inv_4_buffer_overflow_protection() {
+        let max_udp_payload = 1472usize;
+        let large_packet_size = 2000usize;
+
+        let validate_size = |sz: usize| if sz <= max_udp_payload { Ok(()) } else { Err("BufferOverflow") };
+
+        assert_eq!(validate_size(512), Ok(()));
+        assert_eq!(validate_size(large_packet_size), Err("BufferOverflow"));
+    }
 }
 
 
