@@ -7,8 +7,8 @@ pub struct Vesa {
 }
 
 pub static mut VESA: Vesa = Vesa {
-    width: 640,
-    height: 360,
+    width: 1280,
+    height: 720,
     framebuffer: core::ptr::null_mut(),
 };
 
@@ -53,20 +53,20 @@ pub fn init(backbuffer_ptr: Option<u64>) {
     let mut data_port: Port<u16> = Port::new(0x01CF);
     
     unsafe {
-        VESA.width = 640;
-        VESA.height = 360;
+        VESA.width = 1280;
+        VESA.height = 720;
 
         // VBE'yi devre dışı bırak
         index_port.write(4);
         data_port.write(0);
         
-        // Genişlik = 640
+        // Genişlik = 1280
         index_port.write(1);
-        data_port.write(640);
+        data_port.write(1280);
         
-        // Yükseklik = 360
+        // Yükseklik = 720
         index_port.write(2);
-        data_port.write(360);
+        data_port.write(720);
         
         // Renk Derinliği = 32 BPP (Bits Per Pixel)
         index_port.write(3);
@@ -82,7 +82,7 @@ pub fn init(backbuffer_ptr: Option<u64>) {
         if let Some(ptr) = backbuffer_ptr {
             BACKBUFFER = ptr as *mut u32;
         } else if BACKBUFFER.is_null() {
-            let layout = alloc::alloc::Layout::from_size_align(640 * 360 * 4, 64).unwrap();
+            let layout = alloc::alloc::Layout::from_size_align(1280 * 720 * 4, 64).unwrap();
             BACKBUFFER = alloc::alloc::alloc_zeroed(layout) as *mut u32;
         }
     }

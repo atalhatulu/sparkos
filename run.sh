@@ -40,8 +40,8 @@ else
 
     # TigerVNC / VNC Viewer varsa pencereli (windowed) modda başlat (Tam ekran KAPALI)
     if which vncviewer &>/dev/null; then
-        echo "--> TigerVNC Pencereli Modda (640x360 / 800x480) açılıyor..."
-        (sleep 0.8; vncviewer -geometry 800x480 $VNC_DISPLAY 2>/dev/null || true) &
+        echo "--> TigerVNC Pencereli Modda (1280x720 HD) açılıyor..."
+        (sleep 0.8; vncviewer -geometry 1280x720 $VNC_DISPLAY 2>/dev/null || true) &
     fi
 fi
 

@@ -131,10 +131,12 @@ pub fn handle_interrupt() {
             let mut x = MOUSE_X.load(Ordering::Relaxed) as i16 + dx;
             let mut y = MOUSE_Y.load(Ordering::Relaxed) as i16 + dy;
             
+            let max_w = unsafe { crate::gui::VESA.width as i16 };
+            let max_h = unsafe { crate::gui::VESA.height as i16 };
             if x < 0 { x = 0; }
             if y < 0 { y = 0; }
-            if x >= 640 { x = 639; }
-            if y >= 360 { y = 359; }
+            if x >= max_w { x = max_w.saturating_sub(1); }
+            if y >= max_h { y = max_h.saturating_sub(1); }
             
             MOUSE_X.store(x as u16, Ordering::Relaxed);
             MOUSE_Y.store(y as u16, Ordering::Relaxed);

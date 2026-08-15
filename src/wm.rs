@@ -494,9 +494,9 @@ impl WindowManager {
         // 5. Application Launcher Popup (if open)
         if self.launcher_open {
             let px = 4u16;
-            let py = 170u16;
             let pw = 154u16;
             let ph = 162u16;
+            let py = dock_y.saturating_sub(ph + 4);
 
             // Background & Border
             crate::gui::draw_rect(px, py, pw, ph, 0x000F172A);
@@ -540,9 +540,9 @@ impl WindowManager {
         // 1. Check Launcher Popup Click (if open)
         if self.launcher_open {
             let px = 4;
-            let py = 170;
             let pw = 154;
             let ph = 162;
+            let py = dock_y.saturating_sub(ph + 4);
 
             if mx >= px && mx < px + pw && my >= py && my < py + ph {
                 // Item 1: Terminal

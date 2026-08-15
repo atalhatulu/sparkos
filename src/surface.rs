@@ -11,8 +11,8 @@ use x86_64::PhysAddr;
 pub const USER_SURFACE_BASE: u64 = 0x70000000;
 pub const SURFACE_SLOT_SIZE: u64 = 0x01000000; // 16 MB per surface slot
 pub const MAX_SURFACES_PER_PROCESS: usize = 16; // Max 16 slots before hitting 0x80000000 limit
-pub const MAX_SURFACE_WIDTH: u32 = 640;
-pub const MAX_SURFACE_HEIGHT: u32 = 360;
+pub const MAX_SURFACE_WIDTH: u32 = 1280;
+pub const MAX_SURFACE_HEIGHT: u32 = 720;
 
 #[derive(Debug, Clone)]
 pub struct SurfaceInfo {
