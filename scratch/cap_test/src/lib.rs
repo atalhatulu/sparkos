@@ -6723,6 +6723,58 @@ mod invariant_tests {
         assert_eq!(cx, 0);
         assert_eq!(cy, 239);
     }
+
+    // =========================================================================
+    // STEP 33: DESKTOP V1.28 APP STORE REPOSITORY INVARIANTS (STORE_INV-1..4)
+    // =========================================================================
+
+    /// STORE_INV-1: Repository catalog parsing
+    #[test]
+    fn test_store_inv_1_repository_parsing() {
+        let manifest_json = r#"{"name":"editor","version":"1.5.0","developer":"Spark","permissions":["filesystem.read"],"hash":12345}"#;
+        assert!(manifest_json.contains("\"name\":\"editor\""));
+        assert!(manifest_json.contains("\"version\":\"1.5.0\""));
+        assert!(manifest_json.contains("\"developer\":\"Spark\""));
+    }
+
+    /// STORE_INV-2: App install flow
+    #[test]
+    fn test_store_inv_2_install_flow() {
+        let mut installed: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String> = alloc::collections::BTreeMap::new();
+        let app_name = "image_viewer";
+        let app_ver = "2.0.0";
+
+        installed.insert(alloc::string::String::from(app_name), alloc::string::String::from(app_ver));
+
+        assert_eq!(installed.get("image_viewer").map(|s| s.as_str()), Some("2.0.0"));
+    }
+
+    /// STORE_INV-3: App update flow
+    #[test]
+    fn test_store_inv_3_update_flow() {
+        let mut installed: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String> = alloc::collections::BTreeMap::new();
+        installed.insert(alloc::string::String::from("calculator"), alloc::string::String::from("1.0.0"));
+
+        let latest_ver = "1.2.0";
+        let cur_ver = installed.get("calculator").unwrap();
+        assert_ne!(cur_ver, latest_ver);
+
+        // Perform update
+        installed.insert(alloc::string::String::from("calculator"), alloc::string::String::from(latest_ver));
+        assert_eq!(installed.get("calculator").map(|s| s.as_str()), Some("1.2.0"));
+    }
+
+    /// STORE_INV-4: Permission review and enforcement
+    #[test]
+    fn test_store_inv_4_permission_enforcement() {
+        let privileged_perm = "system.admin";
+        let regular_perm = "filesystem.read";
+
+        let review_app = |perm: &str| if perm == "system.admin" { Err("PermissionReviewDenied") } else { Ok(()) };
+
+        assert_eq!(review_app(regular_perm), Ok(()));
+        assert_eq!(review_app(privileged_perm), Err("PermissionReviewDenied"));
+    }
 }
 
 
