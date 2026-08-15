@@ -76,6 +76,7 @@ pub mod text;
 pub mod pkg_service;
 pub mod network_service;
 pub mod browser_app;
+pub mod gpu;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
