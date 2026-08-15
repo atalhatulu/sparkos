@@ -1,0 +1,11 @@
+[package]
+name = "gui-showcase"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libspark = { path = "../../libspark" }
+
+[[bin]]
+name = "gui-showcase"
+path = "src/main.rs"

@@ -51,6 +51,12 @@ pub fn init_idt() {
     idt[PIC_IRQ_BASE + 14].set_handler_fn(ata1_handler);
     idt[PIC_IRQ_BASE + 15].set_handler_fn(ata2_handler);
     
+    // Multi-Core SMP TLB Shootdown IPI Handler (Faz 30)
+    idt[TLB_SHOOTDOWN_VECTOR].set_handler_fn(tlb_shootdown_handler);
+
+    // Multi-Core SMP Reschedule IPI Handler (Faz 30 Adım 2)
+    idt[RESCHEDULE_IPI_VECTOR].set_handler_fn(reschedule_ipi_handler);
+
     // Store in static, then load into IDTR
     *IDT.lock() = Some(idt);
     let guard = IDT.lock();
@@ -61,6 +67,28 @@ pub fn init_idt() {
     idt_static.load();
     
     serial_println!("[interrupts] IDT loaded");
+}
+
+pub fn load_cpu_idt() {
+    let guard = IDT.lock();
+    if let Some(ref idt) = *guard {
+        let idt_static: &'static InterruptDescriptorTable = unsafe {
+            &*(idt as *const InterruptDescriptorTable)
+        };
+        idt_static.load();
+    }
+}
+
+pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
+pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
+
+extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
+    crate::smp::handle_tlb_shootdown_ipi();
+    crate::smp::lapic_eoi();
+}
+
+extern "x86-interrupt" fn reschedule_ipi_handler(_stack_frame: InterruptStackFrame) {
+    crate::smp::lapic_eoi();
 }
 
 pub fn init_pic() {

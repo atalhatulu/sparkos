@@ -48,6 +48,9 @@ pub const SYS_IPC_CANCEL: u64 = 29;
 /// bu cap SLOT_MAP'te o bölgenin fiziksel adresi + offset/len ile kaydedilir.
 /// Return: yeni slot cap'inin fd'si (>= 1000); hata -13 (EACCES) / -14 (EFAULT).
 pub const SYS_IPC_CREATE_SLOT: u64 = 30;
+pub const SYS_CREATE_SURFACE: u64 = 31;
+pub const SYS_PRESENT_SURFACE: u64 = 32;
+pub const SYS_DESTROY_SURFACE: u64 = 33;
 
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
@@ -171,6 +174,28 @@ pub extern "C" fn syscall_dispatcher(
         SYS_NET_RECV_FRAME => sys_net_recv_frame(arg1, arg2),
         SYS_IPC_CANCEL => sys_ipc_cancel(arg1),
         SYS_IPC_CREATE_SLOT => sys_ipc_create_slot(arg1, arg2, arg3),
+        SYS_CREATE_SURFACE => {
+            match crate::surface::create_surface(arg1 as u32, arg2 as u32) {
+                Ok(id) => id,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_PRESENT_SURFACE => {
+            let x = ((arg2 >> 48) & 0xFFFF) as u32;
+            let y = ((arg2 >> 32) & 0xFFFF) as u32;
+            let w = ((arg2 >> 16) & 0xFFFF) as u32;
+            let h = (arg2 & 0xFFFF) as u32;
+            match crate::surface::present_surface(arg1, x, y, w, h) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_DESTROY_SURFACE => {
+            match crate::surface::destroy_surface(arg1) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
         _ => {
             serial_println!("[SYSCALL] Unknown syscall number: {}", syscall_num);
             u64::MAX
@@ -337,9 +362,17 @@ fn sys_ipc_create_endpoint(capacity: u64) -> u64 {
         serial_println!("[SYSCALL] SYS_IPC_CREATE_ENDPOINT EACCES: not a user process");
         return EACCES;
     }
+
+    // SEC-12: Bounded capacity validation to prevent Kernel Heap OOM DoS
+    if capacity == 0 || capacity > crate::ipc::MAX_ENDPOINT_CAPACITY as u64 {
+        serial_println!("[SYSCALL] SYS_IPC_CREATE_ENDPOINT EINVAL: capacity {} out of bounds (1..{})",
+            capacity, crate::ipc::MAX_ENDPOINT_CAPACITY);
+        return (-22i64) as u64; // -EINVAL
+    }
+
     let pid = crate::task::process::current_pid();
 
-    let (ep_id, ep_root) = match crate::ipc::create_raw_endpoint(capacity.max(1) as usize) {
+    let (ep_id, ep_root) = match crate::ipc::create_raw_endpoint(capacity as usize) {
         Ok(pair) => pair,
         Err(e) => {
             serial_println!("[SYSCALL] SYS_IPC_CREATE_ENDPOINT failed: {:?}", e);

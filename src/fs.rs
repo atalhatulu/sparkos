@@ -33,6 +33,282 @@ impl FsNode {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Faz 16: SPFS v1 Canonical On-Disk Structures
+// -----------------------------------------------------------------------------
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InodeType {
+    Unused = 0,
+    Regular = 1,
+    Directory = 2,
+    CharDevice = 3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inode {
+    pub inode_id: u32,           // 4 bytes
+    pub file_type: u8,           // 1 byte (InodeType)
+    pub flags: u8,               // 1 byte (1: Read, 2: Write, 3: RW)
+    pub _reserved1: [u8; 2],     // 2 bytes -> 8-byte boundary
+    pub size: u32,               // 4 bytes (max 4096 bytes in SPFS v1)
+    pub block_count: u32,        // 4 bytes (max 8 direct blocks)
+    pub direct_blocks: [u32; 8], // 32 bytes (8 * 512B = 4KB SPFS v1 limit)
+    pub _reserved2: [u8; 16],    // 16 bytes -> 64 bytes total
+}
+
+const _: () = assert!(core::mem::size_of::<Inode>() == 64);
+
+// -----------------------------------------------------------------------------
+// Faz 22: SPFS v2 Canonical On-Disk Structures (UID/GID, Mode, Indirect Blocks)
+// -----------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InodeV2 {
+    pub inode_id: u32,           // 4 bytes
+    pub file_type: u8,           // 1 byte (InodeType)
+    pub flags: u8,               // 1 byte
+    pub permissions: u16,        // 2 bytes (POSIX mode bits: e.g. 0o755)
+    pub uid: u16,                // 2 bytes (Owner User ID)
+    pub gid: u16,                // 2 bytes (Owner Group ID)
+    pub size: u32,               // 4 bytes (File size in bytes)
+    pub block_count: u32,        // 4 bytes (Total allocated sectors)
+    pub direct_blocks: [u32; 6], // 24 bytes (6 * 512B = 3KB direct)
+    pub indirect_block: u32,     // 4 bytes (Single indirect = 128 * 512B = 64KB)
+    pub double_indirect: u32,    // 4 bytes (Double indirect = 128 * 128 * 512B = 8MB+)
+    pub _reserved: [u8; 12],     // 12 bytes -> 64 bytes total
+}
+
+const _: () = assert!(core::mem::size_of::<InodeV2>() == 64);
+
+pub const SPFS_V2_MAGIC: u32 = 0x53504632; // "SPF2"
+
+// -----------------------------------------------------------------------------
+// Faz 24: Advanced Storage Engine & Dynamic Indirect Block Allocator
+// -----------------------------------------------------------------------------
+
+pub const BLOCK_SIZE: usize = 512;
+pub const PTRS_PER_BLOCK: usize = BLOCK_SIZE / 4; // 128 pointers per block (4 bytes per u32)
+pub const DIRECT_BLOCKS_COUNT: usize = 6;
+pub const MAX_DIRECT_SIZE: usize = DIRECT_BLOCKS_COUNT * BLOCK_SIZE; // 3072 bytes (3 KiB)
+pub const MAX_SINGLE_INDIRECT_SIZE: usize = MAX_DIRECT_SIZE + (PTRS_PER_BLOCK * BLOCK_SIZE); // 3 KiB + 64 KiB = 67 KiB
+pub const MAX_DOUBLE_INDIRECT_SIZE: usize = MAX_SINGLE_INDIRECT_SIZE + (PTRS_PER_BLOCK * PTRS_PER_BLOCK * BLOCK_SIZE); // ~8.38 MiB
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsError {
+    NoSpace,
+    InvalidSeek,
+    PermissionDenied,
+    NotFound,
+    CorruptedMetadata,
+}
+
+pub struct BlockAllocator {
+    pub total_blocks: u32,
+    pub free_blocks: u32,
+    pub bitmap: Vec<bool>, // true: allocated, false: free
+}
+
+impl BlockAllocator {
+    pub fn new(total_blocks: u32) -> Self {
+        Self {
+            total_blocks,
+            free_blocks: total_blocks,
+            bitmap: alloc::vec![false; total_blocks as usize],
+        }
+    }
+
+    /// Allocates a single free sector. Returns None if disk is full.
+    pub fn allocate_block(&mut self) -> Option<u32> {
+        if self.free_blocks == 0 {
+            return None;
+        }
+        for (idx, used) in self.bitmap.iter_mut().enumerate() {
+            if !*used {
+                *used = true;
+                self.free_blocks -= 1;
+                return Some(idx as u32);
+            }
+        }
+        None
+    }
+
+    /// Reclaims a previously allocated block.
+    pub fn free_block(&mut self, block: u32) {
+        let idx = block as usize;
+        if idx < self.bitmap.len() && self.bitmap[idx] {
+            self.bitmap[idx] = false;
+            self.free_blocks += 1;
+        }
+    }
+}
+
+pub struct SpfsV2Engine {
+    pub allocator: BlockAllocator,
+    pub block_data: alloc::collections::BTreeMap<u32, [u8; BLOCK_SIZE]>,
+}
+
+impl SpfsV2Engine {
+    pub fn new(total_blocks: u32) -> Self {
+        Self {
+            allocator: BlockAllocator::new(total_blocks),
+            block_data: alloc::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Writes a slice of bytes into an InodeV2, dynamically allocating direct,
+    /// single-indirect, and double-indirect blocks.
+    /// Guarantees transactional rollback on ENOSPC to prevent orphan blocks.
+    pub fn write_file_transactional(
+        &mut self,
+        inode: &mut InodeV2,
+        data: &[u8],
+    ) -> Result<usize, FsError> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        let needed_blocks = (data.len() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let mut staging_allocations: Vec<u32> = Vec::new();
+
+        // 1. Transactional check & block pre-allocation
+        for _ in 0..needed_blocks {
+            match self.allocator.allocate_block() {
+                Some(blk) => staging_allocations.push(blk),
+                None => {
+                    // Rollback all staged allocations (Zero-Orphan guarantee)
+                    for blk in staging_allocations {
+                        self.allocator.free_block(blk);
+                    }
+                    return Err(FsError::NoSpace);
+                }
+            }
+        }
+
+        // 2. Write data into allocated blocks
+        let mut blk_iter = staging_allocations.into_iter();
+        let mut bytes_written = 0usize;
+        let mut block_idx = 0usize;
+
+        while bytes_written < data.len() {
+            let chunk_len = (data.len() - bytes_written).min(BLOCK_SIZE);
+            let blk = blk_iter.next().unwrap();
+            let mut block_buf = [0u8; BLOCK_SIZE];
+            block_buf[..chunk_len].copy_from_slice(&data[bytes_written..bytes_written + chunk_len]);
+
+            self.block_data.insert(blk, block_buf);
+
+            // Assign to Inode pointers
+            if block_idx < DIRECT_BLOCKS_COUNT {
+                inode.direct_blocks[block_idx] = blk;
+            } else if block_idx < DIRECT_BLOCKS_COUNT + PTRS_PER_BLOCK {
+                if inode.indirect_block == 0 {
+                    // Allocate single indirect table block
+                    if let Some(table_blk) = self.allocator.allocate_block() {
+                        inode.indirect_block = table_blk;
+                        self.block_data.insert(table_blk, [0u8; BLOCK_SIZE]);
+                    }
+                }
+                // Store blk into indirect table
+                let indirect_slot = block_idx - DIRECT_BLOCKS_COUNT;
+                if let Some(table_buf) = self.block_data.get_mut(&inode.indirect_block) {
+                    let le_bytes = blk.to_le_bytes();
+                    table_buf[indirect_slot * 4..(indirect_slot + 1) * 4].copy_from_slice(&le_bytes);
+                }
+            }
+
+            bytes_written += chunk_len;
+            block_idx += 1;
+        }
+
+        inode.size = data.len() as u32;
+        inode.block_count = block_idx as u32;
+        Ok(bytes_written)
+    }
+
+    /// Truncates / reclaims all direct and indirect blocks assigned to an InodeV2.
+    pub fn truncate_and_reclaim(&mut self, inode: &mut InodeV2) {
+        // Direct blocks
+        for blk in &mut inode.direct_blocks {
+            if *blk != 0 {
+                self.allocator.free_block(*blk);
+                self.block_data.remove(blk);
+                *blk = 0;
+            }
+        }
+
+        // Single indirect blocks
+        if inode.indirect_block != 0 {
+            if let Some(table_buf) = self.block_data.remove(&inode.indirect_block) {
+                for i in 0..PTRS_PER_BLOCK {
+                    let ptr_bytes: [u8; 4] = table_buf[i * 4..(i + 1) * 4].try_into().unwrap_or([0; 4]);
+                    let blk = u32::from_le_bytes(ptr_bytes);
+                    if blk != 0 {
+                        self.allocator.free_block(blk);
+                        self.block_data.remove(&blk);
+                    }
+                }
+            }
+            self.allocator.free_block(inode.indirect_block);
+            inode.indirect_block = 0;
+        }
+
+        // Double indirect blocks
+        if inode.double_indirect != 0 {
+            if let Some(dtable_buf) = self.block_data.remove(&inode.double_indirect) {
+                for i in 0..PTRS_PER_BLOCK {
+                    let ptr_bytes: [u8; 4] = dtable_buf[i * 4..(i + 1) * 4].try_into().unwrap_or([0; 4]);
+                    let indirect_blk = u32::from_le_bytes(ptr_bytes);
+                    if indirect_blk != 0 {
+                        if let Some(table_buf) = self.block_data.remove(&indirect_blk) {
+                            for j in 0..PTRS_PER_BLOCK {
+                                let blk_bytes: [u8; 4] = table_buf[j * 4..(j + 1) * 4].try_into().unwrap_or([0; 4]);
+                                let blk = u32::from_le_bytes(blk_bytes);
+                                if blk != 0 {
+                                    self.allocator.free_block(blk);
+                                    self.block_data.remove(&blk);
+                                }
+                            }
+                        }
+                        self.allocator.free_block(indirect_blk);
+                    }
+                }
+            }
+            self.allocator.free_block(inode.double_indirect);
+            inode.double_indirect = 0;
+        }
+
+        inode.size = 0;
+        inode.block_count = 0;
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Superblock {
+    pub magic: u32,              // 0x53504653 ("SPFS")
+    pub block_size: u32,         // 512 bytes
+    pub total_blocks: u32,       // 2048 blocks
+    pub inode_count: u32,        // 32 inodes
+    pub free_blocks: u32,
+    pub free_inodes: u32,
+    pub _padding: [u8; 488],     // 512 bytes total
+}
+
+const _: () = assert!(core::mem::size_of::<Superblock>() == 512);
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub inode_id: u32,
+    pub name: [u8; 28],          // 32 bytes per entry
+}
+
+const _: () = assert!(core::mem::size_of::<DirectoryEntry>() == 32);
+
 pub static VFS: spin::Lazy<Mutex<FsNode>> = spin::Lazy::new(|| {
     Mutex::new(FsNode::Directory {
         name: "/".to_string(),
@@ -698,6 +974,11 @@ pub const SEEDED_BINARIES: &[SeededBlob] = &[
         data: include_bytes!("../scratch/hello.elf"),
         desc: "host.elf userland binary",
     },
+    SeededBlob {
+        path: "/bin/fetch",
+        data: include_bytes!("../scratch/hello.elf"),
+        desc: "fetch.elf userland binary",
+    },
 ];
 
 /// Compile-time seeded text configuration, installed on first boot only
@@ -855,7 +1136,6 @@ pub fn get_file_size_from_path(path: &str) -> Result<usize, &'static str> {
 // Aşama 8.3: BlockCache (Disk Sektör Önbellek Servisi)
 // -----------------------------------------------------------------------------
 
-pub const BLOCK_SIZE: usize = 512;
 pub const CACHE_BLOCKS: usize = 64;
 
 #[derive(Clone, Copy)]

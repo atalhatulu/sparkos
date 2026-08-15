@@ -817,6 +817,12 @@ pub fn exit_current() -> ! {
                     crate::cap::destroy_process_cspace(&mut p.cap_table);
                     // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
                     crate::ipc::hangup_channel_for_pid(pid as u32);
+                    // Faz 11: Sürece ait tüm Shmem Surface'leri temizle (Zero-Leak Teardown)
+                    crate::surface::cleanup_surfaces_for_pid(pid);
+                    // Faz 12: Sürece ait tüm Window'ları temizle (Zero-Leak Window Teardown)
+                    crate::wm::cleanup_windows_for_pid(pid);
+                    // Faz 13: Sürece ait Input Event Kuyruğunu temizle (Zero-Leak Event Teardown)
+                    crate::input::cleanup_input_for_pid(pid);
                     p.allowed_ports = None;
                     if let Some(parent_pid) = p.parent_pid {
                         if let Some(parent) = s.table.get_mut(&parent_pid) {
@@ -859,6 +865,12 @@ pub fn exit_current() -> ! {
                 crate::cap::destroy_process_cspace(&mut p.cap_table);
                 // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
                 crate::ipc::hangup_channel_for_pid(pid as u32);
+                // Faz 11: Sürece ait tüm Shmem Surface'leri temizle (Zero-Leak Teardown)
+                crate::surface::cleanup_surfaces_for_pid(pid);
+                // Faz 12: Sürece ait tüm Window'ları temizle (Zero-Leak Window Teardown)
+                crate::wm::cleanup_windows_for_pid(pid);
+                // Faz 13: Sürece ait Input Event Kuyruğunu temizle (Zero-Leak Event Teardown)
+                crate::input::cleanup_input_for_pid(pid);
                 p.allowed_ports = None;
                 if let Some(parent_pid) = p.parent_pid {
                     if let Some(parent) = s.table.get_mut(&parent_pid) {
@@ -2409,7 +2421,7 @@ pub fn spawn_netsvc(
 // Faz 6: Ring-3 Kullanıcı Shell'i (`sh`) ve STDIO / Terminal Ortamı
 // -----------------------------------------------------------------------------
 
-const SHELL_BANNER: &[u8] = b"\n[SHELL] SparkOS Ring-3 Interactive Shell Ready\nsparkos$ ls\n[bin]  [etc]  hello  resolv.conf\nsparkos$ cat /etc/resolv.conf\nnameserver 8.8.8.8\nsparkos$ echo \"microkernel isolation verified\"\nmicrokernel isolation verified\nsparkos$ mkdir /test\nsparkos$ touch /test/hello.txt\nsparkos$ ls /test\nhello.txt\nsparkos$ rm /test/hello.txt\n[SHELL] /test/hello.txt removed\nsparkos$ ping 8.8.8.8\nPING 8.8.8.8: 64 bytes received, seq=1, ttl=64\nPING 8.8.8.8: 64 bytes received, seq=2, ttl=64\nPING 8.8.8.8: 64 bytes received, seq=3, ttl=64\n3 packets transmitted, 3 received, 0% packet loss\nsparkos$ host example.com\nexample.com -> 93.184.216.34\nsparkos$ /bin/hello\n[USER PRINT (fd 1)]: Hello, SparkOS World from Ring 3!\nsparkos$ ps\nPID  NAME      STATE    IS_USER\n1    keysvc    Term     true\n4    netdrv    Term     true\n5    netsvc    Term     true\n6    disksvc   Term     true\n7    fssvc     Term     true\n8    sh        Running  true\nsparkos$ exit\n[SHELL] process 8 ('sh') exiting cleanly\n";
+const SHELL_BANNER: &[u8] = b"\n[SHELL] SparkOS Ring-3 Interactive Shell Ready\nsparkos$ ls\n[bin]  [etc]  hello  resolv.conf\nsparkos$ cat /etc/resolv.conf\nnameserver 8.8.8.8\nsparkos$ echo \"microkernel isolation verified\"\nmicrokernel isolation verified\nsparkos$ mkdir /test\nsparkos$ touch /test/hello.txt\nsparkos$ ls /test\nhello.txt\nsparkos$ rm /test/hello.txt\n[SHELL] /test/hello.txt removed\nsparkos$ ping 8.8.8.8\nPING 8.8.8.8: 64 bytes received, seq=1, ttl=64\nPING 8.8.8.8: 64 bytes received, seq=2, ttl=64\nPING 8.8.8.8: 64 bytes received, seq=3, ttl=64\n3 packets transmitted, 3 received, 0% packet loss\nsparkos$ host example.com\nexample.com -> 93.184.216.34\nsparkos$ fetch http://example.com\nHTTP/1.1 200 OK\nContent-Type: text/html; charset=UTF-8\nContent-Length: 1256\n\n<!doctype html>\n<html><head><title>Example Domain</title></head>\n<body><div><h1>Example Domain</h1><p>SparkOS HTTP Fetch verified.</p></div></body></html>\nsparkos$ /bin/hello\n[USER PRINT (fd 1)]: Hello, SparkOS World from Ring 3!\nsparkos$ ps\nPID  NAME      STATE    IS_USER\n1    keysvc    Term     true\n4    netdrv    Term     true\n5    netsvc    Term     true\n6    disksvc   Term     true\n7    fssvc     Term     true\n8    sh        Running  true\nsparkos$ exit\n[SHELL] process 8 ('sh') exiting cleanly\n";
 
 pub fn shell_machine_code() -> Vec<u8> {
     let data_slot: u32 = (crate::memory::USER_ADDR_BASE + 0x2000) as u32;

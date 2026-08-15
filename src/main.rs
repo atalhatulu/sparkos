@@ -44,12 +44,19 @@ pub mod cap;
 pub mod syscall_cap; // Asama 2 — syscall yetki kontrolü köprüsü
 pub mod dma_region;  // Asama 6.1 — Capability-gated DMA bolgesi
 pub mod acpi;
+pub mod iommu;
 pub mod smp;
 pub mod klog;
 pub mod panic;
 pub mod ktrace;
 pub mod app;
 pub mod sysapi;
+pub mod surface;
+pub mod wm;
+pub mod input;
+pub mod pkg;
+pub mod service;
+pub mod auth;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -417,10 +424,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Aşama 9: SMP Keşfi ve APIC Başlatma
     smp::init_smp();
-    
-    // Klavye handler'ını keyboard IRQ'ya bağla
-    // keyboard_handler zaten interrupts.rs'de, onu güncellemek lazım
-    // Şimdilik shell başlat
+
+    // Faz 29: ACPI DMAR & Intel VT-d IOMMU Keşfi, Tablo İnşası ve Translation Enable (TE)
+    if let Some(_caps) = iommu::probe_and_setup_iommu() {
+        serial_println!("[OK] IOMMU Hardware DMA Translation Active (TE=1, RTPS=1, Domain 1 Isolated)");
+    } else {
+        serial_println!("[IOMMU] No ACPI DMAR Table found (Hardware IOMMU disabled or emulated standard platform)");
+    }
     
     serial_println!("[OK] Enabling interrupts...");
     // Initialize async keyboard scancode queue BEFORE enabling interrupts

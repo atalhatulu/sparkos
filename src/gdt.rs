@@ -7,7 +7,7 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const MAX_CPUS: usize = 8;
 pub const KERNEL_STACK_SIZE: usize = 4096 * 5;
 
-#[repr(C, packed)]
+#[repr(C, align(16))]
 pub struct TssWithIopb {
     pub tss: TaskStateSegment,
     pub io_bitmap: [u8; 8192],
@@ -188,7 +188,7 @@ pub static GDT: Lazy<(&'static GlobalDescriptorTable, Selectors)> = Lazy::new(||
 
 pub fn init_cpu_gdt_tss(cpu_id: usize) {
     use x86_64::instructions::tables::load_tss;
-    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, FS, GS, SS};
+    use x86_64::instructions::segmentation::{Segment, DS, ES, FS, GS, SS};
     
     if cpu_id >= MAX_CPUS {
         return;
@@ -198,7 +198,6 @@ pub fn init_cpu_gdt_tss(cpu_id: usize) {
     gdt_data.gdt.load();
 
     unsafe {
-        CS::set_reg(gdt_data.selectors.code_selector);
         DS::set_reg(gdt_data.selectors.data_selector);
         ES::set_reg(gdt_data.selectors.data_selector);
         FS::set_reg(gdt_data.selectors.data_selector);
@@ -207,9 +206,11 @@ pub fn init_cpu_gdt_tss(cpu_id: usize) {
 
         load_tss(gdt_data.selectors.tss_selector);
 
-        let tss_addr = &raw const PER_CPU_TSS[cpu_id] as u64;
-        let rsp0_addr = PER_CPU_TSS[cpu_id].tss.privilege_stack_table[0].as_u64();
-        crate::serial_println!("[SMP] CPU {}: TSS loaded (selector={:#x}, tss_addr={:#x}, rsp0={:#x})", cpu_id, gdt_data.selectors.tss_selector.0, tss_addr, rsp0_addr);
+        if cpu_id == 0 {
+            let tss_addr = &raw const PER_CPU_TSS[cpu_id] as u64;
+            let rsp0_addr = PER_CPU_TSS[cpu_id].tss.privilege_stack_table[0].as_u64();
+            crate::serial_println!("[SMP] CPU {}: TSS loaded (selector={:#x}, tss_addr={:#x}, rsp0={:#x})", cpu_id, gdt_data.selectors.tss_selector.0, tss_addr, rsp0_addr);
+        }
     }
 }
 

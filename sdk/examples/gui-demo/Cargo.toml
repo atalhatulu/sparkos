@@ -1,0 +1,11 @@
+[package]
+name = "gui-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libspark = { path = "../../libspark" }
+
+[[bin]]
+name = "gui-demo"
+path = "src/main.rs"

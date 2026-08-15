@@ -58,6 +58,13 @@ impl core::ops::BitAnd for Rights {
     }
 }
 
+impl core::ops::BitOr for Rights {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Rights(self.0 | rhs.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectKind {
     Memory,
@@ -91,7 +98,7 @@ struct CapSlot {
     is_lent: bool,
 }
 
-struct CoreState {
+pub(crate) struct CoreState {
     slots: Vec<CapSlot>,
     nodes: Vec<CapNode>,
     objects: Vec<CapObject>,
@@ -99,6 +106,26 @@ struct CoreState {
 
 // Tüm mutasyonlar TEK spinlock altındadır.
 static STATE: Mutex<Option<CoreState>> = Mutex::new(None);
+
+pub static CSPACE_LOCK_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static CSPACE_LOCK_CONTENTION: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Acquires STATE lock while profiling lock contention.
+pub(crate) fn lock_state() -> spin::MutexGuard<'static, Option<CoreState>> {
+    CSPACE_LOCK_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if let Some(guard) = STATE.try_lock() {
+        return guard;
+    }
+    CSPACE_LOCK_CONTENTION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    STATE.lock()
+}
+
+pub fn get_cspace_contention_stats() -> (usize, usize, u32) {
+    let total = CSPACE_LOCK_TOTAL.load(core::sync::atomic::Ordering::Relaxed);
+    let contention = CSPACE_LOCK_CONTENTION.load(core::sync::atomic::Ordering::Relaxed);
+    let rate = if total > 0 { ((contention * 100) / total) as u32 } else { 0 };
+    (total, contention, rate)
+}
 
 /// Boot'ta `bootstrap_root` ile oluşturulan root capability'nin handle'ı.
 ///
@@ -180,7 +207,7 @@ pub fn bootstrap_root() -> Result<CapHandle> {
 }
 
 pub fn create_object(kind: ObjectKind) -> Result<CapHandle> {
-    let mut state_guard = STATE.lock();
+    let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let obj_idx = state.objects.len();
@@ -215,7 +242,7 @@ pub fn create_object(kind: ObjectKind) -> Result<CapHandle> {
 }
 
 pub fn grant(parent: CapHandle, req: Rights) -> Result<CapHandle> {
-    let mut state_guard = STATE.lock();
+    let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let p_slot_idx = parent.slot as usize;
@@ -268,7 +295,7 @@ pub fn grant(parent: CapHandle, req: Rights) -> Result<CapHandle> {
 }
 
 pub fn transfer(src: CapHandle, req: Rights) -> Result<CapHandle> {
-    let mut state_guard = STATE.lock();
+    let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let src_slot_idx = src.slot as usize;
@@ -323,7 +350,7 @@ pub fn transfer(src: CapHandle, req: Rights) -> Result<CapHandle> {
 }
 
 pub fn lend(parent: CapHandle, req: Rights) -> Result<CapHandle> {
-    let mut state_guard = STATE.lock();
+    let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let p_slot_idx = parent.slot as usize;
@@ -415,7 +442,7 @@ pub fn expire_lent_capabilities(current_tick: u64) -> usize {
 }
 
 pub fn close(cap: CapHandle) -> Result<()> {
-    let mut state_guard = STATE.lock();
+    let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let slot_idx = cap.slot as usize;
@@ -434,7 +461,7 @@ pub fn close(cap: CapHandle) -> Result<()> {
 }
 
 pub fn revoke(cap: CapHandle) -> Result<()> {
-    let mut state_guard = STATE.lock();
+    let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let slot_idx = cap.slot as usize;
@@ -474,7 +501,7 @@ pub fn destroy_process_cspace(table: &mut alloc::vec::Vec<(u32, CapHandle)>) {
 /// gate'inde object ömrünü tüketmemelidir (deref+drop refcount'u 0'a düşürüp
 /// obje'yi valid=false yapar; ikinci check Invalid verirdi).
 pub fn check_rights(cap: CapHandle, needed: Rights) -> Result<()> {
-    let state_guard = STATE.lock();
+    let state_guard = lock_state();
     let state = state_guard.as_ref().ok_or(CapError::Invalid)?;
     let slot_idx = cap.slot as usize;
     if slot_idx >= state.slots.len() {
@@ -502,7 +529,7 @@ pub fn check_rights(cap: CapHandle, needed: Rights) -> Result<()> {
 /// `cap`'in işaret ettiği CapObject ile `target` nesnesinin aynı olduğunu
 /// denetleyerek yetki sızıntısını ve Confused Deputy açıklarını önler.
 pub fn check_rights_for_object(cap: CapHandle, target: CapHandle, needed: Rights) -> Result<()> {
-    let state_guard = STATE.lock();
+    let state_guard = lock_state();
     let state = state_guard.as_ref().ok_or(CapError::Invalid)?;
     
     let slot_idx = cap.slot as usize;
@@ -616,7 +643,7 @@ pub fn port_range_allowed(cap: CapHandle, start: u16, end_inclusive: u16) -> Res
 
 // FIX-1: deref claim = generation check + epoch check + refcount++ AYNI KRİTİK DİLİMDE
 pub fn deref(cap: CapHandle, flags: Rights) -> Result<CapAccess> {
-    let mut state_guard = STATE.lock(); // Atomik dilim başlangıcı
+    let mut state_guard = lock_state(); // Atomik dilim başlangıcı
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
     let slot_idx = cap.slot as usize;
@@ -655,7 +682,7 @@ pub struct CapAccess {
 
 impl Drop for CapAccess {
     fn drop(&mut self) {
-        if let Some(state) = STATE.lock().as_mut() {
+        if let Some(state) = lock_state().as_mut() {
             let obj = &mut state.objects[self.object_idx as usize];
             if obj.valid && obj.refcount > 0 {
                 obj.refcount -= 1;

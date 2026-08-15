@@ -95,8 +95,8 @@ pub fn parse_elf(bytes: &[u8]) -> Result<ElfFile, ElfError> {
         return Err(ElfError::NotLittleEndian);
     }
 
-    // 4. Executable (e_type == 2) or Shared Object (e_type == 3 for PIE)
-    if ehdr.e_type != 2 && ehdr.e_type != 3 {
+    // 4. Strictly Executable (e_type == 2 / ET_EXEC) only for Faz 17
+    if ehdr.e_type != 2 {
         return Err(ElfError::NotExecutable);
     }
 

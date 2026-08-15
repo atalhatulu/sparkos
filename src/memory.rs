@@ -64,13 +64,21 @@ pub fn is_user_range(ptr: u64, len: usize) -> bool {
 // that usable regions are snapshotted. If it is never called the allocator
 // stays empty and callers fall back to a degraded (still isolated) path.
 
-struct UserFrameBump {
+// ---------------------------------------------------------------------------
+// Faz 25: Virtual Memory Evolution — Reclaimable Physical Frame Allocator
+// ---------------------------------------------------------------------------
+
+struct UserFrameAllocator {
     /// Snapshot of usable physical ranges: (start_inclusive, end_exclusive).
     regions: Vec<(u64, u64)>,
     next_region: usize,
+    /// Recycled physical frames available for immediate reuse.
+    free_list: Vec<PhysFrame>,
+    /// Set of allocated frame physical start addresses (Double-Free Defense).
+    allocated_frames: alloc::collections::BTreeSet<u64>,
 }
 
-static USER_FRAME_ALLOC: Mutex<Option<UserFrameBump>> = Mutex::new(None);
+static USER_FRAME_ALLOC: Mutex<Option<UserFrameAllocator>> = Mutex::new(None);
 
 /// Seeds the user frame allocator with the usable regions from the boot memory
 /// map. Safe to call multiple times; the first successful call wins.
@@ -94,28 +102,59 @@ pub fn init_user_memory(memory_map: &'static MemoryMap) {
             }
         }
     }
-    *guard = Some(UserFrameBump { regions, next_region: 0 });
+    *guard = Some(UserFrameAllocator {
+        regions,
+        next_region: 0,
+        free_list: Vec::new(),
+        allocated_frames: alloc::collections::BTreeSet::new(),
+    });
 }
 
-/// Allocates a fresh, dedicated physical frame for user mappings.
+/// Allocates a fresh or recycled physical frame for user mappings.
 /// Returns `None` if the allocator is unseeded or exhausted.
 pub fn user_alloc_frame() -> Option<PhysFrame> {
     let mut guard = USER_FRAME_ALLOC.lock();
     let alloc = guard.as_mut()?;
+
+    // 1. Reclaim recycled frame if available (LIFO Frame Cache)
+    if let Some(frame) = alloc.free_list.pop() {
+        alloc.allocated_frames.insert(frame.start_address().as_u64());
+        
+        // Zero the frame memory to guarantee clean page tables and prevent MALFORMED_TABLE faults
+        let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+        let dest = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
+        unsafe {
+            core::ptr::write_bytes(dest, 0, 4096);
+        }
+        return Some(frame);
+    }
+
+    // 2. Bump-allocate fresh frame from usable physical regions
     while alloc.next_region < alloc.regions.len() {
         let (start, end) = alloc.regions[alloc.next_region];
         if start < end {
             alloc.regions[alloc.next_region].0 = start + 4096;
-            return Some(PhysFrame::containing_address(PhysAddr::new(start)));
+            let frame = PhysFrame::containing_address(PhysAddr::new(start));
+            alloc.allocated_frames.insert(start);
+            return Some(frame);
         }
         alloc.next_region += 1;
     }
     None
 }
 
-/// Releases a physical frame back to the pool. The bump allocator does not
-/// reclaim individual frames; retained for API symmetry.
-pub fn user_free_frame(_frame: PhysFrame) {}
+/// Releases a physical frame back to the pool (Faz 25 TD-MED-3 Resolution).
+/// Enforces double-free protection and out-of-bounds checks.
+pub fn user_free_frame(frame: PhysFrame) {
+    let mut guard = USER_FRAME_ALLOC.lock();
+    if let Some(alloc) = guard.as_mut() {
+        let addr = frame.start_address().as_u64();
+        // Only reclaim if the frame was actively recorded as allocated
+        if alloc.allocated_frames.remove(&addr) {
+            alloc.free_list.push(frame);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // User page mapping helpers.
@@ -164,8 +203,18 @@ pub fn unmap_user_page(virt: u64) -> Result<bool, &'static str> {
     let mut mapper = unsafe { init(phys_offset) };
     let (frame, flush) = mapper.unmap(page).map_err(|_| "unmap failed")?;
     flush.flush();
+    crate::smp::tlb_shootdown(virt, 1);
     user_free_frame(frame);
     Ok(true)
+}
+
+/// Unmaps a range of `count` pages starting at `virt`, flushing TLB and freeing physical frames.
+pub fn unmap_user_range(virt: u64, count: u64) -> Result<(), &'static str> {
+    for i in 0..count {
+        let v = virt.checked_add(i.checked_mul(4096).ok_or("Virtual address overflow")?).ok_or("Virtual address overflow")?;
+        let _ = unmap_user_page(v);
+    }
+    Ok(())
 }
 
 /// Maps a range of `count` pages starting at `virt`, allocating a fresh frame

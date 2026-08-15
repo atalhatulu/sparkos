@@ -1,25 +1,36 @@
-/target/
+# Rust build artifacts (root and all subprojects/SDK)
+target/
+**/target/
 **/*.rs.bk
 Cargo.lock
+**/Cargo.lock
+
+# Logs and debug output
+*.log
+qemu.log
 
 # IDEs and Editors
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
 # OS specific
 .DS_Store
 Thumbs.db
 
-# QEMU / Build files if any fall outside target
+# QEMU / Disk images / Binaries
 *.iso
 *.img
 *.bin
+disk.img
 
-# Local scratch/tryout artifacts
+# Local scratch and temporary tryouts
 /scratch/
+scratch/
 
-# Geçici ajan raporları (kalıcı doküman değil)
+# Agent temporary reports
 *_RAPORU.md
 WORKING_KERNEL_ROADMAP.md
+FAZ*.md
