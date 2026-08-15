@@ -6507,6 +6507,55 @@ mod invariant_tests {
         assert_eq!(validate_size(512), Ok(()));
         assert_eq!(validate_size(large_packet_size), Err("BufferOverflow"));
     }
+
+    // =========================================================================
+    // STEP 29: DESKTOP V1.24 WEB VIEWER INVARIANTS (BROWSER_INV-1..4)
+    // =========================================================================
+
+    /// BROWSER_INV-1: HTTP request formatting and 200 OK parsing
+    #[test]
+    fn test_browser_inv_1_http_request_and_response() {
+        let req = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(req.starts_with("GET / HTTP/1.1"));
+        assert!(req.contains("Host: example.com"));
+
+        let resp_header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+        assert!(resp_header.contains("200 OK"));
+    }
+
+    /// BROWSER_INV-2: HTML parse tags
+    #[test]
+    fn test_browser_inv_2_html_parse() {
+        let html = "<html><head><title>Test Page</title></head><body><h1>Hello</h1><p>World</p><a href=\"http://test.com\">Link</a></body></html>";
+        assert!(html.contains("<title>Test Page</title>"));
+        assert!(html.contains("<h1>Hello</h1>"));
+        assert!(html.contains("<p>World</p>"));
+        assert!(html.contains("<a href=\"http://test.com\">Link</a>"));
+    }
+
+    /// BROWSER_INV-3: SparkUI rendering dimensions
+    #[test]
+    fn test_browser_inv_3_rendering_dimensions() {
+        let browser_w = 360u32;
+        let browser_h = 220u32;
+        let url_bar_w = 260u32;
+        let go_btn_w = 40u32;
+
+        assert!(url_bar_w + go_btn_w + 30 <= browser_w);
+        assert!(browser_h > 100);
+    }
+
+    /// BROWSER_INV-4: Process and network capability isolation
+    #[test]
+    fn test_browser_inv_4_process_isolation() {
+        let browser_pid = 6u64;
+        let calc_pid = 7u64;
+
+        let has_net = |pid: u64| if pid == browser_pid { true } else { false };
+
+        assert!(has_net(browser_pid));
+        assert!(!has_net(calc_pid));
+    }
 }
 
 

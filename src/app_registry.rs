@@ -63,6 +63,14 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
         default_w: 360,
         default_h: 200,
     },
+    AppDescriptor {
+        id: 6,
+        name: "Web Browser",
+        exec_name: "browser.app",
+        icon: AppIcon::Generic,
+        default_w: 360,
+        default_h: 220,
+    },
 ];
 
 pub fn find_app_by_id(id: u8) -> Option<&'static AppDescriptor> {
@@ -81,6 +89,7 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
         3 => return crate::files_app::spawn_files_app("files.app"),
         4 => return crate::settings_app::spawn_settings_app("settings.app"),
         5 => return crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"),
+        6 => return crate::browser_app::spawn_browser_app("browser.app"),
         _ => {}
     }
     let app = find_app_by_id(app_id).ok_or("Unknown application ID")?;

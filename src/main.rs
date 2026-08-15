@@ -75,6 +75,7 @@ pub mod libspark_ui;
 pub mod text;
 pub mod pkg_service;
 pub mod network_service;
+pub mod browser_app;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
