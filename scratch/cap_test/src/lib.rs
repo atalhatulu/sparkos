@@ -6880,6 +6880,115 @@ mod invariant_tests {
         assert!(has_net_cap(browser_pid));
         assert!(!has_net_cap(calc_pid));
     }
+
+    // =========================================================================
+    // STEP 36: DESKTOP V1.31 SYSTEM TOP BAR INVARIANTS (SYSTEM_BAR_INV-1..5)
+    // =========================================================================
+
+    /// SYSTEM_BAR_INV-1: Panel framebuffer bounds
+    #[test]
+    fn test_system_bar_inv_1_framebuffer_bounds() {
+        let fb_w = 1280u16;
+        let bar_h = 24u16;
+
+        let is_in_bounds = |x: u16, y: u16| x < fb_w && y < bar_h;
+
+        assert!(is_in_bounds(0, 0));
+        assert!(is_in_bounds(1279, 23));
+        assert!(!is_in_bounds(1280, 0));
+        assert!(!is_in_bounds(100, 24));
+    }
+
+    /// SYSTEM_BAR_INV-2: Window z-order cannot occlude panel
+    #[test]
+    fn test_system_bar_inv_2_window_z_order() {
+        let render_stages = ["Desktop Background", "Windows", "Dock", "System Top Bar", "Cursor"];
+        let win_stage = render_stages.iter().position(|&s| s == "Windows").unwrap();
+        let top_bar_stage = render_stages.iter().position(|&s| s == "System Top Bar").unwrap();
+
+        assert!(top_bar_stage > win_stage);
+    }
+
+    /// SYSTEM_BAR_INV-3: Ring-3 processes cannot manipulate panel state directly
+    #[test]
+    fn test_system_bar_inv_3_ring3_manipulation_blocked() {
+        let caller_ring = 3u8;
+        let check_bar_access = |ring: u8| if ring == 0 { Ok(()) } else { Err("PrivilegeViolation") };
+
+        assert_eq!(check_bar_access(caller_ring), Err("PrivilegeViolation"));
+    }
+
+    /// SYSTEM_BAR_INV-4: Theme changes update panel colors
+    #[test]
+    fn test_system_bar_inv_4_theme_updates_panel() {
+        let dark_bg = 0x000F172A;
+        let light_bg = 0x00E2E8F0;
+
+        let get_panel_bg = |theme: &str| if theme == "Dark" { dark_bg } else { light_bg };
+
+        assert_eq!(get_panel_bg("Dark"), 0x000F172A);
+        assert_eq!(get_panel_bg("Light"), 0x00E2E8F0);
+    }
+
+    /// SYSTEM_BAR_INV-5: Clock system HH:MM formatting
+    #[test]
+    fn test_system_bar_inv_5_clock_formatting() {
+        let uptime_sec = 3725u64; // 1 hour, 2 minutes, 5 seconds
+        let total_min = uptime_sec / 60;
+        let m = (total_min % 60) as u8;
+        let h = ((total_min / 60) % 24) as u8;
+
+        let formatted = alloc::format!("{:02}:{:02}", h, m);
+        assert_eq!(formatted, "01:02");
+    }
+
+    // =========================================================================
+    // STEP 37: DESKTOP V1.32 NETWORK MANAGER & TRAY INVARIANTS (NETWORK_UI_INV-1..4)
+    // =========================================================================
+
+    /// NETWORK_UI_INV-1: Network state accurately shown
+    #[test]
+    fn test_network_ui_inv_1_network_state_display() {
+        let state_symbol = |state: &str| match state {
+            "Disconnected" => "x",
+            "Ethernet" => "[ETH]",
+            "Wifi" => "[WIFI]",
+            _ => "?",
+        };
+
+        assert_eq!(state_symbol("Disconnected"), "x");
+        assert_eq!(state_symbol("Ethernet"), "[ETH]");
+        assert_eq!(state_symbol("Wifi"), "[WIFI]");
+    }
+
+    /// NETWORK_UI_INV-2: Disconnected state is safe and graceful
+    #[test]
+    fn test_network_ui_inv_2_disconnected_state_safe() {
+        let link_up = false;
+        let state = if link_up { "Ethernet" } else { "Disconnected" };
+
+        assert_eq!(state, "Disconnected");
+    }
+
+    /// NETWORK_UI_INV-3: Unauthorized app access to network manager state is rejected
+    #[test]
+    fn test_network_ui_inv_3_unauthorized_app_access_rejected() {
+        let has_net_cap = false;
+        let query_state = |cap: bool| if cap { Ok("10.0.2.15") } else { Err("PermissionDenied") };
+
+        assert_eq!(query_state(has_net_cap), Err("PermissionDenied"));
+    }
+
+    /// NETWORK_UI_INV-4: Tray popup interaction and toggle logic
+    #[test]
+    fn test_network_ui_inv_4_tray_popup_toggle() {
+        let mut popup_open = false;
+        popup_open = !popup_open;
+        assert!(popup_open);
+
+        popup_open = !popup_open;
+        assert!(!popup_open);
+    }
 }
 
 

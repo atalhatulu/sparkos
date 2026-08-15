@@ -518,11 +518,12 @@ impl WindowManager {
             }
         }
 
-        // 4c. Clock on right side of Dock
-        let clock_x = screen_w.saturating_sub(76);
-        crate::gui::draw_rect(clock_x, dock_y + 2, 72, 20, 0x001E293B);
+        // 4c. Dock Background Completed
 
-        // 5. Application Launcher Popup (if open)
+        // 5. System Top Bar (Top layer above windows and dock, below cursor)
+        crate::system_bar::SYSTEM_BAR.lock().render(screen_w, screen_h);
+
+        // 6. Application Launcher Popup (if open)
         if self.launcher_open {
             let px = 4u16;
             let pw = 154u16;
