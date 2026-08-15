@@ -2,8 +2,8 @@ use x86_64::instructions::port::Port;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU16, AtomicBool, Ordering};
 
-pub static MOUSE_X: AtomicU16 = AtomicU16::new(400);
-pub static MOUSE_Y: AtomicU16 = AtomicU16::new(300);
+pub static MOUSE_X: AtomicU16 = AtomicU16::new(320);
+pub static MOUSE_Y: AtomicU16 = AtomicU16::new(180);
 pub static MOUSE_LEFT_CLICK: AtomicBool = AtomicBool::new(false);
 
 
@@ -72,6 +72,18 @@ pub fn init() {
         mouse_write(0xF6);
         mouse_read(); // ACK
         
+        // Set resolution (8 counts/mm)
+        mouse_write(0xE8);
+        mouse_read();
+        mouse_write(0x03);
+        mouse_read();
+
+        // Set sample rate (200 Hz)
+        mouse_write(0xF3);
+        mouse_read();
+        mouse_write(200);
+        mouse_read();
+
         // Enable packet streaming
         mouse_write(0xF4);
         mouse_read(); // ACK
@@ -109,6 +121,10 @@ pub fn handle_interrupt() {
             let mut dx = state.packet[1] as i16;
             if (state.packet[0] & 0x10) != 0 { dx -= 256; }
             
+            // 2x sensitivity multiplier for full screen reach in VNC
+            dx *= 2;
+            dy *= 2;
+
             let left_click = (state.packet[0] & 1) != 0;
             MOUSE_LEFT_CLICK.store(left_click, Ordering::Relaxed);
             
@@ -129,8 +145,8 @@ pub fn handle_interrupt() {
 
 
 pub async fn mouse_task() {
-    let mut last_x = 400;
-    let mut last_y = 300;
+    let mut last_x = 320;
+    let mut last_y = 180;
     let mut last_click = false;
     
     loop {
