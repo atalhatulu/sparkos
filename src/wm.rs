@@ -339,43 +339,44 @@ impl WindowManager {
     }
 
     /// Composite all windows, surfaces, dock, launcher, and cursor to the hardware backbuffer
-    pub fn composite_desktop(&self, mouse_x: i32, mouse_y: i32) {
+    pub fn composite_desktop(&self, _mouse_x: i32, _mouse_y: i32) {
         unsafe {
             if crate::gui::BACKBUFFER.is_null() { return; }
         }
 
-        let screen_w = unsafe { crate::gui::VESA.width };
-        let screen_h = unsafe { crate::gui::VESA.height };
+        let screen_w = unsafe { crate::gui::VESA.width as u16 };
+        let screen_h = unsafe { crate::gui::VESA.height as u16 };
         let dock_y = screen_h.saturating_sub(DOCK_HEIGHT);
+        let active_theme = crate::theme::THEME_MANAGER.lock().current_theme;
 
-        // 1. Draw solid wallpaper / desktop background (Dark Slate #1E293B)
-        crate::gui::draw_rect(0, 0, screen_w, screen_h, 0x001E293B);
+        // 1. Wallpaper / Background Fill
+        crate::gui::draw_rect(0, 0, screen_w, screen_h, active_theme.desktop_background);
 
-        // 2. Top menu / status bar (Navy #0F172A)
-        crate::gui::draw_rect(0, 0, screen_w, 20, 0x000F172A);
-        crate::gui::draw_string(8, 6, "SparkOS Desktop v1.1 | Isolated CSpace", 0x00E2E8F0, 0x000F172A);
+        // 2. Top Info / Status Bar (y = 0, h = 20)
+        crate::gui::draw_rect(0, 0, screen_w, 20, active_theme.dock_background);
+        crate::gui::draw_rect(0, 19, screen_w, 1, active_theme.border_color);
+        crate::gui::draw_icon_glyph(8, 6, crate::app_registry::AppIcon::Logo, active_theme.accent_color, active_theme.dock_background);
+        crate::gui::draw_string(20, 6, "SparkOS Desktop (1280x720 HD)", active_theme.text_color, active_theme.dock_background);
+        
+        let stat_x = screen_w.saturating_sub(180);
+        crate::gui::draw_string(stat_x, 6, "Microkernel v1.14", 0x0094A3B8, active_theme.dock_background);
 
-        // 3. Composite windows Back-to-Front
+        // 3. Composite Windows in Z-Order (Back-to-Front)
         let surf_reg = crate::surface::SURFACE_REGISTRY.lock();
         for win in self.windows.iter() {
             if !win.visible || win.state == WindowState::Minimized {
                 continue;
             }
 
-            let wx = win.x.max(0).min(screen_w as i32 - 1) as u16;
-            let wy = win.y.max(20).min(dock_y as i32 - 1) as u16;
-            let ww = (win.width as u16).min(screen_w.saturating_sub(wx));
-            let max_wh = dock_y.saturating_sub(wy + 20);
-            let wh = (win.height as u16).min(max_wh);
-
-            if ww == 0 || wh == 0 {
-                continue;
-            }
+            let wx = win.x.max(0) as u16;
+            let wy = win.y.max(0) as u16;
+            let ww = win.width as u16;
+            let wh = win.height as u16;
 
             let is_focused = self.focused_window == Some(win.window_id);
-            let title_bg = if is_focused { 0x001D4ED8 /* Focused Vibrant Navy */ } else { 0x00334155 /* Unfocused Slate */ };
-            let title_fg = if is_focused { 0x00FFFFFF /* Bright White */ } else { 0x0094A3B8 /* Muted Silver */ };
-            let border_col = if is_focused { 0x003B82F6 /* Electric Blue Border */ } else { 0x00475569 /* Dark Border */ };
+            let title_bg = if is_focused { active_theme.titlebar_active } else { active_theme.titlebar_inactive };
+            let title_fg = if is_focused { active_theme.text_color } else { 0x0094A3B8 };
+            let border_col = if is_focused { active_theme.accent_color } else { active_theme.border_color };
 
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
@@ -394,6 +395,8 @@ impl WindowManager {
                 1 => "Terminal",
                 2 => "Demo App",
                 3 => "Files",
+                4 => "Settings",
+                5 => "Task Manager",
                 _ => "SparkOS Application",
             };
             crate::gui::draw_string(wx + 18, wy + 6, app_name, title_fg, title_bg);
@@ -409,7 +412,7 @@ impl WindowManager {
             // Minimize Button [—]
             if ww > 60 {
                 let min_x = wx + ww - 54;
-                let min_bg = if hovered_btn == ChromeButton::Minimize { 0x00475569 } else { 0x001E293B };
+                let min_bg = if hovered_btn == ChromeButton::Minimize { 0x00475569 } else { active_theme.dock_background };
                 crate::gui::draw_rect(min_x, wy + 3, 14, 14, min_bg);
                 crate::gui::draw_char(min_x + 4, wy + 5, '-', 0x00E2E8F0, min_bg);
             }
@@ -417,7 +420,7 @@ impl WindowManager {
             // Maximize Button [□]
             if ww > 40 {
                 let max_x = wx + ww - 36;
-                let max_bg = if hovered_btn == ChromeButton::Maximize { 0x002563EB } else { 0x001E293B };
+                let max_bg = if hovered_btn == ChromeButton::Maximize { active_theme.accent_color } else { active_theme.dock_background };
                 crate::gui::draw_rect(max_x, wy + 3, 14, 14, max_bg);
                 let max_sym = if win.state == WindowState::Maximized { '^' } else { '+' };
                 crate::gui::draw_char(max_x + 4, wy + 5, max_sym, 0x00E2E8F0, max_bg);
@@ -426,13 +429,13 @@ impl WindowManager {
             // Close Button [×]
             if ww > 20 {
                 let close_x = wx + ww - 18;
-                let close_bg = if hovered_btn == ChromeButton::Close { 0x00EF4444 /* Bright Hover Red */ } else { 0x00DC2626 /* Normal Red */ };
+                let close_bg = if hovered_btn == ChromeButton::Close { active_theme.close_button_hover } else { 0x00DC2626 };
                 crate::gui::draw_rect(close_x, wy + 3, 14, 14, close_bg);
                 crate::gui::draw_char(close_x + 4, wy + 5, 'x', 0x00FFFFFF, close_bg);
             }
 
             // 3b. Client Area Background
-            crate::gui::draw_rect(wx, wy + 20, ww, wh, 0x000F172A);
+            crate::gui::draw_rect(wx, wy + 20, ww, wh, active_theme.window_active);
 
             // 3c. Blit shared-memory surface if present
             if let Some(surface) = surf_reg.iter().find(|s| s.surface_id == win.surface_id) {
@@ -468,8 +471,8 @@ impl WindowManager {
         drop(surf_reg);
 
         // 4. Bottom Bar / Dock (y = dock_y, h = 24)
-        crate::gui::draw_rect(0, dock_y, screen_w, DOCK_HEIGHT, 0x000F172A);
-        crate::gui::draw_rect(0, dock_y, screen_w, 1, 0x00334155); // Top border
+        crate::gui::draw_rect(0, dock_y, screen_w, DOCK_HEIGHT, active_theme.dock_background);
+        crate::gui::draw_rect(0, dock_y, screen_w, 1, active_theme.border_color); // Top border
 
         // 4a. SparkOS Launcher Button on Dock
         let l_bg = if self.launcher_open { 0x002563EB } else { 0x001E293B };
