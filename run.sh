@@ -36,7 +36,9 @@ echo ""
 echo "    Serial cikti:"
 echo ""
 
-timeout --foreground 60 qemu-system-x86_64 \
+exec qemu-system-x86_64 \
+    -M q35,kernel-irqchip=split \
+    -device intel-iommu \
     -drive format=raw,file="$BIN",index=0,media=disk \
     -drive format=raw,file=disk.img,index=1,media=disk \
     -serial stdio \
