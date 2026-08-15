@@ -2613,100 +2613,14 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
 /// Spawns two independent Ring 3 processes (App A & App B) and a Terminal window
 /// to verify end-to-end Desktop V1 window management, surface isolation, and focus.
 pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
-    // 1. Spawn App A ("Hello SparkOS" Window)
-    let cr3_a = crate::memory::clone_active_cr3().ok_or("no free frame for app_a")?;
-    let pid_a = create_user_process_with_caps(
-        "hello_app",
-        crate::memory::USER_ADDR_BASE,
-        crate::memory::USER_STACK_TOP,
-        cr3_a,
-        crate::gdt::GDT.1.user_code_selector.0,
-        crate::gdt::GDT.1.user_data_selector.0,
-        alloc::vec![],
-    );
-    serial_spawn("[DESKTOP-APP-A]", pid_a, "hello_app");
+    let pid_term = crate::app_registry::spawn_registered_app(1)?;
+    let pid_demo = crate::app_registry::spawn_registered_app(2)?;
+    let pid_files = crate::app_registry::spawn_registered_app(3)?;
 
-    // Create Surface A (220x110) for App A
-    let surf_a = crate::surface::create_surface(220, 110)?;
-    let _win_a = crate::wm::WM.lock().create_window(pid_a, surf_a, 30, 35, 220, 110).map_err(|_| "win_a creation failed")?;
-    
-    // Draw initial content into Surface A's physical backing
-    if let Some(s) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_a) {
-        let ptr = unsafe { (crate::gui::PHYS_OFFSET + s.shmem_phys_addr) as *mut u32 };
-        unsafe {
-            for i in 0..(220 * 110) {
-                *ptr.add(i) = 0x001E3A8A; // Deep Blue Background
-            }
-            // Draw a greeting rectangle
-            for y in 15..55 {
-                for x in 15..205 {
-                    *ptr.add(y * 220 + x) = 0x003B82F6; // Bright Sky Blue
-                }
-            }
-        }
-    }
-    let _ = crate::surface::present_surface(surf_a, 0, 0, 220, 110);
+    crate::serial_println!("[DESKTOP] Successfully spawned 3 isolated user applications (PID {}, PID {}, PID {})",
+        pid_term, pid_demo, pid_files);
 
-    // 2. Spawn App B ("Interactive Demo" Window)
-    let cr3_b = crate::memory::clone_active_cr3().ok_or("no free frame for app_b")?;
-    let pid_b = create_user_process_with_caps(
-        "demo_app",
-        crate::memory::USER_ADDR_BASE,
-        crate::memory::USER_STACK_TOP,
-        cr3_b,
-        crate::gdt::GDT.1.user_code_selector.0,
-        crate::gdt::GDT.1.user_data_selector.0,
-        alloc::vec![],
-    );
-    serial_spawn("[DESKTOP-APP-B]", pid_b, "demo_app");
-
-    // Create Surface B (260x140) for App B
-    let surf_b = crate::surface::create_surface(260, 140)?;
-    let _win_b = crate::wm::WM.lock().create_window(pid_b, surf_b, 320, 45, 260, 140).map_err(|_| "win_b creation failed")?;
-
-    // Draw initial content into Surface B's physical backing (Emerald Theme)
-    if let Some(s) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_b) {
-        let ptr = unsafe { (crate::gui::PHYS_OFFSET + s.shmem_phys_addr) as *mut u32 };
-        unsafe {
-            for i in 0..(260 * 140) {
-                *ptr.add(i) = 0x00064E3B; // Dark Emerald Background
-            }
-            // Draw color palette swatches
-            for y in 20..60 {
-                for x in 20..80 { *ptr.add(y * 260 + x) = 0x00EF4444; } // Red
-                for x in 100..160 { *ptr.add(y * 260 + x) = 0x00F59E0B; } // Amber
-                for x in 180..240 { *ptr.add(y * 260 + x) = 0x0010B981; } // Green
-            }
-        }
-    }
-    let _ = crate::surface::present_surface(surf_b, 0, 0, 260, 140);
-
-    // 3. Spawn Terminal Window
-    let cr3_term = crate::memory::clone_active_cr3().ok_or("no free frame for terminal")?;
-    let pid_term = create_user_process_with_caps(
-        "gui_terminal",
-        crate::memory::USER_ADDR_BASE,
-        crate::memory::USER_STACK_TOP,
-        cr3_term,
-        crate::gdt::GDT.1.user_code_selector.0,
-        crate::gdt::GDT.1.user_data_selector.0,
-        alloc::vec![],
-    );
-    serial_spawn("[DESKTOP-TERM]", pid_term, "gui_terminal");
-
-    let surf_term = crate::surface::create_surface(380, 140)?;
-    let _win_term = crate::wm::WM.lock().create_window(pid_term, surf_term, 60, 175, 380, 140).map_err(|_| "win_term creation failed")?;
-
-    if let Some(s) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_term) {
-        let ptr = unsafe { (crate::gui::PHYS_OFFSET + s.shmem_phys_addr) as *mut u32 };
-        unsafe {
-            for i in 0..(380 * 140) {
-                *ptr.add(i) = 0x0009090B; // Zinc Black Terminal background
-            }
-        }
-    }
-    let _ = crate::surface::present_surface(surf_term, 0, 0, 380, 140);
-
-    Ok((pid_a, pid_b, pid_term))
+    Ok((pid_term, pid_demo, pid_files))
 }
+
 

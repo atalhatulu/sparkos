@@ -34,8 +34,13 @@ static NEXT_SURFACE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 pub static SURFACE_REGISTRY: Mutex<Vec<SurfaceInfo>> = Mutex::new(Vec::new());
 
 /// Creates a new shared memory surface for the current running process.
-/// Maps the allocated physical frames into the process's address space at `0x70000000 + slot * 16MB`.
 pub fn create_surface(width: u32, height: u32) -> Result<u64, &'static str> {
+    create_surface_for_pid(crate::task::process::current_pid(), width, height)
+}
+
+/// Creates a new shared memory surface for a specific owner process PID.
+/// Maps the allocated physical frames into the process's address space at `0x70000000 + slot * 16MB`.
+pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result<u64, &'static str> {
     if width == 0 || width > MAX_SURFACE_WIDTH || height == 0 || height > MAX_SURFACE_HEIGHT {
         return Err("Invalid surface dimensions");
     }
@@ -50,13 +55,11 @@ pub fn create_surface(width: u32, height: u32) -> Result<u64, &'static str> {
         let _ = crate::memory::user_alloc_frame().ok_or("Out of memory for surface backing")?;
     }
 
-    let pid = crate::task::process::current_pid();
-
     let mut reg = SURFACE_REGISTRY.lock();
     
     // SEC-05 Fix: Bitmask-based slot allocator for reuse & hard limit
     let used_mask: u16 = reg.iter()
-        .filter(|s| s.owner_pid == pid)
+        .filter(|s| s.owner_pid == owner_pid)
         .map(|s| 1u16 << s.slot)
         .fold(0, |acc, m| acc | m);
 
@@ -82,7 +85,7 @@ pub fn create_surface(width: u32, height: u32) -> Result<u64, &'static str> {
     let surface_id = NEXT_SURFACE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let surface = SurfaceInfo {
         surface_id,
-        owner_pid: pid,
+        owner_pid,
         slot,
         width,
         height,
@@ -98,7 +101,7 @@ pub fn create_surface(width: u32, height: u32) -> Result<u64, &'static str> {
     reg.push(surface);
 
     crate::serial_println!("[SURFACE] Process {} created surface {} (slot {}, {}x{}, vma 0x{:x}, phys 0x{:x})",
-        pid, surface_id, slot, width, height, vma_addr, phys_frame);
+        owner_pid, surface_id, slot, width, height, vma_addr, phys_frame);
 
     Ok(surface_id)
 }

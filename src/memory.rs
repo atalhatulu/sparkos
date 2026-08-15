@@ -348,20 +348,45 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
     }
 }
 
+/// Translates a virtual address in the given CR3 to its physical frame address.
+pub fn translate_page_in_cr3(cr3: u64, virt: u64) -> Option<PhysAddr> {
+    let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+    let target = if cr3 == 0 {
+        unsafe { active_level_4_table(phys_offset) }
+    } else {
+        let ptr = (phys_offset + PhysAddr::new(cr3).as_u64()).as_mut_ptr::<PageTable>();
+        unsafe { &mut *ptr }
+    };
+    let mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+    mapper.translate_page(page).ok().map(|f| f.start_address())
+}
+
 /// Write `bytes` into a user region already mapped in the given address space
-/// (`cr3`), zero-padding the page(s). The region must be user-mapped in that
-/// table. Used to place code/data for a process's own address space.
+/// (`cr3`), zero-padding the page(s). Directly writes via physical memory offset
+/// without causing page faults in the current address space.
 pub fn write_user_region_in_cr3(cr3: u64, virt: u64, bytes: &[u8], len: u64) {
-    let span = len.max(bytes.len() as u64);
-    let pages = ((span + 4095) / 4096) as usize;
-    let base = virt as *mut u8;
-    unsafe {
-        core::ptr::write_bytes(base, 0, pages * 4096);
-        if !bytes.is_empty() {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), base, bytes.len());
+    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+    let total_len = len.max(bytes.len() as u64);
+    let mut written = 0usize;
+
+    while (written as u64) < total_len {
+        let page_virt = virt + written as u64;
+        let page_offset = (page_virt % 4096) as usize;
+        let chunk_len = ((4096 - page_offset) as usize).min((total_len as usize) - written);
+
+        if let Some(phys_addr) = translate_page_in_cr3(cr3, page_virt) {
+            let direct_ptr = (phys_offset + phys_addr.as_u64() + page_offset as u64) as *mut u8;
+            unsafe {
+                core::ptr::write_bytes(direct_ptr, 0, chunk_len);
+                if written < bytes.len() {
+                    let copy_len = chunk_len.min(bytes.len() - written);
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr().add(written), direct_ptr, copy_len);
+                }
+            }
         }
+        written += chunk_len;
     }
-    let _ = cr3; // address space is identified by cr3; writes target its mapping
 }
 
 /// Convenience: map a `len`-sized user region (rounded up to whole pages) with
