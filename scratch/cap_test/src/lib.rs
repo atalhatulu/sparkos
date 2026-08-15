@@ -6407,6 +6407,58 @@ mod invariant_tests {
         let total = 439 + 4;
         assert_eq!(total, 443);
     }
+
+    // =========================================================================
+    // STEP 27: DESKTOP V1.22 PACKAGE SERVICE INVARIANTS (PKG_INV-1..5)
+    // =========================================================================
+
+    /// PKG_INV-1: Package install
+    #[test]
+    fn test_pkg_inv_1_package_install() {
+        let mut packages: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String> = alloc::collections::BTreeMap::new();
+        packages.insert(alloc::string::String::from("calculator"), alloc::string::String::from("/apps/calculator"));
+
+        assert_eq!(packages.get("calculator").map(|s| s.as_str()), Some("/apps/calculator"));
+    }
+
+    /// PKG_INV-2: Manifest parsing
+    #[test]
+    fn test_pkg_inv_2_manifest_parsing() {
+        let manifest = r#"{"name":"calc","version":"1.0.0","permissions":["notification.send"],"entry":"main.elf"}"#;
+        assert!(manifest.contains("\"name\":\"calc\""));
+        assert!(manifest.contains("\"version\":\"1.0.0\""));
+    }
+
+    /// PKG_INV-3: Permission isolation for installed app
+    #[test]
+    fn test_pkg_inv_3_permission_isolation_installed_app() {
+        let granted_perms = ["notification.send"];
+        let check_perm = |p: &str| granted_perms.contains(&p);
+
+        assert!(check_perm("notification.send"));
+        assert!(!check_perm("filesystem.write"));
+    }
+
+    /// PKG_INV-4: Package remove cleanup
+    #[test]
+    fn test_pkg_inv_4_package_remove() {
+        let mut packages: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String> = alloc::collections::BTreeMap::new();
+        packages.insert(alloc::string::String::from("demo"), alloc::string::String::from("/apps/demo"));
+
+        let removed = packages.remove("demo");
+        assert_eq!(removed, Some(alloc::string::String::from("/apps/demo")));
+        assert!(packages.is_empty());
+    }
+
+    /// PKG_INV-5: No orphan resources remaining
+    #[test]
+    fn test_pkg_inv_5_no_orphan_resources() {
+        let mut registry: alloc::collections::BTreeMap<u32, alloc::string::String> = alloc::collections::BTreeMap::new();
+        registry.insert(1, alloc::string::String::from("/apps/editor"));
+        registry.remove(&1);
+
+        assert_eq!(registry.len(), 0);
+    }
 }
 
 

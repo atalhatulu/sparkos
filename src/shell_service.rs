@@ -99,6 +99,10 @@ pub fn execute_command(cmd: &str) -> ShellResponse {
             let msg = format!("Active theme changed to: {}", new_theme);
             ShellResponse::from_str(0, &msg)
         }
+        "pkg" => {
+            let out = crate::pkg_service::PACKAGE_MANAGER.lock().execute_pkg_command(&args);
+            ShellResponse::from_str(0, &out)
+        }
         "version" => {
             ShellResponse::from_str(0, "SparkOS Microkernel v1.16 (x86_64 Desktop)")
         }
