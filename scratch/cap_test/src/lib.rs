@@ -7176,17 +7176,17 @@ mod invariant_tests {
     // STEP 42: DESKTOP STABILITY PHASE V1.30.X INVARIANTS
     // =========================================================================
 
-    /// TEXT_RENDER_INV-1: Normal character orientation verification (MSB-first 1 << (7 - col))
+    /// TEXT_RENDER_INV-1: Normal character orientation verification (LSB-first 1 << col)
     #[test]
     fn test_text_render_inv_1_normal_char_orientation() {
-        // Glyph '1': byte = 0x0C (0b00001100) -> bits 4 and 3 set in MSB-first
-        let byte = 0x0Cu8;
-        let is_bit_set_msb = |col: usize| (byte & (1 << (7 - col))) != 0;
-        // In MSB-first, col 4 is (1 << 3) = 8 (set), col 5 is (1 << 2) = 4 (set)
-        assert!(is_bit_set_msb(4));
-        assert!(is_bit_set_msb(5));
-        assert!(!is_bit_set_msb(0));
-        assert!(!is_bit_set_msb(7));
+        // Glyph 'C' spine at row 2,3,4: byte = 0x03 (0b00000011) -> bits 0 and 1 set on left
+        let byte = 0x03u8;
+        let is_bit_set = |col: usize| (byte & (1 << col)) != 0;
+        // In LSB-first font bitmap, col 0 and 1 are set (left vertical spine of 'C')
+        assert!(is_bit_set(0));
+        assert!(is_bit_set(1));
+        assert!(!is_bit_set(6));
+        assert!(!is_bit_set(7));
     }
 
     /// TEXT_RENDER_INV-2: Terminal text renders in correct left-to-right top-to-bottom direction

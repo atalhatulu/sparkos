@@ -243,7 +243,7 @@ pub fn draw_glyph(surface: *mut u32, surf_w: u32, surf_h: u32, x: u32, y: u32, c
             let px = x + col;
             if px >= surf_w { break; }
 
-            let color = if (byte & (1 << (7 - col))) != 0 { fg } else { bg };
+            let color = if (byte & (1 << col)) != 0 { fg } else { bg };
             let offset = (py as usize) * (surf_w as usize) + (px as usize);
             unsafe {
                 core::ptr::write_volatile(surface.add(offset), color);
