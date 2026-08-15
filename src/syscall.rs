@@ -91,7 +91,9 @@ pub extern "C" fn syscall_dispatcher(
             crate::serial_println!("[USER-EXEC] pid={} reached entrypoint", pid);
         }
     }
-    crate::serial_println!("[SYSCALL] pid={} num={} arg1={:#x}", pid, syscall_num, arg1);
+    if syscall_num != SYS_POLL_EVENT && syscall_num != SYS_YIELD {
+        crate::serial_println!("[SYSCALL] pid={} num={} arg1={:#x}", pid, syscall_num, arg1);
+    }
 
     // Preserve the original dispatcher structure; socket(net) syscalls use
     // arg1..arg3 only (the target IP is packed into a single u32 arg).
@@ -585,9 +587,6 @@ fn sys_exit(status: u64) -> u64 {
 /// Cooperative yield: returns control to the kernel executor without
 /// terminating the app.
 fn sys_yield() -> u64 {
-    let pid = crate::task::process::current_pid();
-    crate::serial_println!("[SCHED-YIELD]\npid={}", pid);
-    crate::serial_println!("[SCHED-TICK]\npid={}\nstate=Running", pid);
     0
 }
 
