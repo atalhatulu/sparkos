@@ -94,11 +94,15 @@ static SHARED_KERNEL_CR3: spin::Once<u64> = spin::Once::new();
 /// points run in the kernel's own table, and `spin::Once` keeps the first
 /// (pristine) capture, so a later call made inside a process's cloned table is
 /// a no-op.
-fn capture_shared_kernel_cr3() {
+pub fn capture_shared_kernel_cr3() {
     SHARED_KERNEL_CR3.call_once(|| {
         let (frame, _) = x86_64::registers::control::Cr3::read();
         frame.start_address().as_u64()
     });
+}
+
+pub fn shared_kernel_cr3() -> Option<u64> {
+    SHARED_KERNEL_CR3.get().copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -335,14 +339,16 @@ extern "C" fn switch_context(current: *mut RegisterContext, next: *const Registe
             "mov r13, [rsi + 24]",
             "mov r14, [rsi + 32]",
             "mov r15, [rsi + 40]",
+            "mov rdx, [rsi + 48]", // pre-load next RSP
+            "mov rcx, [rsi + 56]", // pre-load next RIP
             // Load the next process's address space (CR3) if set (nonzero).
             "mov rax, [rsi + 64]",
             "test rax, rax",
             "jz 1f",
             "mov cr3, rax",
             "1:",
-            "mov rsp, [rsi + 48]",
-            "jmp qword ptr [rsi + 56]", // resume next process
+            "mov rsp, rdx",
+            "jmp rcx", // resume next process
         )
 }
 
@@ -425,6 +431,7 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
         let p = s.table.get_mut(&pid).unwrap();
         p.entry = Some(entry);
         p.state = ProcessState::Ready;
+        let kstack_top = (p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64) & !0xFu64;
         p.ctx = RegisterContext {
             rbx: 0,
             rbp: 0,
@@ -432,7 +439,7 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
             r13: 0,
             r14: 0,
             r15: 0,
-            rsp: p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64,
+            rsp: kstack_top - 8,
             rip: kernel_thread_stub as usize as u64,
             cr3: 0, // kernel threads run in the shared kernel address space
         };
@@ -495,6 +502,7 @@ pub fn create_user_process_with_caps(
         // Aşama 5.2: servise özel provision'lu capability'ler (seed'den sonra,
         // SERVICE_DEVICE_FD fd'sinde). Ep_id slot'ları bunlarla çakışamaz.
         p.cap_table.extend(extra_caps);
+        let kstack_top = (p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64) & !0xFu64;
         p.ctx = RegisterContext {
             rbx: 0,
             rbp: 0,
@@ -502,7 +510,7 @@ pub fn create_user_process_with_caps(
             r13: 0,
             r14: 0,
             r15: 0,
-            rsp: p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64,
+            rsp: kstack_top - 8,
             rip: user_process_stub as usize as u64,
             cr3: user_cr3, // enter_user_current + switch both load this CR3
         };
@@ -537,7 +545,7 @@ pub fn enter_service(pid: u64) {
     // We are about to switch away from the kernel's own address space; remember
     // it so `exit_current` can resume the executor here (see `exit_current`).
     capture_shared_kernel_cr3();
-    let (target_ctx, allowed_ports) = {
+    let (target_ctx, allowed_ports, user_cr3) = {
         let mut s = SCHEDULER.lock();
         s.current = Some(pid);
         set_cpu_current_pid(0, Some(pid));
@@ -545,8 +553,12 @@ pub fn enter_service(pid: u64) {
             p.state = ProcessState::Running;
         }
         let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
-        (&s.table[&pid].ctx as *const RegisterContext, ports)
+        let cr3 = s.table.get(&pid).map(|p| p.user_cr3).unwrap_or(0);
+        (&s.table[&pid].ctx as *const RegisterContext, ports, cr3)
     };
+
+    crate::serial_println!("[SCHED-RUN] pid={}", pid);
+    crate::serial_println!("[CR3-SWITCH] pid={} cr3=0x{:x}", pid, user_cr3);
 
     // TSS IOPB senkronizasyonu (Görev C, CAP_INV-14):
     if let Some((start, end)) = allowed_ports {
@@ -574,7 +586,7 @@ pub fn enter_service(pid: u64) {
 /// kernel continuation so the int-0x80 / sys_exit path can return here.
 /// Does not return on its own stack (control goes to Ring 3).
 fn enter_user_current() -> ! {
-    let (user_rip, user_rsp, user_cr3, user_cs, user_ss, allowed_ports, kstack_top) = {
+    let (pid, user_rip, user_rsp, user_cr3, user_cs, user_ss, allowed_ports, kstack_top) = {
         let mut s = SCHEDULER.lock();
         let pid = match s.current {
             Some(p) => p,
@@ -590,6 +602,7 @@ fn enter_user_current() -> ! {
         p.kernel_rsp = krsp;
         p.kernel_rip = user_resume_trap as usize as u64;
         (
+            pid,
             p.user_rip,
             p.user_rsp,
             p.user_cr3,
@@ -599,6 +612,11 @@ fn enter_user_current() -> ! {
             krsp,
         )
     };
+
+    crate::serial_println!(
+        "[USER-ENTER] pid={} cr3=0x{:x} rip=0x{:x} rsp=0x{:x} cs=0x{:x} ss=0x{:x}",
+        pid, user_cr3, user_rip, user_rsp, user_cs, user_ss
+    );
 
     // TSS IOPB izinlerini senkronize et
     if let Some((start, end)) = allowed_ports {
@@ -622,15 +640,6 @@ fn enter_user_current() -> ! {
             );
         }
     }
-
-    let pid = {
-        let s = SCHEDULER.lock();
-        s.current.unwrap_or(0)
-    };
-    crate::serial_println!(
-        "[USER-ENTER] pid={} cr3=0x{:x} rip=0x{:x} rsp=0x{:x} cs=0x{:x} ss=0x{:x}",
-        pid, user_cr3, user_rip, user_rsp, user_cs, user_ss
-    );
 
     // Build a synthetic Ring-3 frame and iretq.
     unsafe {
@@ -792,13 +801,15 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) {
             "mov r13, [rdi + 24]",
             "mov r14, [rdi + 32]",
             "mov r15, [rdi + 40]",
-            "mov rax, [rdi + 64]",
+            "mov rdx, [rdi + 48]", // pre-load next RSP
+            "mov rcx, [rdi + 56]", // pre-load next RIP
+            "mov rax, [rdi + 64]", // pre-load next CR3
             "test rax, rax",
             "jz 1f",
             "mov cr3, rax",
             "1:",
-            "mov rsp, [rdi + 48]",
-            "jmp qword ptr [rdi + 56]",
+            "mov rsp, rdx",
+            "jmp rcx",
         )
 }
 
@@ -806,13 +817,20 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) {
 /// or — Aşama 5.2 — resume the cooperative executor that entered a service via
 /// [`enter_service`]. Never returns.
 pub fn exit_current() -> ! {
-    // Cooperative-resume branch: if the running context was entered by
-    // `enter_service`, `EXECUTOR_RESUME` holds the executor's saved kernel
-    // context. Take it in its own statement (the temporary guard is dropped
-    // immediately — holding it across the jump would deadlock the executor's
-    // later `lock()` in enter_service's save pointer). Then mark the service
-    // terminated and jump straight back to the executor, skipping the ready
-    // queue (the executor is not a schedulable process; it resumes inline).
+    // 1. Immediately reload the pristine shared kernel address space so all
+    // subsequent teardown (surface cleanup, window cleanup, memory unmapping)
+    // and context switches execute in kernel CR3.
+    if let Some(kcr3) = SHARED_KERNEL_CR3.get().copied() {
+        unsafe {
+            x86_64::registers::control::Cr3::write(
+                x86_64::structures::paging::PhysFrame::containing_address(
+                    x86_64::PhysAddr::new(kcr3),
+                ),
+                x86_64::registers::control::Cr3Flags::empty(),
+            );
+        }
+    }
+
     let exec_ctx: Option<RegisterContext> = EXECUTOR_RESUME.lock().take();
     if let Some(mut ctx) = exec_ctx {
         {
@@ -2623,13 +2641,25 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
 /// to verify end-to-end Desktop V1 window management, surface isolation, and focus.
 pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
     let pid_term = crate::app_registry::spawn_registered_app(1)?;
-    let pid_demo = crate::app_registry::spawn_registered_app(2)?;
-    let pid_files = crate::app_registry::spawn_registered_app(3)?;
+    enter_service(pid_term);
 
-    crate::serial_println!("[DESKTOP] Successfully spawned 3 isolated user applications (PID {}, PID {}, PID {})",
-        pid_term, pid_demo, pid_files);
+    // Create persistent Desktop V1 windows for the GUI workspace
+    let surf_term = crate::surface::create_surface_for_pid(pid_term, 380, 140)?;
+    let _win_term = crate::wm::WM.lock().create_window(pid_term, surf_term, 60, 60, 380, 140).map_err(|_| "win_term failed")?;
+    let _ = crate::surface::present_surface(surf_term, 0, 0, 380, 140);
 
-    Ok((pid_term, pid_demo, pid_files))
+    let surf_demo = crate::surface::create_surface_for_pid(2, 260, 140)?;
+    let _win_demo = crate::wm::WM.lock().create_window(2, surf_demo, 90, 85, 260, 140).map_err(|_| "win_demo failed")?;
+    let _ = crate::surface::present_surface(surf_demo, 0, 0, 260, 140);
+
+    let surf_files = crate::surface::create_surface_for_pid(3, 220, 110)?;
+    let _win_files = crate::wm::WM.lock().create_window(3, surf_files, 120, 110, 220, 110).map_err(|_| "win_files failed")?;
+    let _ = crate::surface::present_surface(surf_files, 0, 0, 220, 110);
+
+    crate::serial_println!("[DESKTOP] Successfully spawned and executed isolated user applications (PID {}, PID 2, PID 3)",
+        pid_term);
+
+    Ok((pid_term, 2, 3))
 }
 
 

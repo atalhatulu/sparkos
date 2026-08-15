@@ -183,17 +183,8 @@ pub fn tlb_shootdown(start_virt: u64, pages: usize) {
         timeout -= 1;
     }
 
-    let received = TLB_SHOOTDOWN.acks_received.load(Ordering::Acquire);
+    let _received = TLB_SHOOTDOWN.acks_received.load(Ordering::Acquire);
     TLB_SHOOTDOWN.in_progress.store(false, Ordering::Release);
-
-    if received >= target_count {
-        crate::serial_println!("[BSP] TLB shootdown SUCCESS: Received all {} ACKs from online AP cores.", received);
-    } else {
-        crate::serial_println!(
-            "[SMP] NOTICE: TLB shootdown ACK timeout from dormant AP cores (Expected: {}, Received: {}). Local TLB invalidation enforced.",
-            target_count, received
-        );
-    }
 }
 
 /// Executes a live TLB shootdown adversarial demonstration (Faz 30 Adım 1).

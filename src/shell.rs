@@ -760,8 +760,15 @@ impl Shell {
                 crate::gui::init(None);
                 crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
                 
+                // Drop WRITE_LOCK before switching to Ring-3 processes so sys_write doesn't deadlock
+                drop(w);
+
                 // Spawn Desktop V1 isolated user-space processes (App A, App B, Terminal)
-                if let Ok((pa, pb, pt)) = crate::task::process::spawn_desktop_v1_apps() {
+                let spawn_res = crate::task::process::spawn_desktop_v1_apps();
+
+                w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
+
+                if let Ok((pa, pb, pt)) = spawn_res {
                     crate::wm::WM.lock().composite_desktop(400, 300);
                     w.set_color(Color::LightGreen, Color::Black);
                     writeln!(w, "[DESKTOP] Desktop V1 baslatildi (App A PID {}, App B PID {}, Terminal PID {}).", pa, pb, pt).unwrap();

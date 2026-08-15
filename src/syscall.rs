@@ -72,6 +72,8 @@ pub fn init() {
 
 
 
+static FIRST_EXEC_PIDS: spin::Mutex<alloc::vec::Vec<u64>> = spin::Mutex::new(alloc::vec::Vec::new());
+
 #[no_mangle]
 pub extern "C" fn syscall_dispatcher(
     syscall_num: u64,
@@ -81,6 +83,16 @@ pub extern "C" fn syscall_dispatcher(
     arg4: u64,
     arg5: u64,
 ) -> u64 {
+    let pid = crate::task::process::current_pid();
+    if pid > 0 {
+        let mut executed = FIRST_EXEC_PIDS.lock();
+        if !executed.contains(&pid) {
+            executed.push(pid);
+            crate::serial_println!("[USER-EXEC] pid={} reached entrypoint", pid);
+        }
+    }
+    crate::serial_println!("[SYSCALL] pid={} num={} arg1={:#x}", pid, syscall_num, arg1);
+
     // Preserve the original dispatcher structure; socket(net) syscalls use
     // arg1..arg3 only (the target IP is packed into a single u32 arg).
     let _ = (arg4, arg5);

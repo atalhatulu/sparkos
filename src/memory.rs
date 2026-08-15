@@ -298,12 +298,14 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
 pub fn clone_active_cr3() -> Option<u64> {
     let frame = user_alloc_frame()?;
     let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
-    // Source: active L4 (read-only borrow is fine; we copy its 512 entries).
-    let src = unsafe { active_level_4_table(phys_offset) };
-    // Destination: the freshly allocated L4, reached via the physical offset.
+    let src_ptr = if let Some(kcr3) = crate::task::process::shared_kernel_cr3() {
+        (phys_offset + PhysAddr::new(kcr3).as_u64()).as_ptr::<u64>()
+    } else {
+        unsafe { active_level_4_table(phys_offset) as *const PageTable as *const u64 }
+    };
     let dest = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u64>();
     unsafe {
-        core::ptr::copy_nonoverlapping(src as *const PageTable as *const u64, dest, 512);
+        core::ptr::copy_nonoverlapping(src_ptr, dest, 512);
     }
     Some(frame.start_address().as_u64())
 }
