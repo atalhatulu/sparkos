@@ -81,6 +81,7 @@ pub mod gpu_virtio;
 pub mod store_service;
 pub mod network_manager;
 pub mod system_bar;
+pub mod desktop;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

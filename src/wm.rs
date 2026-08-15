@@ -349,17 +349,8 @@ impl WindowManager {
         let dock_y = screen_h.saturating_sub(DOCK_HEIGHT);
         let active_theme = crate::theme::THEME_MANAGER.lock().current_theme;
 
-        // 1. Wallpaper / Background Fill
-        crate::gui::draw_rect(0, 0, screen_w, screen_h, active_theme.desktop_background);
-
-        // 2. Top Info / Status Bar (y = 0, h = 20)
-        crate::gui::draw_rect(0, 0, screen_w, 20, active_theme.dock_background);
-        crate::gui::draw_rect(0, 19, screen_w, 1, active_theme.border_color);
-        crate::gui::draw_icon_glyph(8, 6, crate::app_registry::AppIcon::Logo, active_theme.accent_color, active_theme.dock_background);
-        crate::gui::draw_string(20, 6, "SparkOS Desktop (1280x720 HD)", active_theme.text_color, active_theme.dock_background);
-        
-        let stat_x = screen_w.saturating_sub(180);
-        crate::gui::draw_string(stat_x, 6, "Microkernel v1.14", 0x0094A3B8, active_theme.dock_background);
+        // 1. Desktop Environment (Wallpaper Gradient Engine & Desktop Icons)
+        crate::desktop::DESKTOP_ENV.lock().render(screen_w, screen_h);
 
         // 3. Composite Windows in Z-Order (Back-to-Front)
         let surf_reg = crate::surface::SURFACE_REGISTRY.lock();
