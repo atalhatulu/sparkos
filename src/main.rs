@@ -313,6 +313,29 @@ async fn disk_demo() {
     }
 }
 
+async fn boot_orchestrator() {
+    service_demo().await;
+    serial_demo().await;
+    fault_demo().await;
+    net_demo().await;
+    disk_demo().await;
+
+    // Welcome banner and interactive shell prompt
+    {
+        let mut w = crate::vga_buffer::WRITE_LOCK.lock();
+        w.set_color(crate::vga_buffer::Color::LightGreen, crate::vga_buffer::Color::Black);
+        core::fmt::Write::write_str(&mut *w, "\n================================================================\n").unwrap();
+        core::fmt::Write::write_str(&mut *w, " [OK] Tum mikrocekirdek servisleri ve suruculer hazir.\n").unwrap();
+        core::fmt::Write::write_str(&mut *w, " [OK] SparkOS interaktif kabuk aktif. ('help' yazabilirsiniz)\n").unwrap();
+        core::fmt::Write::write_str(&mut *w, "================================================================\n\n").unwrap();
+    }
+
+    let mut shell = shell::Shell::new();
+    loop {
+        shell.run().await;
+    }
+}
+
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::SerialWriter::init();
     serial_println!("[OK] Serial port ready");
@@ -450,50 +473,19 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
     
     let mut executor = task::simple_executor::SimpleExecutor::new();
-    
-    let mut shell = shell::Shell::new();
-    executor.spawn(task::Task::new("shell", async move {
-        shell.run().await;
-    }));
-    
+
     // Arka plan saati görevini başlat (Multitasking Gösterimi)
     executor.spawn(task::Task::new("clock", clock_task()));
     
-    // Senkron test: 2 producer, 1 consumer üzerinden sayı akışı (Scheduler kitlenmeden çalışır)
+    // Senkron test: 2 producer, 1 consumer üzerinden sayı akışı
     executor.spawn(task::Task::new("ipc_consumer", ipc_consumer()));
     executor.spawn(task::Task::new("ipc_prod_1", ipc_producer_1()));
     executor.spawn(task::Task::new("ipc_prod_2", ipc_producer_2()));
     
-    executor.spawn(task::Task::new("mouse", mouse::mouse_task())); // Mouse task (GUI sonraki faz)
+    executor.spawn(task::Task::new("mouse", mouse::mouse_task()));
 
-    // Aşama 5.2 boot regresyonu: user-space servis çerçevesi. keysvc servisi
-    // Ring 3'te spawn edilir, cooperative çalışır, timer IRQ'larını kendi
-    // endpoint'ine bağlar, 64 olayı echo'lar ve kapanır; sonra executor
-    // shell/clock'a geri döner. Headless QEMU'da klavye girişi yoktur; timer
-    // her tick'te deterministik olay üretir (1000 Hz).
-    executor.spawn(task::Task::new("service_demo", service_demo()));
-
-    // Aşama 5.3 boot regresyonu: user-space serial driver. keysvc'ten farklı
-    // olarak servise COM1 (0x3F8..=0x3FF) aralığına bağlı Device capability
-    // provision edilir; servis sys_ioperm ile portları açıp (TSS IOPB) raw
-    // outb ile COM1'e yazar. Boot log'unda "[SERDRV] alive" görülmesi gerekir.
-    executor.spawn(task::Task::new("serial_demo", serial_demo()));
-
-    // Aşama 5.4 boot regresyonu: user-space fault recovery. faultsvc Ring 3'te
-    // eşlenmemiş user adresine okur → deterministik page fault. Kernel onu
-    // process modeli altında kurtarır (exit_current), legacy KERNEL_RSP/KERNEL_RIP
-    // frame'ini kullanmaz. Boot log'unda "[USER-FAULT]" ve "[FAULT] demo
-    // complete" görülmeli; "[PANIC] Kernel Page Fault" OLMAMALI.
-    executor.spawn(task::Task::new("fault_demo", fault_demo()));
-    executor.spawn(task::Task::new("net_demo", net_demo()));
-    executor.spawn(task::Task::new("disk_demo", disk_demo()));
-
-    // NOTE: GUI devre dışı — kullanıcı planı: GUI EN SONA, önce terminali
-    // Linux terminali kadar güçlü yap. GUI backbuffer alloc + init şu an
-    // heap'i taşırıp panic üretiyordu (VBE/backbuffer henüz stabil değil).
-    // Sistem text-mode VGA + shell üzerinden boot eder. GUI bu faz zincirinin
-    // en sonuna bağlanacak.
-    // crate::vga_buffer::GUI_MODE varsayılan false kalır (text mode).
+    // Boot dizisini tamamlayıp ardından interaktif shell'i açık tutan ana görev
+    executor.spawn(task::Task::new("boot_orchestrator", boot_orchestrator()));
 
     executor.run();
     

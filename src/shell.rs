@@ -46,6 +46,7 @@ impl Shell {
         core::fmt::Write::write_str(&mut *w, &self.cwd).unwrap();
         w.set_color(self.text_color, Color::Black);
         core::fmt::Write::write_str(&mut *w, " > ").unwrap();
+        crate::serial_print!("sparkos {} > ", self.cwd);
     }
 
     async fn read_line(&mut self) {
@@ -60,6 +61,7 @@ impl Shell {
                             self.len += 1;
                             let mut w = WRITE_LOCK.lock();
                             core::fmt::Write::write_char(&mut *w, c as char).unwrap();
+                            crate::serial_print!("{}", c as char);
                         }
                     }
                     Key::Backspace => {
@@ -67,11 +69,13 @@ impl Shell {
                             self.len -= 1;
                             let mut w = WRITE_LOCK.lock();
                             core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
+                            crate::serial_print!("\x08 \x08");
                         }
                     }
                     Key::Enter => {
                         let mut w = WRITE_LOCK.lock();
                         core::fmt::Write::write_str(&mut *w, "\n").unwrap();
+                        crate::serial_println!("");
                         
                         let cmd_str = self.cmd().to_string();
                         if !cmd_str.trim().is_empty() {

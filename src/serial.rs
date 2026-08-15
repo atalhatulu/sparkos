@@ -22,6 +22,15 @@ impl SerialWriter {
 }
 
 #[macro_export]
+macro_rules! serial_print {
+    ($($arg:tt)*) => {
+        if let Some(ref mut port) = *$crate::serial::SERIAL.lock() {
+            let _ = core::fmt::Write::write_fmt(port, format_args!($($arg)*));
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! serial_println {
     () => {
         if let Some(ref mut port) = *$crate::serial::SERIAL.lock() {
