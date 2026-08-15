@@ -65,9 +65,24 @@ impl WindowManager {
         width: u32,
         height: u32,
     ) -> Result<u64, WmError> {
-        if width == 0 || height == 0 || width > 640 || height > 360 {
+        let max_w = unsafe { crate::gui::VESA.width as u32 };
+        let max_h = unsafe { crate::gui::VESA.height as u32 };
+        if width == 0 || height == 0 || width > max_w || height > max_h {
             return Err(WmError::InvalidDimensions);
         }
+
+        // Hardening Check: Verify surface ownership if a surface is bound
+        if surface_id != 0 {
+            let reg = crate::surface::SURFACE_REGISTRY.lock();
+            let is_owner = reg.iter().any(|s| s.surface_id == surface_id && s.owner_pid == owner_pid);
+            if !is_owner {
+                return Err(WmError::SurfaceNotFound);
+            }
+        }
+
+        // Clamp coordinates to prevent integer overflow
+        let clamped_x = x.clamp(-1000, max_w as i32 + 1000);
+        let clamped_y = y.clamp(0, max_h as i32 + 1000);
 
         let window_id = self.next_window_id;
         self.next_window_id += 1;
@@ -81,8 +96,8 @@ impl WindowManager {
             window_id,
             owner_pid,
             surface_id,
-            x,
-            y,
+            x: clamped_x,
+            y: clamped_y,
             width,
             height,
             visible: true,
@@ -95,7 +110,7 @@ impl WindowManager {
         self.focused_window = Some(window_id);
 
         crate::serial_println!("[WM] Process {} created Window {} (surface {}, [{}, {}, {}, {}], FOCUSED)",
-            owner_pid, window_id, surface_id, x, y, width, height);
+            owner_pid, window_id, surface_id, clamped_x, clamped_y, width, height);
 
         Ok(window_id)
     }
