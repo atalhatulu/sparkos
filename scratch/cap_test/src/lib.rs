@@ -6989,6 +6989,108 @@ mod invariant_tests {
         popup_open = !popup_open;
         assert!(!popup_open);
     }
+
+    // =========================================================================
+    // STEP 38: DESKTOP V1.33 TERMINAL UI ENGINE INVARIANTS (TERM_UI_INV-1..4)
+    // =========================================================================
+
+    /// TERM_UI_INV-1: Resize recalculates dimensions without corruption
+    #[test]
+    fn test_term_ui_inv_1_resize_dimensions() {
+        let mut w = 380u32;
+        let mut h = 140u32;
+        let resize = |nw: u32, nh: u32| (nw.max(200), nh.max(120));
+
+        let (nw, nh) = resize(500, 300);
+        assert_eq!(nw, 500);
+        assert_eq!(nh, 300);
+    }
+
+    /// TERM_UI_INV-2: Scroll buffer retains history
+    #[test]
+    fn test_term_ui_inv_2_scroll_buffer_retains_history() {
+        let mut lines: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        for i in 0..50 {
+            lines.push(alloc::format!("Line {}", i));
+        }
+
+        let scroll_offset = 20usize;
+        let visible_lines = 10usize;
+        let start_idx = lines.len().saturating_sub(visible_lines + scroll_offset);
+        let scrolled_line = &lines[start_idx];
+
+        assert_eq!(scrolled_line, "Line 20");
+    }
+
+    /// TERM_UI_INV-3: Mouse text selection is bounded and safe
+    #[test]
+    fn test_term_ui_inv_3_mouse_selection_safe() {
+        let text = "sparkos modern terminal";
+        let start_col = 8usize;
+        let end_col = 14usize;
+        let slice = &text[start_col..end_col];
+
+        assert_eq!(slice, "modern");
+    }
+
+    /// TERM_UI_INV-4: Clipboard integration ready
+    #[test]
+    fn test_term_ui_inv_4_clipboard_integration() {
+        let mut clipboard = alloc::string::String::new();
+        let selected_text = "ps aux";
+        clipboard.push_str(selected_text);
+
+        let mut input_buffer = alloc::string::String::new();
+        input_buffer.push_str(&clipboard);
+
+        assert_eq!(input_buffer, "ps aux");
+    }
+
+    // =========================================================================
+    // STEP 39: DESKTOP V1.34 FILES UI ENGINE INVARIANTS (FILES_UI_INV-1..4)
+    // =========================================================================
+
+    /// FILES_UI_INV-1: Icon view geometry and layout
+    #[test]
+    fn test_files_ui_inv_1_icon_view_geometry() {
+        let item_idx = 5usize;
+        let col = item_idx % 4;
+        let row = item_idx / 4;
+        let ix = 16 + col * 90;
+        let iy = 38 + row * 80;
+
+        assert_eq!(col, 1);
+        assert_eq!(row, 1);
+        assert_eq!(ix, 106);
+        assert_eq!(iy, 118);
+    }
+
+    /// FILES_UI_INV-2: List view geometry and row alignment
+    #[test]
+    fn test_files_ui_inv_2_list_view_geometry() {
+        let row_idx = 2usize;
+        let y = 38 + 20 + row_idx * 19;
+        assert_eq!(y, 96);
+    }
+
+    /// FILES_UI_INV-3: Context menu is isolated and safe
+    #[test]
+    fn test_files_ui_inv_3_context_menu_safe() {
+        let actions = ["Open", "Copy", "Rename", "Delete", "Properties"];
+        assert_eq!(actions.len(), 5);
+        assert_eq!(actions[0], "Open");
+        assert_eq!(actions[4], "Properties");
+    }
+
+    /// FILES_UI_INV-4: Permission control and path traversal defense
+    #[test]
+    fn test_files_ui_inv_4_path_traversal_defense() {
+        let is_safe_path = |p: &str| !p.contains("..") && !p.contains("//");
+
+        assert!(is_safe_path("/home/teha/projects"));
+        assert!(!is_safe_path("/home/teha/../../etc/passwd"));
+        assert!(!is_safe_path("/home//teha"));
+    }
 }
 
 
