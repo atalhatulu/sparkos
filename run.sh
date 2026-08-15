@@ -23,9 +23,27 @@ fi
 
 echo "[3/3] QEMU başlatılıyor..."
 
-# VNC portunu belirle
-VNC_DISPLAY=":0"
-VNC_PORT_ARG="-vnc :0"
+CLI_MODE=0
+for arg in "$@"; do
+    if [ "$arg" == "--cli" ] || [ "$arg" == "--headless" ] || [ "$arg" == "--no-gui" ]; then
+        CLI_MODE=1
+    fi
+done
+
+if [ "$CLI_MODE" -eq 1 ]; then
+    echo "--> Saf Terminal Modu (Headless CLI) secildi. VNC penceresi acilmayacak."
+    VNC_PORT_ARG="-display none"
+else
+    # VNC portunu belirle
+    VNC_DISPLAY=":0"
+    VNC_PORT_ARG="-vnc :0"
+
+    # TigerVNC / VNC Viewer varsa pencereli (windowed) modda başlat (Tam ekran KAPALI)
+    if which vncviewer &>/dev/null; then
+        echo "--> TigerVNC Pencereli Modda (1024x768) açılıyor..."
+        (sleep 0.8; vncviewer -geometry 1024x768 $VNC_DISPLAY 2>/dev/null || true) &
+    fi
+fi
 
 # Arka planda açılan pencereleri script kapanırken temizle
 cleanup() {
@@ -33,14 +51,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# TigerVNC / VNC Viewer varsa pencereli (windowed) modda başlat (Tam ekran KAPALI)
-if which vncviewer &>/dev/null; then
-    echo "--> TigerVNC Pencereli Modda (1024x768) açılıyor..."
-    (sleep 0.8; vncviewer -geometry 1024x768 $VNC_DISPLAY 2>/dev/null || true) &
-fi
-
 echo ""
-echo "--> Seri Port (COM1) Terminal Çıktısı:"
+echo "--> SparkOS Seri Port (COM1) Terminal Konsolu:"
 echo "----------------------------------------------------------------"
 
 # QEMU'yu başlat (SMP 2 Çekirdek, RTL8139 Ağ Kartı, ATA Disk, VGA Grafik)

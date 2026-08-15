@@ -223,7 +223,13 @@ impl Shell {
     fn auto_complete(&mut self, prefix: &str, replace_start: usize) {
         let mut matches = Vec::new();
         if replace_start == 0 {
-            let commands = ["help", "clear", "info", "tick", "uptime", "color", "echo", "pwd", "cd", "ls", "mkdir", "write", "rm", "cat", "reboot", "shutdown", "edit", "ps", "kill", "lspci", "ifconfig", "ping", "run_app", "host", "gui"];
+            let commands = [
+                "help", "clear", "info", "fetch", "tick", "uptime", "color", "echo", 
+                "pwd", "cd", "ls", "mkdir", "write", "touch", "rm", "cat", "hexdump", 
+                "edit", "reboot", "shutdown", "ps", "kill", "dmesg", "ktrace", 
+                "exec", "run_app", "lspci", "ifconfig", "ping", "host", "mem", "free", 
+                "smp", "cpuinfo", "caps", "gui"
+            ];
             for c in commands.iter() {
                 if c.starts_with(prefix) {
                     matches.push(c.to_string());
@@ -253,6 +259,23 @@ impl Shell {
                 i += 1;
             }
             self.len = replace_start + i;
+        } else if matches.len() > 1 {
+            // Birden fazla eşleşme varsa listele ve komut satırını yeniden çiz
+            let mut w = WRITE_LOCK.lock();
+            core::fmt::Write::write_str(&mut *w, "\n").unwrap();
+            w.set_color(Color::Cyan, Color::Black);
+            for m in matches.iter() {
+                core::fmt::Write::write_str(&mut *w, m).unwrap();
+                core::fmt::Write::write_str(&mut *w, "  ").unwrap();
+            }
+            w.set_color(Color::White, Color::Black);
+            core::fmt::Write::write_str(&mut *w, "\n").unwrap();
+            drop(w);
+            self.prompt();
+            let mut w = WRITE_LOCK.lock();
+            for i in 0..self.len {
+                core::fmt::Write::write_char(&mut *w, self.buf[i] as char).unwrap();
+            }
         }
     }
 
