@@ -423,11 +423,18 @@ pub fn get_tick() -> u64 {
 extern "x86-interrupt" fn keyboard_handler(_stack: InterruptStackFrame) {
     use x86_64::instructions::port::PortReadOnly;
     
-    let mut data: PortReadOnly<u8> = PortReadOnly::new(0x60u16);
+    let mut status_port: PortReadOnly<u8> = PortReadOnly::new(0x64u16);
+    let mut data_port: PortReadOnly<u8> = PortReadOnly::new(0x60u16);
     
     unsafe {
-        let scancode = data.read();
-        crate::task::keyboard::add_scancode(scancode);
+        let status = status_port.read();
+        // Bit 0: Output buffer full, Bit 5: 0 = Keyboard, 1 = Mouse AUX
+        if (status & 0x01) != 0 {
+            let scancode = data_port.read();
+            if (status & 0x20) == 0 {
+                crate::task::keyboard::add_scancode(scancode);
+            }
+        }
     }
     
     // EOI

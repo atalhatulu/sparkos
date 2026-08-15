@@ -27,6 +27,12 @@ impl Shell {
     }
 
     pub async fn run(&mut self) {
+        // Flush any stale residual bytes from keyboard and serial
+        crate::keyboard::KEYBOARD.lock().clear();
+        while crate::serial::try_read_byte().is_some() {}
+        self.len = 0;
+        self.buf = [0; CMD_BUF];
+
         // Ekranı temizle
         WRITE_LOCK.lock().clear();
         writeln!(WRITE_LOCK.lock(), "SparkOS CLI Modu Baslatildi.").unwrap();
@@ -58,6 +64,12 @@ impl Shell {
             while let Some(b) = crate::serial::try_read_byte() {
                 got_input = true;
                 match b {
+                    0x03 => { // Ctrl+C
+                        let mut w = WRITE_LOCK.lock();
+                        core::fmt::Write::write_str(&mut *w, "^C\n").unwrap();
+                        self.len = 0;
+                        self.prompt();
+                    }
                     b'\r' | b'\n' => {
                         let mut w = WRITE_LOCK.lock();
                         core::fmt::Write::write_str(&mut *w, "\n").unwrap();
@@ -113,6 +125,12 @@ impl Shell {
             while let Some(key) = crate::keyboard::read_key() {
                 got_input = true;
                 match key {
+                    Key::CtrlC => {
+                        let mut w = WRITE_LOCK.lock();
+                        core::fmt::Write::write_str(&mut *w, "^C\n").unwrap();
+                        self.len = 0;
+                        self.prompt();
+                    }
                     Key::Ascii(c) => {
                         if self.len < CMD_BUF {
                             self.buf[self.len] = c as u8;
@@ -258,22 +276,52 @@ impl Shell {
         match cmd {
             "help" | "yardim" => {
                 w.set_color(Color::Yellow, Color::Black);
-                writeln!(w, "=== SparkOS CLI Komut Seti ===").unwrap();
+                writeln!(w, "=== SparkOS CLI Komut Rehberi ===").unwrap();
                 w.set_color(Color::Cyan, Color::Black);
-                writeln!(w, "[Sistem]:").unwrap();
+                write!(w, "  [Sistem]:   ").unwrap();
                 w.set_color(Color::White, Color::Black);
-                writeln!(w, "  fetch / info  - SparkOS sistem bilgisi ve detayli ozet").unwrap();
-                writeln!(w, "  uptime / tick - Calisma suresi ve PIT zamanlayici sayaci").unwrap();
-                writeln!(w, "  mem / free    - Bellek kullanimi ve heap durumu").unwrap();
-                writeln!(w, "  smp / cpuinfo - Cok cekirdekli (SMP) CPU durumu").unwrap();
-                writeln!(w, "  caps          - Capability CSpace durumunu listele").unwrap();
-                writeln!(w, "  clear         - Ekrani temizle").unwrap();
-                writeln!(w, "  color <renk>  - Yazi rengini degistir (red, green, blue, cyan, etc.)").unwrap();
-                writeln!(w, "  reboot        - Sistemi yeniden baslat").unwrap();
-                writeln!(w, "  shutdown      - Sistemi kapat (QEMU)").unwrap();
+                writeln!(w, "fetch, mem, free, smp, caps, uptime, clear, reboot, shutdown").unwrap();
                 
                 w.set_color(Color::Cyan, Color::Black);
-                writeln!(w, "[Dosya Sistemi]:").unwrap();
+                write!(w, "  [Dosya]:    ").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "ls, cd, pwd, cat, touch, write, mkdir, rm, edit, hexdump").unwrap();
+                
+                w.set_color(Color::Cyan, Color::Black);
+                write!(w, "  [Gorevler]: ").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "ps, kill <pid>, exec <path>, run_app, dmesg, ktrace").unwrap();
+
+                w.set_color(Color::Cyan, Color::Black);
+                write!(w, "  [Ag/PCI]:   ").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "lspci, ifconfig, ping, host <domain>").unwrap();
+
+                w.set_color(Color::LightGreen, Color::Black);
+                writeln!(w, "  [Klavye]:   ").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "Ctrl+C (Iptal), Tab (Tamamla), Yukari/Asagi (Gecmis)").unwrap();
+
+                w.set_color(Color::LightGray, Color::Black);
+                writeln!(w, "--> Detaylar icin: help sys | help fs | help proc | help net | help all").unwrap();
+            }
+            "help sys" => {
+                w.set_color(Color::Yellow, Color::Black);
+                writeln!(w, "=== Sistem Komutlari ===").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "  fetch / info  - SparkOS sistem ve donanim ozeti").unwrap();
+                writeln!(w, "  uptime / tick - Calisma suresi ve PIT zamanlayici sayaci").unwrap();
+                writeln!(w, "  mem / free    - Bellek kullanimi ve heap durumu").unwrap();
+                writeln!(w, "  smp / cpuinfo - SMP cok cekirdekli CPU durumu").unwrap();
+                writeln!(w, "  caps          - Capability CSpace durumunu listele").unwrap();
+                writeln!(w, "  clear         - Ekrani temizle").unwrap();
+                writeln!(w, "  color <renk>  - Yazi rengi (red, green, blue, cyan, yellow)").unwrap();
+                writeln!(w, "  reboot        - Sistemi yeniden baslat").unwrap();
+                writeln!(w, "  shutdown      - Sistemi kapat (QEMU ACPI)").unwrap();
+            }
+            "help fs" => {
+                w.set_color(Color::Yellow, Color::Black);
+                writeln!(w, "=== Dosya Sistemi Komutlari ===").unwrap();
                 w.set_color(Color::White, Color::Black);
                 writeln!(w, "  ls [path]     - Dosya ve dizinleri listele").unwrap();
                 writeln!(w, "  cd <path>     - Dizin degistir").unwrap();
@@ -283,21 +331,43 @@ impl Shell {
                 writeln!(w, "  write <d> <m> - Dosyaya metin yaz").unwrap();
                 writeln!(w, "  mkdir <dizin> - Yeni dizin olustur").unwrap();
                 writeln!(w, "  rm <hedef>    - Dosya veya dizin sil").unwrap();
-                writeln!(w, "  hexdump <d>   - Ikili (binary) dosya hex gorunumu").unwrap();
                 writeln!(w, "  edit <dosya>  - Tam ekran metin editorunu ac").unwrap();
-
-                w.set_color(Color::Cyan, Color::Black);
-                writeln!(w, "[Surecler & Donanim]:").unwrap();
+                writeln!(w, "  hexdump <d>   - Ikili (binary) dosya hex gorunumu").unwrap();
+            }
+            "help proc" => {
+                w.set_color(Color::Yellow, Color::Black);
+                writeln!(w, "=== Surecler ve Donanim Komutlari ===").unwrap();
                 w.set_color(Color::White, Color::Black);
                 writeln!(w, "  ps            - Calisan surecleri listele").unwrap();
                 writeln!(w, "  kill <pid>    - Sureci sonlandir").unwrap();
-                writeln!(w, "  dmesg / ktrace- Kernel olay gunlugunu (trace ring) listele").unwrap();
-                writeln!(w, "  exec <path>   - Dosya sistemindeki ELF ikili dosyasini calistir").unwrap();
+                writeln!(w, "  exec <path>   - Diskten ELF ikili dosyasini calistir").unwrap();
                 writeln!(w, "  run_app       - Dahili test ELF programini Ring 3'te calistir").unwrap();
-                writeln!(w, "  lspci         - PCI veriyolunu tara").unwrap();
+                writeln!(w, "  dmesg / ktrace- Kernel olay gunlugunu (trace ring) listele").unwrap();
+                writeln!(w, "  lspci         - PCI veriyolundaki cihazlari tara").unwrap();
+            }
+            "help net" => {
+                w.set_color(Color::Yellow, Color::Black);
+                writeln!(w, "=== Ag Komutlari ===").unwrap();
+                w.set_color(Color::White, Color::Black);
                 writeln!(w, "  ifconfig      - Ag karti ve MAC adresini goster").unwrap();
                 writeln!(w, "  ping          - Google (8.8.8.8) ICMP testi").unwrap();
                 writeln!(w, "  host <domain> - DNS IP sorgusu").unwrap();
+            }
+            "help all" => {
+                w.set_color(Color::Yellow, Color::Black);
+                writeln!(w, "=== Tum SparkOS Komutlari ===").unwrap();
+                w.set_color(Color::Cyan, Color::Black);
+                writeln!(w, "[Sistem]:").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "  fetch, uptime, mem, smp, caps, clear, color, reboot, shutdown").unwrap();
+                w.set_color(Color::Cyan, Color::Black);
+                writeln!(w, "[Dosya]:").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "  ls, cd, pwd, cat, touch, write, mkdir, rm, edit, hexdump").unwrap();
+                w.set_color(Color::Cyan, Color::Black);
+                writeln!(w, "[Surec/Ag]:").unwrap();
+                w.set_color(Color::White, Color::Black);
+                writeln!(w, "  ps, kill, exec, run_app, dmesg, lspci, ifconfig, ping, host").unwrap();
             }
             "clear" => {
                 w.clear();

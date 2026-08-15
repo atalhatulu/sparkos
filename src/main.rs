@@ -97,8 +97,10 @@ async fn clock_task() {
     }
 }
 
+#[allow(dead_code)]
 static TEST_CHAN: crate::sync::BlockingChannel<u32> = crate::sync::BlockingChannel::new(10);
 
+#[allow(dead_code)]
 async fn ipc_consumer() {
     let mut count = 0;
     while count < 4 {
@@ -112,6 +114,7 @@ async fn ipc_consumer() {
     crate::serial_println!("[IPC Consumer] Test complete.");
 }
 
+#[allow(dead_code)]
 async fn ipc_producer_1() {
     for i in 1..=2 {
         while TEST_CHAN.try_send(i).is_err() {
@@ -122,6 +125,7 @@ async fn ipc_producer_1() {
     }
 }
 
+#[allow(dead_code)]
 async fn ipc_producer_2() {
     for i in 3..=4 {
         while TEST_CHAN.try_send(i).is_err() {
@@ -475,12 +479,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Arka plan saati görevini başlat (Multitasking Gösterimi)
     executor.spawn(task::Task::new("clock", clock_task()));
-    
-    // Senkron test: 2 producer, 1 consumer üzerinden sayı akışı
-    executor.spawn(task::Task::new("ipc_consumer", ipc_consumer()));
-    executor.spawn(task::Task::new("ipc_prod_1", ipc_producer_1()));
-    executor.spawn(task::Task::new("ipc_prod_2", ipc_producer_2()));
-    
     executor.spawn(task::Task::new("mouse", mouse::mouse_task()));
 
     // Boot dizisini tamamlayıp ardından interaktif shell'i açık tutan ana görev

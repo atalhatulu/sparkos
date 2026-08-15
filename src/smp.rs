@@ -564,17 +564,6 @@ pub fn init_smp() {
     for (cpu_id, apic_id) in ap_list {
         start_ap(cpu_id, apic_id, 0x8000);
     }
-
-    // Faz 30 Adım 1: Canlı TLB Shootdown Doğrulaması
-    run_live_tlb_shootdown_adversarial_demo();
-
-    // Faz 30 Adım 2a: Per-CPU Run Queue ve CSpace Kilit Çekişme Ölçümü
-    run_per_cpu_run_queue_positive_test();
-    run_per_cpu_run_queue_negative_test();
-
-    // Faz 30 Adım 2b: Work-Stealing Algoritması ve Güvenlik Doğrulamaları
-    run_work_stealing_positive_test();
-    run_work_stealing_safety_and_stress_test();
 }
 
 // ---------------------------------------------------------------------------

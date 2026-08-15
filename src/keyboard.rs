@@ -5,7 +5,7 @@ use spin::Mutex;
 
 const BUF_SIZE: usize = 64;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Ascii(u8),
     Backspace,
@@ -19,6 +19,7 @@ pub enum Key {
     Down,
     Home,
     End,
+    CtrlC,
     Unknown,
 }
 
@@ -27,6 +28,7 @@ pub struct Keyboard {
     read: usize,
     write: usize,
     shift: bool,
+    ctrl: bool,
     extended: bool,
 }
 
@@ -37,8 +39,17 @@ impl Keyboard {
             read: 0,
             write: 0,
             shift: false,
+            ctrl: false,
             extended: false,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.read = 0;
+        self.write = 0;
+        self.shift = false;
+        self.ctrl = false;
+        self.extended = false;
     }
 
     fn push(&mut self, key: Key) {
@@ -72,8 +83,10 @@ impl Keyboard {
                 0x50 => self.push(Key::Down),      // Down arrow
                 0x47 => self.push(Key::Home),      // Home
                 0x4F => self.push(Key::End),       // End
-                0x52 => self.push(Key::Delete),    // Insert (Delete gibi davran)
-                _ => {} // bilinmeyen extended tus
+                0x52 => self.push(Key::Delete),    // Insert
+                0x1D => self.ctrl = true,          // Right Ctrl make
+                0x9D => self.ctrl = false,         // Right Ctrl break
+                _ => {}
             }
             return;
         }
@@ -84,18 +97,21 @@ impl Keyboard {
             return;
         }
 
-        // Break code'ları yok say (make code'larını işle)
+        // Break code'ları işle (bit 7 set)
         if scancode & 0x80 != 0 {
             let make = scancode & 0x7F;
-            // Shift break
             if make == 0x2A || make == 0x36 {
                 self.shift = false;
+            }
+            if make == 0x1D {
+                self.ctrl = false;
             }
             return;
         }
 
-        // Normal tuslar
+        // Normal tuslar (Make code)
         match scancode {
+            0x1D => self.ctrl = true,                    // Ctrl bas
             0x2A | 0x36 => self.shift = true,           // Shift bas
             0x1C => self.push(Key::Enter),               // Enter
             0x0E => self.push(Key::Backspace),           // Backspace
@@ -103,6 +119,13 @@ impl Keyboard {
             0x0F => self.push(Key::Tab),                 // Tab
             0x39 => self.push(Key::Ascii(b' ')),         // Space
             0x53 => self.push(Key::Delete),              // Delete (keypad)
+            0x2E => {                                    // 'c' or Ctrl+C
+                if self.ctrl {
+                    self.push(Key::CtrlC);
+                } else if let Some(c) = scancode_to_ascii(scancode, self.shift) {
+                    self.push(Key::Ascii(c));
+                }
+            }
             _ => {
                 if let Some(c) = scancode_to_ascii(scancode, self.shift) {
                     self.push(Key::Ascii(c));
