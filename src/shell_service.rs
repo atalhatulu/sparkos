@@ -1,4 +1,4 @@
-//! SparkOS Desktop V1.5 — Shell Service
+//! SparkOS Desktop V1.16 — Shell Service
 //!
 //! Provides a decoupled, capability-controlled command processing service for
 //! user-space terminal applications via an IPC request/response contract.
@@ -57,18 +57,27 @@ pub fn execute_command(cmd: &str) -> ShellResponse {
 
     match command {
         "help" => {
-            let help_text = "SparkOS Shell Commands:\n  help     - Show available commands\n  ls       - List directory contents\n  echo <s> - Print string to terminal\n  clear    - Clear screen buffer\n  version  - Display OS version\n  exit     - Close terminal session";
+            let help_text = "SparkOS Shell Commands:\n  help     - Show available commands\n  ls       - List directory contents\n  cd <dir> - Change current directory\n  cat <f>  - View file contents\n  clear    - Clear terminal buffer\n  task     - List running processes\n  mem      - Show system memory usage\n  theme    - Toggle desktop theme\n  exit     - Close terminal session";
             ShellResponse::from_str(0, help_text)
         }
         "ls" => {
-            let ls_text = "bin/       dev/       etc/       proc/\nhello      echo       ls         disk.img";
+            let ls_text = "bin/       dev/       etc/       proc/\nhello.elf  echo.elf   ls.elf     disk.img";
             ShellResponse::from_str(0, ls_text)
         }
-        "echo" => {
+        "cd" => {
             if args.is_empty() {
-                ShellResponse::from_str(0, "")
+                ShellResponse::from_str(0, "/root")
             } else {
-                ShellResponse::from_str(0, &args)
+                let msg = format!("Switched directory to: {}", args);
+                ShellResponse::from_str(0, &msg)
+            }
+        }
+        "cat" => {
+            if args.is_empty() {
+                ShellResponse::from_str(-1, "cat: missing file operand")
+            } else {
+                let msg = format!("Contents of {}:\n[SparkOS system binary / descriptor]", args);
+                ShellResponse::from_str(0, &msg)
             }
         }
         "clear" => {
@@ -76,8 +85,22 @@ pub fn execute_command(cmd: &str) -> ShellResponse {
             resp.should_clear = true;
             resp
         }
+        "task" => {
+            let task_text = "PID  NAME          STATE    MEMORY\n1    kernel_core   Running  1.2 MB\n2    wm_compositor Running  3.6 MB\n3    shell_service Running  128 KB\n4    terminal.app  Running  512 KB";
+            ShellResponse::from_str(0, task_text)
+        }
+        "mem" => {
+            let mem_text = "Physical Memory Stats:\n  Total RAM:   256.0 MB\n  Used RAM:      8.4 MB\n  Free RAM:    247.6 MB\n  Frames Free: 63,385 / 65,536";
+            ShellResponse::from_str(0, mem_text)
+        }
+        "theme" => {
+            crate::theme::THEME_MANAGER.lock().toggle_theme();
+            let new_theme = crate::theme::THEME_MANAGER.lock().current_theme.name;
+            let msg = format!("Active theme changed to: {}", new_theme);
+            ShellResponse::from_str(0, &msg)
+        }
         "version" => {
-            ShellResponse::from_str(0, "SparkOS Microkernel v1.5 (x86_64 Desktop)")
+            ShellResponse::from_str(0, "SparkOS Microkernel v1.16 (x86_64 Desktop)")
         }
         "exit" => {
             let mut resp = ShellResponse::from_str(0, "Session terminated.\n");
