@@ -623,6 +623,15 @@ fn enter_user_current() -> ! {
         }
     }
 
+    let pid = {
+        let s = SCHEDULER.lock();
+        s.current.unwrap_or(0)
+    };
+    crate::serial_println!(
+        "[USER-ENTER] pid={} cr3=0x{:x} rip=0x{:x} rsp=0x{:x} cs=0x{:x} ss=0x{:x}",
+        pid, user_cr3, user_rip, user_rsp, user_cs, user_ss
+    );
+
     // Build a synthetic Ring-3 frame and iretq.
     unsafe {
         core::arch::asm!(

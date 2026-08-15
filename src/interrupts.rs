@@ -332,19 +332,19 @@ fn recover_user_fault(stack: &InterruptStackFrame, addr: u64, why: &str) -> ! {
         if let Some((pid, name)) = crate::task::process::current_process_info() {
             crate::ktrace::log_trace(crate::klog::LogLevel::Warn, format_args!("PROC_FAULT pid={} name='{}' rip={:#x} addr={:#x} {}", pid, name, stack.instruction_pointer, addr, why));
             crate::serial_println!(
-                "[USER-FAULT] process {} ('{}') faulted: rip={:#x}, addr={:#x}, {}",
+                "[USER-FAULT] pid={} vector=14 cr2={:#x} rip={:#x} (name='{}', {})",
                 pid,
-                name,
-                stack.instruction_pointer,
                 addr,
+                stack.instruction_pointer,
+                name,
                 why,
             );
         } else {
             crate::ktrace::log_trace(crate::klog::LogLevel::Warn, format_args!("PROC_FAULT rip={:#x} addr={:#x} {}", stack.instruction_pointer, addr, why));
             crate::serial_println!(
-                "[USER-FAULT] user fault recovered: rip={:#x}, addr={:#x}, {}",
-                stack.instruction_pointer,
+                "[USER-FAULT] pid=? vector=14 cr2={:#x} rip={:#x} ({})",
                 addr,
+                stack.instruction_pointer,
                 why,
             );
         }
