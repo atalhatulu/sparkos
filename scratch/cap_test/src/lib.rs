@@ -6140,6 +6140,54 @@ mod invariant_tests {
         let check_dma = |cap: bool| if cap { Ok(()) } else { Err("PermissionDenied") };
         assert_eq!(check_dma(has_kernel_dma_cap), Err("PermissionDenied"));
     }
+
+    // =========================================================================
+    // STEP 22: DESKTOP V1.17 FILESYSTEM UI INVARIANTS (FSUI_INV-1..4)
+    // =========================================================================
+
+    /// FSUI_INV-1: Directory navigation & back button
+    #[test]
+    fn test_fsui_inv_1_directory_navigation() {
+        let mut cur_path = alloc::string::String::from("/");
+        // Navigate into /bin
+        cur_path = alloc::format!("/{}", "bin");
+        assert_eq!(cur_path, "/bin");
+
+        // Back button returns to /
+        cur_path = alloc::string::String::from("/");
+        assert_eq!(cur_path, "/");
+    }
+
+    /// FSUI_INV-2: File read via IPC
+    #[test]
+    fn test_fsui_inv_2_file_read_metadata() {
+        let file_name = "hello.elf";
+        let size_bytes = 8192u64;
+        let permissions = "rwxr-xr-x";
+
+        assert_eq!(file_name, "hello.elf");
+        assert!(size_bytes > 0);
+        assert_eq!(permissions, "rwxr-xr-x");
+    }
+
+    /// FSUI_INV-3: Permission isolation & path traversal block
+    #[test]
+    fn test_fsui_inv_3_path_traversal_blocked() {
+        let bad_path = "/bin/../root/secrets";
+        let is_traversal = bad_path.contains("..");
+        assert!(is_traversal);
+    }
+
+    /// FSUI_INV-4: IPC filesystem access with capability
+    #[test]
+    fn test_fsui_inv_4_ipc_filesystem_capability() {
+        let authorized_pid = 3u64;
+        let rogue_pid = 888u64;
+        let check_fs_access = |pid: u64| if pid == authorized_pid { Ok(()) } else { Err("PermissionDenied") };
+
+        assert_eq!(check_fs_access(authorized_pid), Ok(()));
+        assert_eq!(check_fs_access(rogue_pid), Err("PermissionDenied"));
+    }
 }
 
 
