@@ -110,29 +110,33 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
         if let Some(win) = wm.windows.iter().find(|w| w.window_id == win_id) {
             let owner_pid = win.owner_pid;
             let local_x = global_x - win.x;
-            let local_y = global_y - win.y;
+            let local_y = global_y - (win.y + 20); // Surface content begins below 20px titlebar
 
-            let ev_type = if button > 0 {
-                if pressed { EventType::MouseDown } else { EventType::MouseUp }
-            } else {
-                EventType::MouseMove
-            };
+            // Only deliver event to client if within client surface area (below title bar)
+            if local_y >= 0 {
+                let ev_type = if button > 0 {
+                    if pressed { EventType::MouseDown } else { EventType::MouseUp }
+                } else {
+                    EventType::MouseMove
+                };
 
-            let ev = InputEvent {
-                event_type: ev_type as u8,
-                modifiers: 0,
-                key_code: 0,
-                mouse_button: button,
-                wheel_delta: 0,
-                _reserved: [0; 3],
-                mouse_x: local_x,
-                mouse_y: local_y,
-                timestamp: 1000,
-                _padding: [0; 8],
-            };
+                let ev = InputEvent {
+                    event_type: ev_type as u8,
+                    modifiers: 0,
+                    key_code: 0,
+                    mouse_button: button,
+                    wheel_delta: 0,
+                    _reserved: [0; 3],
+                    mouse_x: local_x,
+                    mouse_y: local_y,
+                    timestamp: 1000,
+                    _padding: [0; 8],
+                };
 
-            deliver_event_to_pid(owner_pid, ev);
-            return Some(owner_pid);
+                drop(wm);
+                deliver_event_to_pid(owner_pid, ev);
+                return Some(owner_pid);
+            }
         }
     }
     None
@@ -140,10 +144,12 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
 
 /// Klavye olayını işler: Kesinlikle YALNIZCA o an odaklı pencerenin sahibine iletir (Focus-Gated Routing).
 pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Option<u64> {
-    let wm = crate::wm::WM.lock();
-    let focused_id = wm.focused_window?;
-    let win = wm.windows.iter().find(|w| w.window_id == focused_id)?;
-    let owner_pid = win.owner_pid;
+    let focused_pid = {
+        let wm = crate::wm::WM.lock();
+        let focused_id = wm.focused_window?;
+        let win = wm.windows.iter().find(|w| w.window_id == focused_id)?;
+        win.owner_pid
+    };
 
     let ev_type = if pressed { EventType::KeyDown } else { EventType::KeyUp };
     let ev = InputEvent {
@@ -159,6 +165,6 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         _padding: [0; 8],
     };
 
-    deliver_event_to_pid(owner_pid, ev);
-    Some(owner_pid)
+    deliver_event_to_pid(focused_pid, ev);
+    Some(focused_pid)
 }
