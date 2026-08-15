@@ -132,7 +132,6 @@ pub async fn mouse_task() {
     let mut last_x = 400;
     let mut last_y = 300;
     let mut last_click = false;
-    crate::gui::draw_cursor(last_x, last_y);
     
     loop {
         let cx = MOUSE_X.load(Ordering::Relaxed);
@@ -141,14 +140,57 @@ pub async fn mouse_task() {
         
         let moved = cx != last_x || cy != last_y;
         
-        if moved {
-            crate::gui::update_cursor(last_x, last_y, cx, cy);
-            last_x = cx;
-            last_y = cy;
+        if crate::vga_buffer::GUI_MODE.load(Ordering::Relaxed) {
+            if click && !last_click {
+                let mut wm = crate::wm::WM.lock();
+                if let Some((wid, owner_pid)) = wm.handle_mouse_down(cx as i32, cy as i32) {
+                    if let Some(win) = wm.windows.iter().find(|w| w.window_id == wid) {
+                        let local_x = (cx as i32) - win.x;
+                        let local_y = (cy as i32) - (win.y + 24);
+                        let ev = crate::input::InputEvent {
+                            event_type: crate::input::EventType::MouseDown as u8,
+                            modifiers: 0,
+                            key_code: 0,
+                            mouse_button: 1,
+                            wheel_delta: 0,
+                            _reserved: [0; 3],
+                            mouse_x: local_x,
+                            mouse_y: local_y,
+                            timestamp: 1000,
+                            _padding: [0; 8],
+                        };
+                        crate::input::deliver_event_to_pid(owner_pid, ev);
+                    }
+                }
+            } else if !click && last_click {
+                let mut wm = crate::wm::WM.lock();
+                if let Some((_wid, owner_pid)) = wm.handle_mouse_up() {
+                    let ev = crate::input::InputEvent {
+                        event_type: crate::input::EventType::MouseUp as u8,
+                        modifiers: 0,
+                        key_code: 0,
+                        mouse_button: 1,
+                        wheel_delta: 0,
+                        _reserved: [0; 3],
+                        mouse_x: 0,
+                        mouse_y: 0,
+                        timestamp: 1000,
+                        _padding: [0; 8],
+                    };
+                    crate::input::deliver_event_to_pid(owner_pid, ev);
+                }
+            } else if moved {
+                let mut wm = crate::wm::WM.lock();
+                wm.handle_mouse_move(cx as i32, cy as i32);
+            }
+
+            if moved || click != last_click {
+                crate::wm::WM.lock().composite_desktop(cx as i32, cy as i32);
+            }
         }
         
-        crate::gui::process_mouse_event(cx, cy, click, last_click, moved);
-        
+        last_x = cx;
+        last_y = cy;
         last_click = click;
         crate::task::yield_now().await;
     }

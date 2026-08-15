@@ -27,9 +27,8 @@ impl Shell {
     }
 
     pub async fn run(&mut self) {
-        // Flush any stale residual bytes from keyboard and serial
+        // Flush any stale residual bytes from PS/2 keyboard
         crate::keyboard::KEYBOARD.lock().clear();
-        while crate::serial::try_read_byte().is_some() {}
         self.len = 0;
         self.buf = [0; CMD_BUF];
 
@@ -757,19 +756,20 @@ impl Shell {
                     writeln!(w, "Zaman asimi (Timeout). DNS sunucusundan yanit alinamadi.").unwrap();
                 }
             }
-            _ if cmd.starts_with("gui") => {
+            "gui" | "desktop" => {
                 crate::gui::init(None);
-                x86_64::instructions::interrupts::without_interrupts(|| {
-                    let mut gw_arr = crate::gui::WRITERS.lock();
-                    let gw = &mut gw_arr[0];
-                    gw.visible = true;
-                    drop(gw_arr);
-                    crate::gui::redraw_all(None);
-                    crate::gui::flush_rect(0, 0, 1920, 1080);
-                });
                 crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
-                w.set_color(Color::LightGreen, Color::Black);
-                writeln!(w, "GUI Moduna gecildi. Masaustune hosgeldiniz!").unwrap();
+                
+                // Spawn Desktop V1 isolated user-space processes (App A, App B, Terminal)
+                if let Ok((pa, pb, pt)) = crate::task::process::spawn_desktop_v1_apps() {
+                    crate::wm::WM.lock().composite_desktop(400, 300);
+                    w.set_color(Color::LightGreen, Color::Black);
+                    writeln!(w, "[DESKTOP] Desktop V1 baslatildi (App A PID {}, App B PID {}, Terminal PID {}).", pa, pb, pt).unwrap();
+                    writeln!(w, "[DESKTOP] Pencereler arasinda gecis yapmak icin TigerVNC uzerinden tiklayiniz.").unwrap();
+                } else {
+                    w.set_color(Color::LightRed, Color::Black);
+                    writeln!(w, "HATA: Desktop V1 uygulamalari baslatilamadi.").unwrap();
+                }
             }
             _ if cmd.starts_with("kill ") => {
                 let id_str = cmd.strip_prefix("kill ").unwrap().trim();

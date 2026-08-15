@@ -602,6 +602,13 @@ pub fn draw_char(x: u16, y: u16, c: char, fg: u32, bg: u32) {
     }
 }
 
+pub fn draw_string(mut x: u16, y: u16, s: &str, fg: u32, bg: u32) {
+    for c in s.chars() {
+        draw_char(x, y, c, fg, bg);
+        x = x.saturating_add(8);
+    }
+}
+
 pub struct GuiWriter {
     pub app_id: u8,
     pub offscreen_offset: usize,

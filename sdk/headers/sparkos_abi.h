@@ -36,6 +36,12 @@
 #define SYS_CREATE_SURFACE     31
 #define SYS_PRESENT_SURFACE    32
 #define SYS_DESTROY_SURFACE    33
+#define SYS_CREATE_WINDOW      34
+#define SYS_DESTROY_WINDOW     35
+#define SYS_MOVE_WINDOW        36
+#define SYS_MINIMIZE_WINDOW    37
+#define SYS_RESTORE_WINDOW     38
+#define SYS_POLL_EVENT         39
 
 /* Standard Error Codes */
 #define SPARK_OK               0

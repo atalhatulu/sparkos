@@ -19,6 +19,10 @@ pub(crate) fn add_scancode(scancode: u8) {
     }
     // Decode scancode into keyboard ring buffer for shell
     crate::keyboard::handle_key(scancode);
+    // GUI / Desktop focused window input delivery
+    let pressed = (scancode & 0x80) == 0;
+    let key_code = scancode & 0x7F;
+    crate::input::dispatch_keyboard_event(key_code, pressed, 0);
     // Aşama 5.1: IRQ notification (IRQ 1)
     crate::ipc::irq_event(1, scancode);
 }

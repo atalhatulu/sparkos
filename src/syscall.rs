@@ -51,6 +51,12 @@ pub const SYS_IPC_CREATE_SLOT: u64 = 30;
 pub const SYS_CREATE_SURFACE: u64 = 31;
 pub const SYS_PRESENT_SURFACE: u64 = 32;
 pub const SYS_DESTROY_SURFACE: u64 = 33;
+pub const SYS_CREATE_WINDOW: u64 = 34;
+pub const SYS_DESTROY_WINDOW: u64 = 35;
+pub const SYS_MOVE_WINDOW: u64 = 36;
+pub const SYS_MINIMIZE_WINDOW: u64 = 37;
+pub const SYS_RESTORE_WINDOW: u64 = 38;
+pub const SYS_POLL_EVENT: u64 = 39;
 
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
@@ -194,6 +200,57 @@ pub extern "C" fn syscall_dispatcher(
             match crate::surface::destroy_surface(arg1) {
                 Ok(_) => 0,
                 Err(_) => u64::MAX,
+            }
+        }
+        SYS_CREATE_WINDOW => {
+            let pid = crate::task::process::current_pid();
+            match crate::wm::WM.lock().create_window(pid, arg1, arg2 as i32, arg3 as i32, arg4 as u32, arg5 as u32) {
+                Ok(id) => id,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_DESTROY_WINDOW => {
+            let pid = crate::task::process::current_pid();
+            match crate::wm::WM.lock().destroy_window(pid, arg1) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_MOVE_WINDOW => {
+            let pid = crate::task::process::current_pid();
+            match crate::wm::WM.lock().move_window(pid, arg1, arg2 as i32, arg3 as i32) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_MINIMIZE_WINDOW => {
+            let pid = crate::task::process::current_pid();
+            match crate::wm::WM.lock().minimize_window(pid, arg1) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_RESTORE_WINDOW => {
+            let pid = crate::task::process::current_pid();
+            match crate::wm::WM.lock().restore_window(pid, arg1) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_POLL_EVENT => {
+            let pid = crate::task::process::current_pid();
+            if let Some(ev) = crate::input::INPUT_QUEUES.lock().get_mut(&pid).and_then(|q| q.pop()) {
+                if let Ok(dst_slice) = crate::sec_mem::validate_user_ptr_mut(arg1, core::mem::size_of::<crate::input::InputEvent>()) {
+                    unsafe {
+                        let ev_bytes = core::slice::from_raw_parts(&ev as *const _ as *const u8, 32);
+                        dst_slice.copy_from_slice(ev_bytes);
+                    }
+                    1
+                } else {
+                    EFAULT
+                }
+            } else {
+                0
             }
         }
         _ => {

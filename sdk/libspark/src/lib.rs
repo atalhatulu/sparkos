@@ -37,6 +37,12 @@ pub const SYS_IPC_CREATE_SLOT: u64 = 30;
 pub const SYS_CREATE_SURFACE: u64 = 31;
 pub const SYS_PRESENT_SURFACE: u64 = 32;
 pub const SYS_DESTROY_SURFACE: u64 = 33;
+pub const SYS_CREATE_WINDOW: u64 = 34;
+pub const SYS_DESTROY_WINDOW: u64 = 35;
+pub const SYS_MOVE_WINDOW: u64 = 36;
+pub const SYS_MINIMIZE_WINDOW: u64 = 37;
+pub const SYS_RESTORE_WINDOW: u64 = 38;
+pub const SYS_POLL_EVENT: u64 = 39;
 
 // -----------------------------------------------------------------------------
 // Standard Error Codes

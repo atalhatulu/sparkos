@@ -42,6 +42,7 @@ pub struct WindowManager {
     pub windows: Vec<Window>,
     pub next_window_id: u64,
     pub focused_window: Option<u64>,
+    pub dragging_window: Option<(u64, i32, i32)>,
 }
 
 impl WindowManager {
@@ -50,6 +51,7 @@ impl WindowManager {
             windows: Vec::new(),
             next_window_id: 1,
             focused_window: None,
+            dragging_window: None,
         }
     }
 
@@ -235,6 +237,183 @@ impl WindowManager {
         let target_id = self.focused_window?;
         let owner_pid = self.windows.iter().find(|w| w.window_id == target_id).map(|w| w.owner_pid)?;
         Some((target_id, owner_pid))
+    }
+
+    /// Composite all windows and surfaces to the hardware backbuffer and swap to screen
+    pub fn composite_desktop(&self, mouse_x: i32, mouse_y: i32) {
+        unsafe {
+            if crate::gui::BACKBUFFER.is_null() { return; }
+        }
+
+        // 1. Draw solid wallpaper / desktop background (Dark Slate #1E293B)
+        crate::gui::draw_rect(0, 0, 1920, 1080, 0x001E293B);
+
+        // 2. Top menu / status bar (Navy #0F172A)
+        crate::gui::draw_rect(0, 0, 1920, 24, 0x000F172A);
+        crate::gui::draw_string(12, 8, "SparkOS Desktop v1.0 | Capability-Isolated Architecture", 0x00E2E8F0, 0x000F172A);
+
+        // 3. Composite windows Back-to-Front
+        let surf_reg = crate::surface::SURFACE_REGISTRY.lock();
+        for win in self.windows.iter() {
+            if !win.visible || win.state == WindowState::Minimized {
+                continue;
+            }
+
+            let wx = win.x.max(0).min(1919) as u16;
+            let wy = win.y.max(24).min(1079) as u16;
+            let ww = (win.width as u16).min(1920u16.saturating_sub(wx));
+            let wh = (win.height as u16).min(1080u16.saturating_sub(wy + 24));
+
+            if ww == 0 || wh == 0 {
+                continue;
+            }
+
+            let is_focused = self.focused_window == Some(win.window_id);
+            let title_bg = if is_focused { 0x002563EB /* Blue */ } else { 0x00475569 /* Slate Gray */ };
+
+            // 3a. Titlebar (24px high)
+            crate::gui::draw_rect(wx, wy, ww, 24, title_bg);
+            
+            // Title text (Window <id> - PID <pid>)
+            let mut title_buf = [0u8; 32];
+            let title_str = {
+                use core::fmt::Write;
+                struct BufWriter<'a> { buf: &'a mut [u8], pos: usize }
+                impl<'a> Write for BufWriter<'a> {
+                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                        for b in s.bytes() {
+                            if self.pos < self.buf.len() {
+                                self.buf[self.pos] = b;
+                                self.pos += 1;
+                            }
+                        }
+                        Ok(())
+                    }
+                }
+                let mut bw = BufWriter { buf: &mut title_buf, pos: 0 };
+                let _ = write!(bw, "Window {} (PID {})", win.window_id, win.owner_pid);
+                core::str::from_utf8(&bw.buf[..bw.pos]).unwrap_or("Window")
+            };
+            crate::gui::draw_string(wx + 8, wy + 8, title_str, 0x00FFFFFF, title_bg);
+
+            // Minimize Button [-]
+            if ww > 50 {
+                let min_x = wx + ww - 44;
+                crate::gui::draw_rect(min_x, wy + 4, 16, 16, 0x00334155);
+                crate::gui::draw_char(min_x + 4, wy + 8, '-', 0x00FFFFFF, 0x00334155);
+            }
+
+            // Close Button [X]
+            if ww > 25 {
+                let close_x = wx + ww - 22;
+                crate::gui::draw_rect(close_x, wy + 4, 16, 16, 0x00DC2626);
+                crate::gui::draw_char(close_x + 4, wy + 8, 'X', 0x00FFFFFF, 0x00DC2626);
+            }
+
+            // 3b. Client Area Background
+            crate::gui::draw_rect(wx, wy + 24, ww, wh, 0x000F172A);
+
+            // 3c. Blit shared-memory surface if present
+            if let Some(surface) = surf_reg.iter().find(|s| s.surface_id == win.surface_id) {
+                let phys_addr = surface.shmem_phys_addr;
+                let src_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *const u32 };
+                let copy_w = (surface.width.min(win.width) as usize).min(ww as usize);
+                let copy_h = (surface.height.min(win.height) as usize).min(wh as usize);
+
+                unsafe {
+                    if !crate::gui::BACKBUFFER.is_null() {
+                        for r in 0..copy_h {
+                            let dst_row = (wy + 24 + r as u16) as usize;
+                            if dst_row >= 1080 { break; }
+                            let dst_col = wx as usize;
+                            let src_offset = r * (surface.width as usize);
+                            let dst_offset = dst_row * 1920 + dst_col;
+                            core::ptr::copy_nonoverlapping(
+                                src_ptr.add(src_offset),
+                                crate::gui::BACKBUFFER.add(dst_offset),
+                                copy_w,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 3d. 1px window border
+            crate::gui::draw_rect(wx, wy, ww, 1, 0x0064748B);
+            crate::gui::draw_rect(wx, wy + 24 + wh - 1, ww, 1, 0x0064748B);
+            crate::gui::draw_rect(wx, wy, 1, 24 + wh, 0x0064748B);
+            crate::gui::draw_rect(wx + ww - 1, wy, 1, 24 + wh, 0x0064748B);
+        }
+        drop(surf_reg);
+
+        // 4. Draw mouse cursor
+        let cur_x = (mouse_x.max(0).min(1919)) as u16;
+        let cur_y = (mouse_y.max(0).min(1079)) as u16;
+        crate::gui::draw_cursor(cur_x, cur_y);
+
+        // 5. Swap buffers to hardware VESA Framebuffer
+        crate::gui::swap_buffers();
+    }
+
+    /// Handles mouse down: performs titlebar dragging, close/minimize buttons, or client focus
+    pub fn handle_mouse_down(&mut self, mx: i32, my: i32) -> Option<(u64, u64)> {
+        for i in (0..self.windows.len()).rev() {
+            let win = &self.windows[i];
+            if !win.visible || win.state == WindowState::Minimized {
+                continue;
+            }
+
+            let wx = win.x;
+            let wy = win.y;
+            let ww = win.width as i32;
+            let wh = win.height as i32;
+            let wid = win.window_id;
+            let owner = win.owner_pid;
+
+            // Check Titlebar click
+            if mx >= wx && mx < wx + ww && my >= wy && my < wy + 24 {
+                // Close button [X]
+                if mx >= wx + ww - 24 && mx <= wx + ww - 6 && my >= wy + 4 && my <= wy + 20 {
+                    let _ = self.destroy_window(owner, wid);
+                    return None;
+                }
+                // Minimize button [-]
+                if mx >= wx + ww - 46 && mx <= wx + ww - 28 && my >= wy + 4 && my <= wy + 20 {
+                    let _ = self.minimize_window(owner, wid);
+                    return None;
+                }
+
+                // Dragging initiation
+                self.dragging_window = Some((wid, mx - wx, my - wy));
+                let _ = self.raise_to_top_internal(wid);
+                return Some((wid, owner));
+            }
+
+            // Check Client Area click
+            if mx >= wx && mx < wx + ww && my >= wy + 24 && my < wy + 24 + wh {
+                let _ = self.raise_to_top_internal(wid);
+                return Some((wid, owner));
+            }
+        }
+        None
+    }
+
+    /// Handles mouse up: stops dragging
+    pub fn handle_mouse_up(&mut self) -> Option<(u64, u64)> {
+        self.dragging_window = None;
+        let target_id = self.focused_window?;
+        let owner_pid = self.windows.iter().find(|w| w.window_id == target_id).map(|w| w.owner_pid)?;
+        Some((target_id, owner_pid))
+    }
+
+    /// Handles mouse move: updates dragging window coordinates
+    pub fn handle_mouse_move(&mut self, mx: i32, my: i32) {
+        if let Some((wid, ox, oy)) = self.dragging_window {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.window_id == wid) {
+                win.x = (mx - ox).max(0).min(1920 - win.width as i32);
+                win.y = (my - oy).max(24).min(1080 - win.height as i32 - 24);
+            }
+        }
     }
 
     /// Cleans up all windows owned by a terminating process and re-evaluates focus.

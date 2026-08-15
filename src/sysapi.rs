@@ -45,8 +45,16 @@ pub const SYS_NET_SEND_FRAME: u64 = 27;
 pub const SYS_NET_RECV_FRAME: u64 = 28;
 /// Cooperative IPC İptali (Aşama 7.1).
 pub const SYS_IPC_CANCEL: u64 = 29;
-/// Zero-Copy DMA Slot Capability Üretimi (Aşama 6.3).
 pub const SYS_IPC_CREATE_SLOT: u64 = 30;
+pub const SYS_CREATE_SURFACE: u64 = 31;
+pub const SYS_PRESENT_SURFACE: u64 = 32;
+pub const SYS_DESTROY_SURFACE: u64 = 33;
+pub const SYS_CREATE_WINDOW: u64 = 34;
+pub const SYS_DESTROY_WINDOW: u64 = 35;
+pub const SYS_MOVE_WINDOW: u64 = 36;
+pub const SYS_MINIMIZE_WINDOW: u64 = 37;
+pub const SYS_RESTORE_WINDOW: u64 = 38;
+pub const SYS_POLL_EVENT: u64 = 39;
 
 /// Static table of all supported system calls in SparkOS 1.0.
 pub static SYSCALLS: &[SyscallInfo] = &[
