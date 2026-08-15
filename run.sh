@@ -1,44 +1,50 @@
 #!/bin/bash
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 cd "$DIR"
 
-echo "==> Building SparkOS..."
+echo "================================================================"
+echo "                   SparkOS x86_64 Boot Launcher                 "
+echo "================================================================"
+
+echo "[1/3] SparkOS Kernel Derleniyor..."
 cargo bootimage 2>&1 | grep -v "^   Compiling\|^    Finished\|^    Locking\|Downloading\|^  Downloaded\|^  Installing"
 
 BIN=$(ls -1t target/*/debug/bootimage-sparkos.bin 2>/dev/null | head -1)
 if [ -z "$BIN" ]; then
-    echo "FAIL: bootimage not found!"
+    echo "HATA: bootimage-sparkos.bin bulunamadı!"
     exit 1
 fi
 
 if [ ! -f "disk.img" ]; then
-    echo "==> Creating 10MB persistent virtual disk (disk.img)..."
+    echo "[2/3] 10MB Sanal ATA Diski (disk.img) oluşturuluyor..."
     dd if=/dev/zero of=disk.img bs=1M count=10 2>/dev/null
 fi
 
-echo "==> QEMU'da baslatiliyor..."
+echo "[3/3] QEMU başlatılıyor..."
 
-# VNC portu dene, meşgulse serial kullan
-VNC_PORT=""
-if ! ss -tln | grep -q ":5900 "; then
-    VNC_PORT="-vnc :0"
-    echo "    VNC :0'da yayin"
-fi
+# VNC portunu belirle
+VNC_DISPLAY=":0"
+VNC_PORT_ARG="-vnc :0"
 
-# VNC baglantisi (varsa)
-if [ -n "$VNC_PORT" ] && which vncviewer &>/dev/null; then
-    (sleep 0.5; vncviewer -fullscreen :0 2>/dev/null) &
+# Arka planda açılan pencereleri script kapanırken temizle
+cleanup() {
+    kill $(jobs -p) 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# TigerVNC / VNC Viewer varsa pencereli (windowed) modda başlat (Tam ekran KAPALI)
+if which vncviewer &>/dev/null; then
+    echo "--> TigerVNC Pencereli Modda (1024x768) açılıyor..."
+    (sleep 0.8; vncviewer -geometry 1024x768 $VNC_DISPLAY 2>/dev/null || true) &
 fi
 
 echo ""
-echo "    Serial cikti:"
-echo ""
+echo "--> Seri Port (COM1) Terminal Çıktısı:"
+echo "----------------------------------------------------------------"
 
-exec qemu-system-x86_64 \
-    -M q35,kernel-irqchip=split \
-    -device intel-iommu \
+# QEMU'yu başlat (SMP 2 Çekirdek, RTL8139 Ağ Kartı, ATA Disk, VGA Grafik)
+qemu-system-x86_64 \
     -drive format=raw,file="$BIN",index=0,media=disk \
     -drive format=raw,file=disk.img,index=1,media=disk \
     -serial stdio \
@@ -47,4 +53,4 @@ exec qemu-system-x86_64 \
     -smp 2 \
     -netdev user,id=net0 \
     -device rtl8139,netdev=net0 \
-    $VNC_PORT
+    $VNC_PORT_ARG
