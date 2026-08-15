@@ -44,12 +44,21 @@ pub fn init_idt() {
     // Page fault (special error code type)
     idt.page_fault.set_handler_fn(page_fault_handler);
     
+    // Default generic handler for all hardware IRQs 0..16 to prevent unhandled #NP panic
+    for irq in 0..16 {
+        idt[PIC_IRQ_BASE + irq].set_handler_fn(generic_irq_handler);
+    }
+
     // Hardware IRQs
     idt[PIC_IRQ_BASE + 0].set_handler_fn(timer_handler);
     idt[PIC_IRQ_BASE + 1].set_handler_fn(keyboard_handler);
+    idt[PIC_IRQ_BASE + 3].set_handler_fn(serial_irq_handler); // COM2 / COM4
+    idt[PIC_IRQ_BASE + 4].set_handler_fn(serial_irq_handler); // COM1 / COM3
     idt[PIC_IRQ_BASE + 12].set_handler_fn(mouse_handler);
     idt[PIC_IRQ_BASE + 14].set_handler_fn(ata1_handler);
     idt[PIC_IRQ_BASE + 15].set_handler_fn(ata2_handler);
+    
+    crate::serial::init_rx();
     
     // Multi-Core SMP TLB Shootdown IPI Handler (Faz 30)
     idt[TLB_SHOOTDOWN_VECTOR].set_handler_fn(tlb_shootdown_handler);
@@ -448,6 +457,29 @@ extern "x86-interrupt" fn ata2_handler(_stack: InterruptStackFrame) {
 
 extern "x86-interrupt" fn mouse_handler(_stack: InterruptStackFrame) {
     crate::mouse::handle_interrupt();
+    unsafe {
+        let mut eoi_slave = Port::new(0xA0u16);
+        eoi_slave.write(0x20u8);
+        let mut eoi_master = Port::new(0x20u16);
+        eoi_master.write(0x20u8);
+    }
+}
+
+extern "x86-interrupt" fn serial_irq_handler(_stack: InterruptStackFrame) {
+    use x86_64::instructions::port::PortReadOnly;
+    unsafe {
+        let mut lsr: PortReadOnly<u8> = PortReadOnly::new(0x3FDu16);
+        while lsr.read() & 1 != 0 {
+            let mut rbr: PortReadOnly<u8> = PortReadOnly::new(0x3F8u16);
+            crate::serial::push_rx_byte(rbr.read());
+        }
+
+        let mut eoi = Port::new(0x20u16);
+        eoi.write(0x20u8);
+    }
+}
+
+extern "x86-interrupt" fn generic_irq_handler(_stack: InterruptStackFrame) {
     unsafe {
         let mut eoi_slave = Port::new(0xA0u16);
         eoi_slave.write(0x20u8);

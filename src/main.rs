@@ -138,6 +138,7 @@ async fn ipc_producer_2() {
 /// timer + klavye IRQ'larını bağlar (SYS_IPC_BIND_IRQ), 64 olayı poll'layıp
 /// echo'lar ve SYS_EXIT ile kapanır; `enter_service` geri dönünce IRQ'lar
 /// unbind edilir. Headless QEMU'da timer her tick deterministik olay üretir.
+#[allow(dead_code)]
 async fn service_demo() {
     let dev = crate::cap::create_object(crate::cap::ObjectKind::Device).unwrap();
     match crate::task::process::spawn_service("keysvc", dev, crate::task::process::service_machine_code) {
@@ -161,6 +162,7 @@ async fn service_demo() {
 /// sonra raw `outb` ile COM1'e "[SERDRV] alive\r\n" yazar (LSR poll) ve SYS_EXIT
 /// ile kapanır. Yazılan baytlar QEMU `-serial stdio` üzerinden boot log'una
 /// düşer — Ring-3 port I/O'nun canlı kanıtı.
+#[allow(dead_code)]
 async fn serial_demo() {
     match crate::task::process::spawn_serial_service("serdrv") {
         Ok(pid) => {
@@ -181,6 +183,7 @@ async fn serial_demo() {
 /// `user::KERNEL_RSP`/`KERNEL_RIP` çerçevesine asla dokunmamalı. Başarı: boot
 /// log'unda "[USER-FAULT] process N ('faultsvc') faulted" ve "[FAULT] demo
 /// complete" görülmeli; "[PANIC] Kernel Page Fault" OLMAMALI.
+#[allow(dead_code)]
 async fn fault_demo() {
     match crate::task::process::spawn_fault_service("faultsvc") {
         Ok(pid) => {
@@ -198,6 +201,7 @@ async fn fault_demo() {
 ///
 /// Kernel bir IPC endpoint'i kurar, WRITE hakkını grant edip `ep_writer` handle'ını
 /// netdrv'e provision eder (fd == `kern_ep_id`). netdrv RX'te doğruladığı ARP reply/// Aşama 6.3: netdrv (RTL8139 Ring 3 DMA) <-> netsvc (Ring 3 TCP/IP) Zero-Copy Frame Hand-off.
+#[allow(dead_code)]
 async fn net_demo() {
     let (rx_ep_id, rx_root) = match crate::ipc::create_raw_endpoint(8) {
         Ok(pair) => pair,
@@ -252,6 +256,7 @@ async fn net_demo() {
 }
 
 /// Aşama 8.1 boot regresyonu: user-space ATA disk driver.
+#[allow(dead_code)]
 async fn disk_demo() {
     match crate::task::process::spawn_disk_service("disksvc") {
         Ok(pid) => {
@@ -314,19 +319,13 @@ async fn disk_demo() {
 }
 
 async fn boot_orchestrator() {
-    service_demo().await;
-    serial_demo().await;
-    fault_demo().await;
-    net_demo().await;
-    disk_demo().await;
-
     // Welcome banner and interactive shell prompt
     {
         let mut w = crate::vga_buffer::WRITE_LOCK.lock();
         w.set_color(crate::vga_buffer::Color::LightGreen, crate::vga_buffer::Color::Black);
         core::fmt::Write::write_str(&mut *w, "\n================================================================\n").unwrap();
-        core::fmt::Write::write_str(&mut *w, " [OK] Tum mikrocekirdek servisleri ve suruculer hazir.\n").unwrap();
-        core::fmt::Write::write_str(&mut *w, " [OK] SparkOS interaktif kabuk aktif. ('help' yazabilirsiniz)\n").unwrap();
+        core::fmt::Write::write_str(&mut *w, "  SparkOS x86_64 Mikrocekirdek Baslatildi.\n").unwrap();
+        core::fmt::Write::write_str(&mut *w, "  Komutlari listelemek icin 'help' yazabilirsiniz.\n").unwrap();
         core::fmt::Write::write_str(&mut *w, "================================================================\n\n").unwrap();
     }
 

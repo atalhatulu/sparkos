@@ -46,14 +46,72 @@ impl Shell {
         core::fmt::Write::write_str(&mut *w, &self.cwd).unwrap();
         w.set_color(self.text_color, Color::Black);
         core::fmt::Write::write_str(&mut *w, " > ").unwrap();
-        crate::serial_print!("sparkos {} > ", self.cwd);
     }
 
     async fn read_line(&mut self) {
+        use crate::keyboard::Key;
         self.len = 0;
         loop {
-            use crate::keyboard::Key;
+            let mut got_input = false;
+
+            // 1. Serial Port (COM1 / Terminal stdio)
+            while let Some(b) = crate::serial::try_read_byte() {
+                got_input = true;
+                match b {
+                    b'\r' | b'\n' => {
+                        let mut w = WRITE_LOCK.lock();
+                        core::fmt::Write::write_str(&mut *w, "\n").unwrap();
+                        
+                        let cmd_str = self.cmd().to_string();
+                        if !cmd_str.trim().is_empty() {
+                            if self.history.last() != Some(&cmd_str) {
+                                self.history.push(cmd_str);
+                                if self.history.len() > 20 {
+                                    self.history.remove(0);
+                                }
+                            }
+                        }
+                        self.history_idx = self.history.len();
+                        return;
+                    }
+                    0x08 | 0x7F => { // Backspace / DEL
+                        if self.len > 0 {
+                            self.len -= 1;
+                            let mut w = WRITE_LOCK.lock();
+                            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
+                        }
+                    }
+                    0x1B => { // Escape
+                        let mut w = WRITE_LOCK.lock();
+                        for _ in 0..self.len {
+                            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
+                        }
+                        self.len = 0;
+                    }
+                    b'\t' => { // Tab autocomplete
+                        let cmd_str = self.cmd().to_string();
+                        if let Some(last_space) = cmd_str.rfind(' ') {
+                            let prefix = &cmd_str[last_space + 1..];
+                            self.auto_complete(prefix, last_space + 1);
+                        } else {
+                            self.auto_complete(&cmd_str, 0);
+                        }
+                    }
+                    32..=126 => { // Printable ASCII
+                        if self.len < CMD_BUF {
+                            self.buf[self.len] = b;
+                            self.len += 1;
+                            let mut w = WRITE_LOCK.lock();
+                            core::fmt::Write::write_char(&mut *w, b as char).unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // 2. PS/2 Keyboard (TigerVNC Window)
             while let Some(key) = crate::keyboard::read_key() {
+                got_input = true;
                 match key {
                     Key::Ascii(c) => {
                         if self.len < CMD_BUF {
@@ -61,7 +119,6 @@ impl Shell {
                             self.len += 1;
                             let mut w = WRITE_LOCK.lock();
                             core::fmt::Write::write_char(&mut *w, c as char).unwrap();
-                            crate::serial_print!("{}", c as char);
                         }
                     }
                     Key::Backspace => {
@@ -69,13 +126,11 @@ impl Shell {
                             self.len -= 1;
                             let mut w = WRITE_LOCK.lock();
                             core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
-                            crate::serial_print!("\x08 \x08");
                         }
                     }
                     Key::Enter => {
                         let mut w = WRITE_LOCK.lock();
                         core::fmt::Write::write_str(&mut *w, "\n").unwrap();
-                        crate::serial_println!("");
                         
                         let cmd_str = self.cmd().to_string();
                         if !cmd_str.trim().is_empty() {
@@ -120,8 +175,10 @@ impl Shell {
                     _ => {}
                 }
             }
-            let scancode = crate::task::keyboard::read_scancode().await;
-            crate::keyboard::KEYBOARD.lock().handle_scancode(scancode);
+
+            if !got_input {
+                crate::task::yield_now().await;
+            }
         }
     }
 

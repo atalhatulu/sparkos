@@ -17,8 +17,9 @@ pub(crate) fn add_scancode(scancode: u8) {
     } else {
         crate::serial_println!("WARNING: scancode queue uninitialized");
     }
-    // Aşama 5.1: aynı lock-free pattern ile IRQ notification (IRQ 1).
-    // irq_event interrupt-safe'tir (spinlock alınmaz); bağ yoksa tek atomic load no-op.
+    // Decode scancode into keyboard ring buffer for shell
+    crate::keyboard::handle_key(scancode);
+    // Aşama 5.1: IRQ notification (IRQ 1)
     crate::ipc::irq_event(1, scancode);
 }
 

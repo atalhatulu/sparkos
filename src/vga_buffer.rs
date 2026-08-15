@@ -218,6 +218,9 @@ impl fmt::Write for VgaWriter {
         for byte in s.bytes() {
             self.write_byte(byte);
         }
+        if let Some(ref mut port) = *crate::serial::SERIAL.lock() {
+            let _ = core::fmt::Write::write_str(port, s);
+        }
         Ok(())
     }
 }
