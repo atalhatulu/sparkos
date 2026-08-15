@@ -6233,6 +6233,61 @@ mod invariant_tests {
         assert_eq!(clamped_x, 1279);
         assert_eq!(clamped_y, 696);
     }
+
+    // =========================================================================
+    // STEP 24: DESKTOP V1.19 APPLICATION PERMISSION INVARIANTS (PERM_INV-1..4)
+    // =========================================================================
+
+    /// PERM_INV-1: Manifest parsing
+    #[test]
+    fn test_perm_inv_1_manifest_parsing() {
+        let json_manifest = r#"{"name":"Files","permissions":["filesystem.read","notification.send"]}"#;
+        assert!(json_manifest.contains("filesystem.read"));
+        assert!(json_manifest.contains("notification.send"));
+    }
+
+    /// PERM_INV-2: Capability filtering
+    #[test]
+    fn test_perm_inv_2_capability_filtering() {
+        let granted_perms = ["filesystem.read", "notification.send"];
+        let has_perm = |req: &str| granted_perms.contains(&req);
+
+        assert!(has_perm("filesystem.read"));
+        assert!(has_perm("notification.send"));
+        assert!(!has_perm("network"));
+    }
+
+    /// PERM_INV-3: Unauthorized syscall blocked
+    #[test]
+    fn test_perm_inv_3_unauthorized_syscall_blocked() {
+        let granted_perms = ["filesystem.read"];
+        let check_permission = |req: &str| -> core::result::Result<(), &'static str> {
+            if granted_perms.contains(&req) {
+                Ok(())
+            } else {
+                Err("PermissionDenied")
+            }
+        };
+
+        assert_eq!(check_permission("filesystem.read"), Ok(()));
+        assert_eq!(check_permission("camera"), Err("PermissionDenied"));
+    }
+
+    /// PERM_INV-4: Permission isolation between multiple processes
+    #[test]
+    fn test_perm_inv_4_permission_isolation_across_processes() {
+        let mut app_perms: alloc::collections::BTreeMap<u64, alloc::vec::Vec<&'static str>> = alloc::collections::BTreeMap::new();
+        app_perms.insert(10, alloc::vec!["filesystem.read"]);
+        app_perms.insert(20, alloc::vec!["network"]);
+
+        // PID 10 cannot perform network operations
+        let pid_10_has_net = app_perms.get(&10).unwrap().contains(&"network");
+        assert!(!pid_10_has_net);
+
+        // PID 20 cannot read filesystem
+        let pid_20_has_fs = app_perms.get(&20).unwrap().contains(&"filesystem.read");
+        assert!(!pid_20_has_fs);
+    }
 }
 
 

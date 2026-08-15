@@ -70,6 +70,7 @@ pub mod taskmgr_app;
 pub mod damage;
 pub mod event;
 pub mod animation;
+pub mod permission;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
