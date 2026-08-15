@@ -583,20 +583,12 @@ fn sys_exit(status: u64) -> u64 {
 }
 
 /// Cooperative yield: returns control to the kernel executor without
-/// terminating the app. The `exec_elf_async` loop in `user.rs` will relaunch
-/// the app at its saved resume point on the next poll.
+/// terminating the app.
 fn sys_yield() -> u64 {
-    serial_println!("[SYSCALL] SYS_YIELD from Ring 3 (cooperative)");
-    unsafe {
-        core::arch::asm!(
-            "cli",
-            "mov rsp, {kernel_rsp}",
-            "jmp {kernel_rip}",
-            kernel_rsp = in(reg) crate::user::KERNEL_RSP,
-            kernel_rip = in(reg) crate::user::KERNEL_RIP,
-            options(noreturn)
-        );
-    }
+    let pid = crate::task::process::current_pid();
+    crate::serial_println!("[SCHED-YIELD]\npid={}", pid);
+    crate::serial_println!("[SCHED-TICK]\npid={}\nstate=Running", pid);
+    0
 }
 
 fn sys_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {

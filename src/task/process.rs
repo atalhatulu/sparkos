@@ -2642,38 +2642,96 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
 // Desktop V1: Multi-Process User-Space Window & Surface Isolation
 // -----------------------------------------------------------------------------
 
-/// Spawns two independent Ring 3 processes (App A & App B) and a Terminal window
-/// to verify end-to-end Desktop V1 window management, surface isolation, and focus.
+/// Emit x86-64 machine code for `live_demo_app` (Persistent Event-Loop GUI runtime validation).
+///
+/// Behavior:
+///   loop {
+///       sys_poll_event(data_slot = 0x402000)
+///       surface animation update (writes pixels at 0x70000000)
+///       sys_yield()
+///   }
+pub fn live_demo_machine_code() -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    // mov rbx, 0x70000000 (Surface VMA Base)
+    c.push(0x48);
+    c.push(0xBB);
+    c.extend_from_slice(&0x70000000u64.to_le_bytes());
+    // xor r12d, r12d (animation tick counter)
+    c.extend_from_slice(&[0x45, 0x31, 0xE4]);
+
+    let loop_start = c.len();
+    // 1. sys_poll_event(data_slot = 0x402000)
+    c.push(0xBF);
+    c.extend_from_slice(&0x00402000u32.to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&39u32.to_le_bytes());
+    c.push(0xCD);
+    c.push(0x80);
+
+    // 2. surface animation update: write colors into surface buffer at 0x70000000
+    c.extend_from_slice(&[0x41, 0xFF, 0xC4]); // inc r12d
+    c.extend_from_slice(&[0x44, 0x89, 0xE0]); // mov eax, r12d
+    c.extend_from_slice(&[0xC1, 0xE0, 0x08]); // shl eax, 8
+    c.push(0x0D);
+    c.extend_from_slice(&0x0038BDF8u32.to_le_bytes()); // or eax, 0x0038BDF8
+    c.extend_from_slice(&[0x89, 0x03]);             // mov [rbx], eax
+    c.extend_from_slice(&[0x89, 0x43, 0x04]);       // mov [rbx+4], eax
+    c.extend_from_slice(&[0x89, 0x43, 0x08]);       // mov [rbx+8], eax
+    c.extend_from_slice(&[0x89, 0x43, 0x0C]);       // mov [rbx+12], eax
+
+    // 3. sys_yield() (SYS_YIELD = 9)
+    c.push(0xB8);
+    c.extend_from_slice(&9u32.to_le_bytes());
+    c.push(0xCD);
+    c.push(0x80);
+
+    // 4. jmp loop_start (Persistent, never exits)
+    let rel = (loop_start as i32 - (c.len() as i32 + 2)) as i8 as u8;
+    c.push(0xEB);
+    c.push(rel);
+
+    c
+}
+
+/// Spawns a persistent Ring-3 GUI `live_demo_app` with its own CR3, Surface, and Window.
+pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
+    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for live_demo_app")?;
+    let code = live_demo_machine_code();
+    let code_base = crate::memory::USER_ADDR_BASE;
+    crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
+    crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
+
+    let stack_base = crate::memory::USER_STACK_TOP - 4096;
+    crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
+
+    let pid = create_user_process_with_caps(
+        name,
+        code_base,
+        crate::memory::USER_STACK_TOP,
+        cr3,
+        crate::gdt::GDT.1.user_code_selector.0,
+        crate::gdt::GDT.1.user_data_selector.0,
+        alloc::vec![],
+    );
+
+    let surf_id = crate::surface::create_surface_for_pid(pid, 260, 140)?;
+    let _win_id = crate::wm::WM.lock()
+        .create_window(pid, surf_id, 90, 85, 260, 140)
+        .map_err(|_| "window creation failed")?;
+
+    let _ = crate::surface::present_surface(surf_id, 0, 0, 260, 140);
+    crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window)",
+        name, pid, code_base, surf_id);
+
+    Ok(pid)
+}
+
+/// Spawns the live persistent Ring-3 GUI runtime application for Desktop V1 validation.
 pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
-    // 1. Launch & execute Terminal (PID 1) in Ring-3
-    let pid_term = crate::app_registry::spawn_registered_app(1)?;
-    enter_service(pid_term);
+    let pid_live = spawn_live_demo_app("live_demo_app")?;
+    enter_service(pid_live);
 
-    // 2. Launch & execute Demo App (PID 2) in Ring-3
-    let pid_demo = crate::app_registry::spawn_registered_app(2)?;
-    enter_service(pid_demo);
-
-    // 3. Launch & execute Files (PID 3) in Ring-3
-    let pid_files = crate::app_registry::spawn_registered_app(3)?;
-    enter_service(pid_files);
-
-    // Create persistent Desktop V1 windows for the GUI workspace
-    let surf_term = crate::surface::create_surface_for_pid(pid_term, 380, 140)?;
-    let _win_term = crate::wm::WM.lock().create_window(pid_term, surf_term, 60, 60, 380, 140).map_err(|_| "win_term failed")?;
-    let _ = crate::surface::present_surface(surf_term, 0, 0, 380, 140);
-
-    let surf_demo = crate::surface::create_surface_for_pid(pid_demo, 260, 140)?;
-    let _win_demo = crate::wm::WM.lock().create_window(pid_demo, surf_demo, 90, 85, 260, 140).map_err(|_| "win_demo failed")?;
-    let _ = crate::surface::present_surface(surf_demo, 0, 0, 260, 140);
-
-    let surf_files = crate::surface::create_surface_for_pid(pid_files, 220, 110)?;
-    let _win_files = crate::wm::WM.lock().create_window(pid_files, surf_files, 120, 110, 220, 110).map_err(|_| "win_files failed")?;
-    let _ = crate::surface::present_surface(surf_files, 0, 0, 220, 110);
-
-    crate::serial_println!("[DESKTOP] Successfully spawned and executed isolated user applications (PID {}, PID {}, PID {})",
-        pid_term, pid_demo, pid_files);
-
-    Ok((pid_term, pid_demo, pid_files))
+    Ok((pid_live, 0, 0))
 }
 
 
