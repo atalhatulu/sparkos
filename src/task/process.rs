@@ -512,7 +512,7 @@ pub fn create_user_process_with_caps(
             r15: 0,
             rsp: kstack_top - 8,
             rip: user_process_stub as usize as u64,
-            cr3: user_cr3, // enter_user_current + switch both load this CR3
+            cr3: 0, // kernel CR3 during trampoline; enter_user_current loads user_cr3 right before iretq
         };
         s.ready.push_back(pid);
     }
@@ -2288,6 +2288,11 @@ pub fn get_process(pid: u64) -> Option<(u64, String, bool, ProcessState)> {
     })
 }
 
+pub fn get_process_user_cr3(pid: u64) -> Option<u64> {
+    let s = SCHEDULER.lock();
+    s.table.get(&pid).map(|p| p.user_cr3)
+}
+
 /// Number of live processes.
 pub fn process_count() -> usize {
     let s = SCHEDULER.lock();
@@ -2640,26 +2645,35 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
 /// Spawns two independent Ring 3 processes (App A & App B) and a Terminal window
 /// to verify end-to-end Desktop V1 window management, surface isolation, and focus.
 pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
+    // 1. Launch & execute Terminal (PID 1) in Ring-3
     let pid_term = crate::app_registry::spawn_registered_app(1)?;
     enter_service(pid_term);
+
+    // 2. Launch & execute Demo App (PID 2) in Ring-3
+    let pid_demo = crate::app_registry::spawn_registered_app(2)?;
+    enter_service(pid_demo);
+
+    // 3. Launch & execute Files (PID 3) in Ring-3
+    let pid_files = crate::app_registry::spawn_registered_app(3)?;
+    enter_service(pid_files);
 
     // Create persistent Desktop V1 windows for the GUI workspace
     let surf_term = crate::surface::create_surface_for_pid(pid_term, 380, 140)?;
     let _win_term = crate::wm::WM.lock().create_window(pid_term, surf_term, 60, 60, 380, 140).map_err(|_| "win_term failed")?;
     let _ = crate::surface::present_surface(surf_term, 0, 0, 380, 140);
 
-    let surf_demo = crate::surface::create_surface_for_pid(2, 260, 140)?;
-    let _win_demo = crate::wm::WM.lock().create_window(2, surf_demo, 90, 85, 260, 140).map_err(|_| "win_demo failed")?;
+    let surf_demo = crate::surface::create_surface_for_pid(pid_demo, 260, 140)?;
+    let _win_demo = crate::wm::WM.lock().create_window(pid_demo, surf_demo, 90, 85, 260, 140).map_err(|_| "win_demo failed")?;
     let _ = crate::surface::present_surface(surf_demo, 0, 0, 260, 140);
 
-    let surf_files = crate::surface::create_surface_for_pid(3, 220, 110)?;
-    let _win_files = crate::wm::WM.lock().create_window(3, surf_files, 120, 110, 220, 110).map_err(|_| "win_files failed")?;
+    let surf_files = crate::surface::create_surface_for_pid(pid_files, 220, 110)?;
+    let _win_files = crate::wm::WM.lock().create_window(pid_files, surf_files, 120, 110, 220, 110).map_err(|_| "win_files failed")?;
     let _ = crate::surface::present_surface(surf_files, 0, 0, 220, 110);
 
-    crate::serial_println!("[DESKTOP] Successfully spawned and executed isolated user applications (PID {}, PID 2, PID 3)",
-        pid_term);
+    crate::serial_println!("[DESKTOP] Successfully spawned and executed isolated user applications (PID {}, PID {}, PID {})",
+        pid_term, pid_demo, pid_files);
 
-    Ok((pid_term, 2, 3))
+    Ok((pid_term, pid_demo, pid_files))
 }
 
 

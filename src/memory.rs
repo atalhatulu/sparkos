@@ -136,6 +136,13 @@ pub fn user_alloc_frame() -> Option<PhysFrame> {
             alloc.regions[alloc.next_region].0 = start + 4096;
             let frame = PhysFrame::containing_address(PhysAddr::new(start));
             alloc.allocated_frames.insert(start);
+
+            // Zero the frame memory to guarantee clean page tables and prevent corrupted page walks
+            let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+            let dest = (phys_offset + start).as_mut_ptr::<u8>();
+            unsafe {
+                core::ptr::write_bytes(dest, 0, 4096);
+            }
             return Some(frame);
         }
         alloc.next_region += 1;
@@ -226,9 +233,8 @@ pub fn map_user_range(virt: u64, count: u64, writable: bool) -> Result<u64, &'st
     Ok(count)
 }
 
-/// Maps a specific physical frame range to a user virtual address range.
-/// Used for capability-gated DMA region mapping (Aşama 6.2).
-pub fn map_user_phys_range(
+pub fn map_user_phys_range_in_cr3(
+    cr3: u64,
     virt: u64,
     phys_start: PhysAddr,
     count: u64,
@@ -238,7 +244,15 @@ pub fn map_user_phys_range(
         return Err("user mapping target outside user space");
     }
     let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
-    let mut mapper = unsafe { init(phys_offset) };
+    let target = if cr3 == 0 {
+        unsafe { active_level_4_table(phys_offset) }
+    } else {
+        let ptr = (phys_offset + PhysAddr::new(cr3).as_u64()).as_mut_ptr::<PageTable>();
+        unsafe { &mut *ptr }
+    };
+    let curr_flags = target[0].flags();
+    target[0].set_flags(curr_flags | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::PRESENT);
+    let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
 
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
@@ -255,12 +269,25 @@ pub fn map_user_phys_range(
         unsafe {
             match mapper.map_to_with_table_flags(page, frame, flags, parent, &mut UserFrameAllocatorAdapter) {
                 Ok(tlb) => tlb.flush(),
-                Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {},
+                Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
+                    let _ = mapper.update_flags(page, flags);
+                },
                 Err(_) => return Err("failed to map phys page to user"),
             }
         }
     }
     Ok(())
+}
+
+/// Maps a specific physical frame range to a user virtual address range.
+/// Used for capability-gated DMA region mapping (Aşama 6.2).
+pub fn map_user_phys_range(
+    virt: u64,
+    phys_start: PhysAddr,
+    count: u64,
+    writable: bool,
+) -> Result<(), &'static str> {
+    map_user_phys_range_in_cr3(0, virt, phys_start, count, writable)
 }
 
 /// Frame allocator adapter multiplexing to the dedicated user pool.
@@ -306,6 +333,10 @@ pub fn clone_active_cr3() -> Option<u64> {
     let dest = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u64>();
     unsafe {
         core::ptr::copy_nonoverlapping(src_ptr, dest, 512);
+        // Ensure PML4 entry 0 is USER_ACCESSIBLE so user processes can access userland mappings
+        if *dest != 0 {
+            *dest |= PageTableFlags::USER_ACCESSIBLE.bits() | PageTableFlags::WRITABLE.bits();
+        }
     }
     Some(frame.start_address().as_u64())
 }
@@ -328,6 +359,8 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
         let ptr = (phys_offset + PhysAddr::new(cr3).as_u64()).as_mut_ptr::<PageTable>();
         unsafe { &mut *ptr }
     };
+    let curr_flags = target[0].flags();
+    target[0].set_flags(curr_flags | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::PRESENT);
     let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
 
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
@@ -344,7 +377,13 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
                 tlb.flush();
                 Ok(virt)
             }
-            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => Ok(virt),
+            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
+                // If page is already present in shared table, update flags to match
+                if let Ok(pt) = mapper.update_flags(page, flags) {
+                    pt.flush();
+                }
+                Ok(virt)
+            }
             Err(_) => Err("failed to map user page in cr3"),
         }
     }

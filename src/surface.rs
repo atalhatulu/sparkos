@@ -80,7 +80,11 @@ pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result
     }
 
     // Map into client's user address space at slot-specific VMA with read/write access
-    crate::memory::map_user_phys_range(vma_addr, PhysAddr::new(phys_frame), pages, true)?;
+    let owner_cr3 = crate::task::process::get_process_user_cr3(owner_pid).unwrap_or(0);
+    if owner_cr3 != 0 {
+        crate::memory::map_user_phys_range_in_cr3(owner_cr3, vma_addr, PhysAddr::new(phys_frame), pages, true)?;
+    }
+    crate::memory::map_user_phys_range_in_cr3(0, vma_addr, PhysAddr::new(phys_frame), pages, true)?;
 
     let surface_id = NEXT_SURFACE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let surface = SurfaceInfo {
@@ -160,11 +164,6 @@ pub fn destroy_surface(surface_id: u64) -> Result<(), &'static str> {
 pub fn cleanup_surfaces_for_pid(pid: u64) {
     let mut reg = SURFACE_REGISTRY.lock();
     let initial_count = reg.len();
-
-    // Unmap all owned surfaces
-    for s in reg.iter().filter(|s| s.owner_pid == pid) {
-        let _ = crate::memory::unmap_user_range(s.vma_addr, s.pages);
-    }
 
     reg.retain(|s| s.owner_pid != pid);
     let cleaned = initial_count - reg.len();
