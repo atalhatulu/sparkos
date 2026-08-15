@@ -162,9 +162,9 @@ pub async fn mouse_task() {
                 if let Some((wid, owner_pid)) = wm.handle_mouse_down(cx as i32, cy as i32) {
                     if let Some(win) = wm.windows.iter().find(|w| w.window_id == wid) {
                         let local_x = (cx as i32) - win.x;
-                        let local_y = (cy as i32) - (win.y + 24);
+                        let local_y = (cy as i32) - (win.y + 20);
                         let ev = crate::input::InputEvent {
-                            event_type: crate::input::EventType::MouseDown as u8,
+                            event_type: crate::input::EventType::MouseButtonDown as u8,
                             modifiers: 0,
                             key_code: 0,
                             mouse_button: 1,
@@ -172,7 +172,7 @@ pub async fn mouse_task() {
                             _reserved: [0; 3],
                             mouse_x: local_x,
                             mouse_y: local_y,
-                            timestamp: 1000,
+                            timestamp: crate::interrupts::get_tick(),
                             _padding: [0; 8],
                         };
                         crate::input::deliver_event_to_pid(owner_pid, ev);
@@ -182,7 +182,7 @@ pub async fn mouse_task() {
                 let mut wm = crate::wm::WM.lock();
                 if let Some((_wid, owner_pid)) = wm.handle_mouse_up() {
                     let ev = crate::input::InputEvent {
-                        event_type: crate::input::EventType::MouseUp as u8,
+                        event_type: crate::input::EventType::MouseButtonUp as u8,
                         modifiers: 0,
                         key_code: 0,
                         mouse_button: 1,
@@ -190,7 +190,7 @@ pub async fn mouse_task() {
                         _reserved: [0; 3],
                         mouse_x: 0,
                         mouse_y: 0,
-                        timestamp: 1000,
+                        timestamp: crate::interrupts::get_tick(),
                         _padding: [0; 8],
                     };
                     crate::input::deliver_event_to_pid(owner_pid, ev);
@@ -198,6 +198,27 @@ pub async fn mouse_task() {
             } else if moved {
                 let mut wm = crate::wm::WM.lock();
                 wm.handle_mouse_move(cx as i32, cy as i32);
+                if let Some(target_id) = wm.hit_test(cx as i32, cy as i32) {
+                    if let Some(win) = wm.windows.iter().find(|w| w.window_id == target_id) {
+                        let local_x = (cx as i32) - win.x;
+                        let local_y = (cy as i32) - (win.y + 20);
+                        if local_y >= 0 {
+                            let ev = crate::input::InputEvent {
+                                event_type: crate::input::EventType::MouseMove as u8,
+                                modifiers: 0,
+                                key_code: 0,
+                                mouse_button: 0,
+                                wheel_delta: 0,
+                                _reserved: [0; 3],
+                                mouse_x: local_x,
+                                mouse_y: local_y,
+                                timestamp: crate::interrupts::get_tick(),
+                                _padding: [0; 8],
+                            };
+                            crate::input::deliver_event_to_pid(win.owner_pid, ev);
+                        }
+                    }
+                }
             }
 
             if moved || click != last_click {

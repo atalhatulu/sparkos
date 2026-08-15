@@ -1,8 +1,8 @@
-//! SparkOS — Input & Event Subsystem (Faz 13)
+//! SparkOS Desktop V1.4 — Input Event Architecture
 //!
-//! Provides Hardware Input Capture, Fixed 32-Byte Wire-Format `InputEvent` ABI,
-//! Per-Client Ring Buffers, Mouse Local Coordinate Translation, Focus-Gated Key Routing,
-//! Coalescing Queue Overflow Backpressure, and Automated Teardown.
+//! Provides a standardized 32-Byte Wire-Format `InputEvent` model, per-process event queues,
+//! MouseMove event coalescing, focus-gated keyboard routing, window focus/resize events,
+//! and bounded memory allocation.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -12,25 +12,26 @@ use spin::Mutex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     None = 0,
-    KeyDown = 1,
-    KeyUp = 2,
-    MouseMove = 3,
-    MouseDown = 4,
-    MouseUp = 5,
-    MouseWheel = 6,
+    MouseMove = 1,
+    MouseButtonDown = 2,
+    MouseButtonUp = 3,
+    KeyDown = 4,
+    KeyUp = 5,
+    WindowFocus = 6,
+    WindowResize = 7,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputEvent {
-    pub event_type: u8,       // 1 byte
-    pub modifiers: u8,        // 1 byte (Bit 0: Shift, Bit 1: Ctrl, Bit 2: Alt)
+    pub event_type: u8,       // 1 byte (EventType)
+    pub modifiers: u8,        // 1 byte (Bit 0: Shift, Bit 1: Ctrl, Bit 2: Alt, Bit 3: Meta)
     pub key_code: u8,         // 1 byte
     pub mouse_button: u8,     // 1 byte (1: Left, 2: Right, 3: Middle)
     pub wheel_delta: i8,      // 1 byte (+1: Up, -1: Down)
     pub _reserved: [u8; 3],   // 3 bytes padding
-    pub mouse_x: i32,         // 4 bytes (Pencere-içi yerel X)
-    pub mouse_y: i32,         // 4 bytes (Pencere-içi yerel Y)
+    pub mouse_x: i32,         // 4 bytes (Pencere-içi yerel X / Genişlik)
+    pub mouse_y: i32,         // 4 bytes (Pencere-içi yerel Y / Yükseklik)
     pub timestamp: u64,       // 8 bytes (Sistem zaman damgası)
     pub _padding: [u8; 8],    // 8 bytes padding -> Toplam 32 byte
 }
@@ -38,7 +39,7 @@ pub struct InputEvent {
 // 32-byte wire-format ABI doğrulaması
 const _: () = assert!(core::mem::size_of::<InputEvent>() == 32);
 
-pub const EVENT_QUEUE_CAPACITY: usize = 32;
+pub const MAX_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct EventQueue {
@@ -50,27 +51,34 @@ impl EventQueue {
         Self { buffer: Vec::new() }
     }
 
-    /// Olayı kuyruğa ekler; kuyruk doluysa MouseMove'u birleştirir (coalescing),
-    /// tuş olaylarını öncelikli korur.
+    /// Olayı kuyruğa ekler; MouseMove olaylarını coalescing (birleştirme) yaparak
+    /// kuyruğun dolmasını engeller, klavye ve pencere olaylarını FIFO korur.
     pub fn push(&mut self, ev: InputEvent) {
-        if self.buffer.len() >= EVENT_QUEUE_CAPACITY {
-            // Eğer yeni gelen olay MouseMove ise ve kuyrukta önceki MouseMove varsa birleştir
-            if ev.event_type == EventType::MouseMove as u8 {
-                if let Some(last_move) = self.buffer.iter_mut().rev().find(|e| e.event_type == EventType::MouseMove as u8) {
-                    last_move.mouse_x = ev.mouse_x;
-                    last_move.mouse_y = ev.mouse_y;
-                    last_move.timestamp = ev.timestamp;
+        // 1. MouseMove Coalescing: Eğer gelen olay MouseMove ise ve kuyruğun sonunda
+        // zaten bir MouseMove varsa, yeni bir slot tüketmek yerine koordinatları güncelle
+        if ev.event_type == EventType::MouseMove as u8 {
+            if let Some(last_ev) = self.buffer.last_mut() {
+                if last_ev.event_type == EventType::MouseMove as u8 {
+                    last_ev.mouse_x = ev.mouse_x;
+                    last_ev.mouse_y = ev.mouse_y;
+                    last_ev.timestamp = ev.timestamp;
+                    last_ev.modifiers = ev.modifiers;
                     return;
                 }
             }
-            // En eski MouseMove'u silmeyi dene
+        }
+
+        // 2. Kapasite Sınırı Denetimi
+        if self.buffer.len() >= MAX_QUEUE_CAPACITY {
+            // Önce kuyruktaki en eski MouseMove olayını düşür
             if let Some(pos) = self.buffer.iter().position(|e| e.event_type == EventType::MouseMove as u8) {
                 self.buffer.remove(pos);
             } else {
-                // Eğer kuyruk tamamen tuş olaylarıyla doluysa, en eskiyi at (Tanımlı backpressure)
+                // Kuyruk sadece kritik olaylarla doluysa en eski olayı düşür (bounded memory)
                 self.buffer.remove(0);
             }
         }
+
         self.buffer.push(ev);
     }
 
@@ -80,6 +88,14 @@ impl EventQueue {
         } else {
             Some(self.buffer.remove(0))
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
     }
 }
 
@@ -115,7 +131,7 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
             // Only deliver event to client if within client surface area (below title bar)
             if local_y >= 0 {
                 let ev_type = if button > 0 {
-                    if pressed { EventType::MouseDown } else { EventType::MouseUp }
+                    if pressed { EventType::MouseButtonDown } else { EventType::MouseButtonUp }
                 } else {
                     EventType::MouseMove
                 };
@@ -129,7 +145,7 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
                     _reserved: [0; 3],
                     mouse_x: local_x,
                     mouse_y: local_y,
-                    timestamp: 1000,
+                    timestamp: crate::interrupts::get_tick(),
                     _padding: [0; 8],
                 };
 
@@ -161,10 +177,27 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         _reserved: [0; 3],
         mouse_x: 0,
         mouse_y: 0,
-        timestamp: 1000,
+        timestamp: crate::interrupts::get_tick(),
         _padding: [0; 8],
     };
 
     deliver_event_to_pid(focused_pid, ev);
     Some(focused_pid)
+}
+
+/// Pencere odaklanma veya yeniden boyutlandırma olayını iletir
+pub fn notify_window_event(pid: u64, event_type: EventType, width: u32, height: u32) {
+    let ev = InputEvent {
+        event_type: event_type as u8,
+        modifiers: 0,
+        key_code: 0,
+        mouse_button: 0,
+        wheel_delta: 0,
+        _reserved: [0; 3],
+        mouse_x: width as i32,
+        mouse_y: height as i32,
+        timestamp: crate::interrupts::get_tick(),
+        _padding: [0; 8],
+    };
+    deliver_event_to_pid(pid, ev);
 }
