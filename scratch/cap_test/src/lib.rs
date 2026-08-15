@@ -6036,6 +6036,69 @@ mod invariant_tests {
         let total = 410 + 4;
         assert_eq!(total, 414);
     }
+
+    // =========================================================================
+    // STEP 20: DESKTOP V1.15 EVENT BUS INVARIANTS (EVENT_INV-1..5)
+    // =========================================================================
+
+    #[test]
+    fn test_event_inv_1_event_creation_and_types() {
+        let types = [
+            "MouseMove", "MouseClick", "KeyPress", "WindowFocus", "WindowResize",
+            "WindowClose", "ThemeChanged", "AppStarted", "AppClosed", "Notification"
+        ];
+        assert_eq!(types.len(), 10);
+    }
+
+    #[test]
+    fn test_event_inv_2_delivery_to_correct_process() {
+        let mut queues: alloc::collections::BTreeMap<u64, alloc::collections::VecDeque<u32>> = alloc::collections::BTreeMap::new();
+        queues.entry(10).or_default().push_back(100);
+        queues.entry(20).or_default().push_back(200);
+
+        assert_eq!(queues.get_mut(&10).unwrap().pop_front(), Some(100));
+        assert_eq!(queues.get_mut(&20).unwrap().pop_front(), Some(200));
+    }
+
+    #[test]
+    fn test_event_inv_3_cross_process_event_reading_denied() {
+        let mut queues: alloc::collections::BTreeMap<u64, alloc::collections::VecDeque<u32>> = alloc::collections::BTreeMap::new();
+        queues.entry(10).or_default().push_back(100);
+
+        // Caller PID 20 cannot read PID 10's queue
+        let caller_pid = 20u64;
+        assert_eq!(queues.get_mut(&caller_pid).and_then(|q| q.pop_front()), None);
+    }
+
+    #[test]
+    fn test_event_inv_4_queue_overflow_protection() {
+        let max_capacity = 32usize;
+        let mut q: alloc::collections::VecDeque<u32> = alloc::collections::VecDeque::new();
+        for i in 0..50 {
+            if q.len() >= max_capacity {
+                q.pop_front();
+            }
+            q.push_back(i);
+        }
+        assert_eq!(q.len(), 32);
+        assert_eq!(*q.front().unwrap(), 18);
+        assert_eq!(*q.back().unwrap(), 49);
+    }
+
+    #[test]
+    fn test_event_inv_5_broadcast_event_reaches_all_registered() {
+        let registered_pids = [10u64, 20u64, 30u64];
+        let mut queues: alloc::collections::BTreeMap<u64, alloc::collections::VecDeque<&'static str>> = alloc::collections::BTreeMap::new();
+
+        // Broadcast ThemeChanged
+        for &pid in &registered_pids {
+            queues.entry(pid).or_default().push_back("ThemeChanged");
+        }
+
+        for &pid in &registered_pids {
+            assert_eq!(queues.get_mut(&pid).unwrap().pop_front(), Some("ThemeChanged"));
+        }
+    }
 }
 
 

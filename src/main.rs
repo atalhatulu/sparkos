@@ -68,6 +68,7 @@ pub mod notification;
 pub mod settings_app;
 pub mod taskmgr_app;
 pub mod damage;
+pub mod event;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
