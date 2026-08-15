@@ -77,6 +77,7 @@ pub mod pkg_service;
 pub mod network_service;
 pub mod browser_app;
 pub mod gpu;
+pub mod gpu_virtio;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
