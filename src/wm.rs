@@ -523,10 +523,8 @@ impl WindowManager {
             crate::gui::draw_string(px + 36, item_y + 5, "Close Menu", 0x0094A3B8, 0x00334155);
         }
 
-        // 6. Draw mouse cursor
-        let cur_x = (mouse_x.max(0).min(screen_w as i32 - 1)) as u16;
-        let cur_y = (mouse_y.max(0).min(screen_h as i32 - 1)) as u16;
-        crate::gui::draw_cursor(cur_x, cur_y);
+        // 6. Draw topmost mouse cursor layer
+        crate::cursor::draw_cursor_layer();
 
         // 7. Swap buffers to hardware VESA Framebuffer
         crate::gui::swap_buffers();
