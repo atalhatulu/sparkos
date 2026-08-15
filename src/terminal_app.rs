@@ -6,6 +6,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::font::FONT;
+use crate::libspark_ui::Widget;
 
 pub const TERM_WIDTH: u32 = 380;
 pub const TERM_HEIGHT: u32 = 140;
@@ -116,11 +117,14 @@ impl TerminalState {
             y += 12;
         }
 
-        // Draw active prompt line
+        // Draw active prompt line using SparkUI
         if y + 10 <= h {
-            crate::font::draw_text(surface_ptr, w, h, 8, y, "sparkos /> ", FG_PROMPT, BG_COLOR);
+            let prompt_label = crate::libspark_ui::Label::new(8, y as i32, "sparkos /> ", FG_PROMPT, BG_COLOR);
+            prompt_label.draw(surface_ptr, w, h);
+
             let input_x = 8 + 11 * 8;
-            crate::font::draw_text(surface_ptr, w, h, input_x, y, &self.current_input, FG_TEXT, BG_COLOR);
+            let input_label = crate::libspark_ui::Label::new(input_x as i32, y as i32, &self.current_input, FG_TEXT, BG_COLOR);
+            input_label.draw(surface_ptr, w, h);
 
             // Blinking cursor
             let cursor_x = input_x + (self.current_input.len() as u32 * 8);

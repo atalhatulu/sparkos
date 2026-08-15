@@ -1,7 +1,8 @@
-//! SparkOS Desktop V1.11 — Settings Application (`settings.app`)
+//! SparkOS Desktop V1.11 / V1.20 — Settings Application (`settings.app`)
 //!
-//! Provides a user-space system configuration utility for theme toggling,
-//! screen resolution inspection, and kernel uptime diagnostics.
+//! Provides a user-space system configuration utility utilizing SparkUI Framework widgets.
+
+use crate::libspark_ui::{Button, Label, Widget};
 
 pub const SETTINGS_WIDTH: u32 = 300;
 pub const SETTINGS_HEIGHT: u32 = 180;
@@ -13,13 +14,29 @@ pub fn render_settings_surface(surface_ptr: *mut u32, w: u32, h: u32) {
     let accent_color = 0x0038BDF8;
 
     crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 8, "SparkOS Control Center", 0x0034D399, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 24, "Resolution: 1280x720 (HD)", text_color, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 40, "Color Depth: 32-bit TrueColor", text_color, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 56, "Active Theme: Spark Dark", accent_color, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 72, "Architecture: x86-64 Microkernel", text_color, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 88, "Security: CSpace / CR3 Isolated", 0x0034D399, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 110, "[ Click window to toggle theme ]", 0x00F59E0B, bg_color);
+
+    // SparkUI Labels
+    let title = Label::new(8, 8, "SparkOS Control Center", 0x0034D399, bg_color);
+    title.draw(surface_ptr, w, h);
+
+    let res_label = Label::new(8, 24, "Resolution: 1280x720 (HD)", text_color, bg_color);
+    res_label.draw(surface_ptr, w, h);
+
+    let depth_label = Label::new(8, 40, "Color Depth: 32-bit TrueColor", text_color, bg_color);
+    depth_label.draw(surface_ptr, w, h);
+
+    let theme_label = Label::new(8, 56, "Active Theme: Spark Dark", accent_color, bg_color);
+    theme_label.draw(surface_ptr, w, h);
+
+    let arch_label = Label::new(8, 72, "Architecture: x86-64 Microkernel", text_color, bg_color);
+    arch_label.draw(surface_ptr, w, h);
+
+    let sec_label = Label::new(8, 88, "Security: CSpace / CR3 Isolated", 0x0034D399, bg_color);
+    sec_label.draw(surface_ptr, w, h);
+
+    // SparkUI Button Widget
+    let toggle_btn = Button::new(8, 110, 200, 22, "Toggle Theme");
+    toggle_btn.draw(surface_ptr, w, h);
 }
 
 pub fn spawn_settings_app(name: &str) -> Result<u64, &'static str> {
