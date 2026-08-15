@@ -1,3 +1,8 @@
+//! SparkOS Keyboard Async Task & Safe Interrupt Queue
+//!
+//! Separates hardware IRQ scancode ingestion from Mutex-locking event dispatching,
+//! ensuring deadlock-free keyboard processing across the Window Manager.
+
 use spin::Once;
 use crossbeam_queue::ArrayQueue;
 use core::{future::Future, pin::Pin, task::{Context, Poll}};
@@ -5,10 +10,10 @@ use core::{future::Future, pin::Pin, task::{Context, Poll}};
 pub static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
 
 pub fn init() {
-    SCANCODE_QUEUE.call_once(|| ArrayQueue::new(100));
+    SCANCODE_QUEUE.call_once(|| ArrayQueue::new(256));
 }
 
-/// Called by the keyboard interrupt handler
+/// Called by the keyboard interrupt handler (IRQ1) - STRICTLY LOCK-FREE
 pub(crate) fn add_scancode(scancode: u8) {
     if let Some(queue) = SCANCODE_QUEUE.get() {
         if queue.push(scancode).is_err() {
@@ -17,13 +22,9 @@ pub(crate) fn add_scancode(scancode: u8) {
     } else {
         crate::serial_println!("WARNING: scancode queue uninitialized");
     }
-    // Decode scancode into keyboard ring buffer for shell
+    // Feed low-level ring buffer for VGA shell
     crate::keyboard::handle_key(scancode);
-    // GUI / Desktop focused window input delivery
-    let pressed = (scancode & 0x80) == 0;
-    let key_code = scancode & 0x7F;
-    crate::input::dispatch_keyboard_event(key_code, pressed, 0);
-    // Aşama 5.1: IRQ notification (IRQ 1)
+    // IRQ notification (IRQ 1)
     crate::ipc::irq_event(1, scancode);
 }
 
@@ -44,4 +45,16 @@ impl Future for ScancodeFuture {
 
 pub async fn read_scancode() -> u8 {
     ScancodeFuture.await
+}
+
+/// Dedicated asynchronous keyboard task running in cooperative executor context (Deadlock-Free!)
+pub async fn keyboard_task() {
+    loop {
+        let scancode = read_scancode().await;
+        if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+            let pressed = (scancode & 0x80) == 0;
+            let key_code = scancode & 0x7F;
+            crate::input::dispatch_keyboard_event(key_code, pressed, 0);
+        }
+    }
 }

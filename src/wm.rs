@@ -79,6 +79,7 @@ pub struct WindowManager {
     pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
     pub hovered_target: Option<HoverTarget>,
     pub launcher_open: bool,
+    pub pending_spawn_app: Option<u8>,
 }
 
 impl WindowManager {
@@ -91,6 +92,7 @@ impl WindowManager {
             resizing_window: None,
             hovered_target: None,
             launcher_open: false,
+            pending_spawn_app: None,
         }
     }
 
@@ -546,10 +548,13 @@ impl WindowManager {
             crate::gui::draw_string(px + 36, item_y + 5, "Close Menu", 0x0094A3B8, 0x00334155);
         }
 
-        // 6. Draw topmost mouse cursor layer
+        // 6. Global Freeze Protection / Crash Modal & Diagnostic Overlay
+        crate::crash_reporter::CRASH_REPORTER.lock().render_crash_modal(screen_w, screen_h);
+
+        // 7. Draw topmost mouse cursor layer
         crate::cursor::draw_cursor_layer();
 
-        // 7. Swap buffers to hardware VESA Framebuffer
+        // 8. Swap buffers to hardware VESA Framebuffer
         crate::gui::swap_buffers();
     }
 
@@ -568,19 +573,19 @@ impl WindowManager {
             if mx >= px && mx < px + pw && my >= py && my < py + ph {
                 // Item 1: Terminal
                 if my >= py + 28 && my < py + 52 {
-                    let _ = crate::app_registry::spawn_registered_app(1);
+                    self.pending_spawn_app = Some(1);
                     self.launcher_open = false;
                     return None;
                 }
                 // Item 2: Demo App
                 if my >= py + 56 && my < py + 80 {
-                    let _ = crate::app_registry::spawn_registered_app(2);
+                    self.pending_spawn_app = Some(2);
                     self.launcher_open = false;
                     return None;
                 }
                 // Item 3: Files
                 if my >= py + 84 && my < py + 108 {
-                    let _ = crate::app_registry::spawn_registered_app(3);
+                    self.pending_spawn_app = Some(3);
                     self.launcher_open = false;
                     return None;
                 }

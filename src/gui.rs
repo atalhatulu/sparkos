@@ -688,7 +688,7 @@ pub fn draw_char(x: u16, y: u16, c: char, fg: u32, bg: u32) {
                 if px < cx || px >= cx2 || px >= VESA.width { continue; }
                 
                 let offset = (py as usize) * (VESA.width as usize) + (px as usize);
-                let bit_set = (row & (1 << col_idx)) != 0;
+                let bit_set = (row & (1 << (7 - col_idx))) != 0;
                 let color = if bit_set { fg } else { bg };
                 
                 if bit_set || bg != 0x00000000 {

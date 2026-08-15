@@ -82,6 +82,7 @@ pub mod store_service;
 pub mod network_manager;
 pub mod system_bar;
 pub mod desktop;
+pub mod crash_reporter;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -505,9 +506,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     
     let mut executor = task::simple_executor::SimpleExecutor::new();
 
-    // Arka plan saati görevini başlat (Multitasking Gösterimi)
+    // Tasks for interactive desktop multitasking
     executor.spawn(task::Task::new("clock", clock_task()));
     executor.spawn(task::Task::new("mouse", mouse::mouse_task()));
+    executor.spawn(task::Task::new("keyboard", task::keyboard::keyboard_task()));
 
     // Boot dizisini tamamlayıp ardından interaktif shell'i açık tutan ana görev
     executor.spawn(task::Task::new("boot_orchestrator", boot_orchestrator()));

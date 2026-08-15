@@ -159,10 +159,16 @@ pub async fn mouse_task() {
         if crate::vga_buffer::GUI_MODE.load(Ordering::Relaxed) {
             if click && !last_click {
                 let mut wm = crate::wm::WM.lock();
-                if let Some((wid, owner_pid)) = wm.handle_mouse_down(cx as i32, cy as i32) {
-                    if let Some(win) = wm.windows.iter().find(|w| w.window_id == wid) {
-                        let local_x = (cx as i32) - win.x;
-                        let local_y = (cy as i32) - (win.y + 20);
+                let event_target = wm.handle_mouse_down(cx as i32, cy as i32);
+                let app_to_spawn = wm.pending_spawn_app.take();
+                drop(wm);
+
+                if let Some((wid, owner_pid)) = event_target {
+                    let local_pos = {
+                        let wm = crate::wm::WM.lock();
+                        wm.windows.iter().find(|w| w.window_id == wid).map(|w| ((cx as i32) - w.x, (cy as i32) - (w.y + 20)))
+                    };
+                    if let Some((local_x, local_y)) = local_pos {
                         let ev = crate::input::InputEvent {
                             event_type: crate::input::EventType::MouseButtonDown as u8,
                             modifiers: 0,
@@ -177,23 +183,32 @@ pub async fn mouse_task() {
                         };
                         crate::input::deliver_event_to_pid(owner_pid, ev);
                     }
-                } else {
-                    drop(wm);
-                    if let Some(action) = crate::desktop::DESKTOP_ENV.lock().handle_mouse_click(cx, cy, crate::interrupts::get_tick()) {
-                        match action {
-                            crate::desktop::DesktopIconAction::OpenHome | crate::desktop::DesktopIconAction::OpenComputer => {
-                                let _ = crate::files_app::spawn_files_app("files.app");
-                            }
-                            crate::desktop::DesktopIconAction::OpenApplications => {
-                                let _ = crate::settings_app::spawn_settings_app("settings.app");
-                            }
-                            crate::desktop::DesktopIconAction::OpenTrash => {
-                                let _ = crate::files_app::spawn_files_app("trash.app");
-                            }
-                        }
-                    } else if cy < 24 && cx > 1000 {
-                        crate::network_manager::NETWORK_MANAGER.lock().toggle_popup();
+                } else if let Some(app_id) = app_to_spawn {
+                    let _ = crate::app_registry::spawn_registered_app(app_id);
+                } else if crate::crash_reporter::CRASH_REPORTER.lock().active_crash.is_some() {
+                    let screen_w = unsafe { crate::gui::VESA.width as i32 };
+                    let screen_h = unsafe { crate::gui::VESA.height as i32 };
+                    let mw = 260;
+                    let mh = 160;
+                    let mx = (screen_w - mw) / 2;
+                    let my = (screen_h - mh) / 2;
+                    if (cx as i32) >= mx + 70 && (cx as i32) <= mx + 190 && (cy as i32) >= my + 118 && (cy as i32) <= my + 142 {
+                        crate::crash_reporter::CRASH_REPORTER.lock().dismiss_active_crash();
                     }
+                } else if let Some(action) = crate::desktop::DESKTOP_ENV.lock().handle_mouse_click(cx, cy, crate::interrupts::get_tick()) {
+                    match action {
+                        crate::desktop::DesktopIconAction::OpenHome | crate::desktop::DesktopIconAction::OpenComputer => {
+                            let _ = crate::files_app::spawn_files_app("files.app");
+                        }
+                        crate::desktop::DesktopIconAction::OpenApplications => {
+                            let _ = crate::settings_app::spawn_settings_app("settings.app");
+                        }
+                        crate::desktop::DesktopIconAction::OpenTrash => {
+                            let _ = crate::files_app::spawn_files_app("trash.app");
+                        }
+                    }
+                } else if cy < 24 && cx > 1000 {
+                    crate::network_manager::NETWORK_MANAGER.lock().toggle_popup();
                 }
             } else if !click && last_click {
                 let mut wm = crate::wm::WM.lock();
