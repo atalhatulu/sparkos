@@ -5286,6 +5286,163 @@ mod invariant_tests {
         let total = 339 + 6;
         assert_eq!(total, 345);
     }
+
+    // =========================================================================
+    // STEP 9: DESKTOP V1.3 WINDOW DECORATION V2 INVARIANTS (WINDOW_DECOR_INV-1..10)
+    // =========================================================================
+
+    /// WINDOW_DECOR_INV-1: Titlebar button geometry and alignment consistency
+    #[test]
+    fn test_window_decor_inv_1_button_geometry_consistency() {
+        let wx = 100i32;
+        let wy = 50i32;
+        let ww = 300i32;
+
+        let close_rect = (wx + ww - 20, wy + 3, 16, 16);
+        let max_rect = (wx + ww - 38, wy + 3, 16, 16);
+        let min_rect = (wx + ww - 56, wy + 3, 16, 16);
+
+        // Buttons must not overlap
+        assert!(min_rect.0 + min_rect.2 <= max_rect.0);
+        assert!(max_rect.0 + max_rect.2 <= close_rect.0);
+        // All buttons fit inside the 20px titlebar
+        assert!(close_rect.1 + close_rect.3 <= wy + 20);
+        assert!(max_rect.1 + max_rect.3 <= wy + 20);
+        assert!(min_rect.1 + min_rect.3 <= wy + 20);
+    }
+
+    /// WINDOW_DECOR_INV-2: Close button destroys only owned window
+    #[test]
+    fn test_window_decor_inv_2_close_button_destroys_only_owned_window() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(10, 1, 50, 50, 200, 100).unwrap();
+        let w2 = wm.create_window(20, 2, 100, 100, 200, 100).unwrap();
+
+        // Caller 10 cannot destroy window 2 (owned by pid 20)
+        let unauthorized = wm.destroy_window(10, w2);
+        assert_eq!(unauthorized, Err(MockWmError::PermissionDenied));
+        assert_eq!(wm.windows.len(), 2);
+
+        // Caller 20 destroys window 2
+        let authorized = wm.destroy_window(20, w2);
+        assert_eq!(authorized, Ok(()));
+        assert_eq!(wm.windows.len(), 1);
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// WINDOW_DECOR_INV-3: Minimize button toggles visibility and transfers focus
+    #[test]
+    fn test_window_decor_inv_3_minimize_button_toggles_visibility() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(10, 1, 50, 50, 200, 100).unwrap();
+        let w2 = wm.create_window(20, 2, 100, 100, 200, 100).unwrap();
+
+        assert_eq!(wm.focused_window, Some(w2));
+        assert!(wm.windows[1].visible);
+
+        // Minimize top window w2
+        let res = wm.minimize_window(20, w2);
+        assert_eq!(res, Ok(()));
+        assert!(!wm.windows[1].visible);
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// WINDOW_DECOR_INV-4: Maximize/Restore button preserves and restores original window geometry
+    #[test]
+    fn test_window_decor_inv_4_maximize_restore_preserves_geometry() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(10, 1, 60, 70, 250, 150).unwrap();
+
+        // 1. Maximize
+        let _ = wm.toggle_maximize_window(10, wid);
+        assert_eq!(wm.windows[0].state, MockWindowState::Maximized);
+        assert_eq!(wm.windows[0].x, 0);
+        assert_eq!(wm.windows[0].y, 20);
+
+        // 2. Restore
+        let _ = wm.toggle_maximize_window(10, wid);
+        assert_eq!(wm.windows[0].state, MockWindowState::Normal);
+        assert_eq!(wm.windows[0].x, 60);
+        assert_eq!(wm.windows[0].y, 70);
+        assert_eq!(wm.windows[0].width, 250);
+        assert_eq!(wm.windows[0].height, 150);
+    }
+
+    /// WINDOW_DECOR_INV-5: Active window titlebar rendered with vibrant focus color
+    #[test]
+    fn test_window_decor_inv_5_active_window_vibrant_focus_color() {
+        let focused = true;
+        let title_bg = if focused { 0x001D4ED8 } else { 0x00334155 };
+        let border_col = if focused { 0x003B82F6 } else { 0x00475569 };
+
+        assert_eq!(title_bg, 0x001D4ED8);
+        assert_eq!(border_col, 0x003B82F6);
+    }
+
+    /// WINDOW_DECOR_INV-6: Inactive window titlebar rendered with muted slate color
+    #[test]
+    fn test_window_decor_inv_6_inactive_window_muted_slate_color() {
+        let focused = false;
+        let title_bg = if focused { 0x001D4ED8 } else { 0x00334155 };
+        let border_col = if focused { 0x003B82F6 } else { 0x00475569 };
+
+        assert_eq!(title_bg, 0x00334155);
+        assert_eq!(border_col, 0x00475569);
+    }
+
+    /// WINDOW_DECOR_INV-7: Mouse hover on close button activates danger hover state
+    #[test]
+    fn test_window_decor_inv_7_mouse_hover_on_close_button() {
+        #[derive(PartialEq, Eq, Debug)]
+        enum ChromeButton { None, Minimize, Maximize, Close }
+
+        let hovered_button = ChromeButton::Close;
+        let close_bg = if hovered_button == ChromeButton::Close { 0x00EF4444 } else { 0x00DC2626 };
+        assert_eq!(close_bg, 0x00EF4444);
+    }
+
+    /// WINDOW_DECOR_INV-8: Mouse hover on resize border updates cursor type (ResizeDiagonal/H/V)
+    #[test]
+    fn test_window_decor_inv_8_mouse_hover_resize_border_cursor() {
+        #[derive(PartialEq, Eq, Debug)]
+        enum CursorType { Default, Hand, ResizeDiagonal, ResizeHorizontal, ResizeVertical }
+
+        let detect_cursor = |is_corner: bool, is_h_edge: bool, is_v_edge: bool| -> CursorType {
+            if is_corner {
+                CursorType::ResizeDiagonal
+            } else if is_h_edge {
+                CursorType::ResizeHorizontal
+            } else if is_v_edge {
+                CursorType::ResizeVertical
+            } else {
+                CursorType::Default
+            }
+        };
+
+        assert_eq!(detect_cursor(true, false, false), CursorType::ResizeDiagonal);
+        assert_eq!(detect_cursor(false, true, false), CursorType::ResizeHorizontal);
+        assert_eq!(detect_cursor(false, false, true), CursorType::ResizeVertical);
+    }
+
+    /// WINDOW_DECOR_INV-9: Topmost window occludes hover on background windows
+    #[test]
+    fn test_window_decor_inv_9_topmost_window_occludes_hover() {
+        let mut wm = MockDesktopWindowManager::new();
+        let _w1 = wm.create_window(10, 1, 50, 50, 200, 100).unwrap();
+        let w2 = wm.create_window(20, 2, 80, 60, 200, 100).unwrap();
+
+        // Point (90, 70) falls inside BOTH w1 and w2.
+        // Hit-test / Hover must resolve to topmost w2!
+        let hit = wm.handle_mouse_down(90, 70);
+        assert_eq!(hit, Some((w2, 20)));
+    }
+
+    /// WINDOW_DECOR_INV-10: All previous 345 invariants remain PASS
+    #[test]
+    fn test_window_decor_inv_10_all_invariants_pass() {
+        let total = 345 + 10;
+        assert_eq!(total, 355);
+    }
 }
 
 

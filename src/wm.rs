@@ -39,6 +39,22 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeButton {
+    None,
+    Minimize,
+    Maximize,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoverTarget {
+    pub window_id: u64,
+    pub button: ChromeButton,
+    pub is_titlebar: bool,
+    pub resize_edge: ResizeEdge,
+}
+
 #[derive(Debug, Clone)]
 pub struct Window {
     pub window_id: u64,
@@ -61,6 +77,7 @@ pub struct WindowManager {
     pub focused_window: Option<u64>,
     pub dragging_window: Option<(u64, i32, i32)>,
     pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
+    pub hovered_target: Option<HoverTarget>,
     pub launcher_open: bool,
 }
 
@@ -72,6 +89,7 @@ impl WindowManager {
             focused_window: None,
             dragging_window: None,
             resizing_window: None,
+            hovered_target: None,
             launcher_open: false,
         }
     }
@@ -381,26 +399,36 @@ impl WindowManager {
             crate::gui::draw_string(wx + 18, wy + 6, app_name, title_fg, title_bg);
 
             // Control Buttons on Right (— □ ×)
+            let is_hover_target = self.hovered_target.as_ref().map(|h| h.window_id == win.window_id).unwrap_or(false);
+            let hovered_btn = if is_hover_target {
+                self.hovered_target.as_ref().map(|h| h.button).unwrap_or(ChromeButton::None)
+            } else {
+                ChromeButton::None
+            };
+
             // Minimize Button [—]
             if ww > 60 {
                 let min_x = wx + ww - 54;
-                crate::gui::draw_rect(min_x, wy + 3, 14, 14, 0x001E293B);
-                crate::gui::draw_char(min_x + 4, wy + 5, '-', 0x00E2E8F0, 0x001E293B);
+                let min_bg = if hovered_btn == ChromeButton::Minimize { 0x00475569 } else { 0x001E293B };
+                crate::gui::draw_rect(min_x, wy + 3, 14, 14, min_bg);
+                crate::gui::draw_char(min_x + 4, wy + 5, '-', 0x00E2E8F0, min_bg);
             }
 
             // Maximize Button [□]
             if ww > 40 {
                 let max_x = wx + ww - 36;
-                crate::gui::draw_rect(max_x, wy + 3, 14, 14, 0x001E293B);
+                let max_bg = if hovered_btn == ChromeButton::Maximize { 0x002563EB } else { 0x001E293B };
+                crate::gui::draw_rect(max_x, wy + 3, 14, 14, max_bg);
                 let max_sym = if win.state == WindowState::Maximized { '^' } else { '+' };
-                crate::gui::draw_char(max_x + 4, wy + 5, max_sym, 0x00E2E8F0, 0x001E293B);
+                crate::gui::draw_char(max_x + 4, wy + 5, max_sym, 0x00E2E8F0, max_bg);
             }
 
             // Close Button [×]
             if ww > 20 {
                 let close_x = wx + ww - 18;
-                crate::gui::draw_rect(close_x, wy + 3, 14, 14, 0x00DC2626);
-                crate::gui::draw_char(close_x + 4, wy + 5, 'x', 0x00FFFFFF, 0x00DC2626);
+                let close_bg = if hovered_btn == ChromeButton::Close { 0x00EF4444 /* Bright Hover Red */ } else { 0x00DC2626 /* Normal Red */ };
+                crate::gui::draw_rect(close_x, wy + 3, 14, 14, close_bg);
+                crate::gui::draw_char(close_x + 4, wy + 5, 'x', 0x00FFFFFF, close_bg);
             }
 
             // 3b. Client Area Background
@@ -683,16 +711,18 @@ impl WindowManager {
         None
     }
 
-    /// Handles mouse up: stops dragging and resizing
+    /// Handles mouse up: stops dragging and resizing, resets cursor
     pub fn handle_mouse_up(&mut self) -> Option<(u64, u64)> {
         self.dragging_window = None;
         self.resizing_window = None;
+        crate::cursor::set_cursor_type(crate::cursor::CursorType::Default);
         let target_id = self.focused_window?;
         let owner_pid = self.windows.iter().find(|w| w.window_id == target_id).map(|w| w.owner_pid)?;
         Some((target_id, owner_pid))
     }
 
-    /// Handles mouse move: updates dragging or resizing window coordinates with strict bounds clamping
+    /// Handles mouse move: updates dragging or resizing window coordinates with strict bounds clamping,
+    /// and performs hover hit-testing across Z-order to update cursor type and button hover states.
     pub fn handle_mouse_move(&mut self, mx: i32, my: i32) {
         let max_w = unsafe { crate::gui::VESA.width as i32 };
         let max_h = unsafe { crate::gui::VESA.height as i32 };
@@ -740,6 +770,7 @@ impl WindowManager {
                     _ => {}
                 }
             }
+            crate::cursor::set_cursor_type(crate::cursor::CursorType::ResizeDiagonal);
             return;
         }
 
@@ -757,7 +788,124 @@ impl WindowManager {
                 win.x = (mx - ox).clamp(-100, max_w.saturating_sub(50));
                 win.y = (my - oy).clamp(WORK_AREA_TOP, dock_y.saturating_sub(30));
             }
+            crate::cursor::set_cursor_type(crate::cursor::CursorType::Hand);
+            return;
         }
+
+        // 3. Hover Detection and Cursor Type Selection (Z-Order Top-to-Bottom)
+        let mut hovered = None;
+        let mut cursor_type = crate::cursor::CursorType::Default;
+
+        for win in self.windows.iter().rev() {
+            if !win.visible || win.state == WindowState::Minimized {
+                continue;
+            }
+
+            let wx = win.x;
+            let wy = win.y;
+            let ww = win.width as i32;
+            let wh = win.height as i32;
+            let wid = win.window_id;
+
+            // Check if mouse is within window bounding box (including resize borders)
+            if mx >= wx - 4 && mx <= wx + ww + 4 && my >= wy && my <= wy + 20 + wh + 4 {
+                // Resize corners & edges (only if not maximized)
+                if win.state != WindowState::Maximized {
+                    if (mx >= wx + ww - 8 && mx <= wx + ww + 4 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 4) ||
+                       (mx >= wx - 4 && mx <= wx + 8 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 4) {
+                        hovered = Some(HoverTarget {
+                            window_id: wid,
+                            button: ChromeButton::None,
+                            is_titlebar: false,
+                            resize_edge: ResizeEdge::BottomRight,
+                        });
+                        cursor_type = crate::cursor::CursorType::ResizeDiagonal;
+                        break;
+                    } else if (mx >= wx + ww - 4 && mx <= wx + ww + 4 && my >= wy && my <= wy + 20 + wh) ||
+                              (mx >= wx - 4 && mx <= wx + 4 && my >= wy && my <= wy + 20 + wh) {
+                        hovered = Some(HoverTarget {
+                            window_id: wid,
+                            button: ChromeButton::None,
+                            is_titlebar: false,
+                            resize_edge: ResizeEdge::Right,
+                        });
+                        cursor_type = crate::cursor::CursorType::ResizeHorizontal;
+                        break;
+                    } else if mx >= wx && mx <= wx + ww && my >= wy + 20 + wh - 4 && my <= wy + 20 + wh + 4 {
+                        hovered = Some(HoverTarget {
+                            window_id: wid,
+                            button: ChromeButton::None,
+                            is_titlebar: false,
+                            resize_edge: ResizeEdge::Bottom,
+                        });
+                        cursor_type = crate::cursor::CursorType::ResizeVertical;
+                        break;
+                    }
+                }
+
+                // Check Titlebar (my in wy .. wy + 20)
+                if mx >= wx && mx < wx + ww && my >= wy && my < wy + 20 {
+                    // Close button [×] (Rightmost: wx + ww - 20 .. wx + ww - 4)
+                    if mx >= wx + ww - 20 && mx <= wx + ww - 4 && my >= wy + 2 && my <= wy + 18 {
+                        hovered = Some(HoverTarget {
+                            window_id: wid,
+                            button: ChromeButton::Close,
+                            is_titlebar: false,
+                            resize_edge: ResizeEdge::None,
+                        });
+                        cursor_type = crate::cursor::CursorType::Hand;
+                        break;
+                    }
+                    // Maximize button [□] (Middle: wx + ww - 38 .. wx + ww - 22)
+                    if mx >= wx + ww - 38 && mx <= wx + ww - 22 && my >= wy + 2 && my <= wy + 18 {
+                        hovered = Some(HoverTarget {
+                            window_id: wid,
+                            button: ChromeButton::Maximize,
+                            is_titlebar: false,
+                            resize_edge: ResizeEdge::None,
+                        });
+                        cursor_type = crate::cursor::CursorType::Hand;
+                        break;
+                    }
+                    // Minimize button [—] (Left: wx + ww - 56 .. wx + ww - 40)
+                    if mx >= wx + ww - 56 && mx <= wx + ww - 40 && my >= wy + 2 && my <= wy + 18 {
+                        hovered = Some(HoverTarget {
+                            window_id: wid,
+                            button: ChromeButton::Minimize,
+                            is_titlebar: false,
+                            resize_edge: ResizeEdge::None,
+                        });
+                        cursor_type = crate::cursor::CursorType::Hand;
+                        break;
+                    }
+
+                    // Titlebar drag area
+                    hovered = Some(HoverTarget {
+                        window_id: wid,
+                        button: ChromeButton::None,
+                        is_titlebar: true,
+                        resize_edge: ResizeEdge::None,
+                    });
+                    cursor_type = crate::cursor::CursorType::Hand;
+                    break;
+                }
+
+                // Client Area
+                if mx >= wx && mx < wx + ww && my >= wy + 20 && my < wy + 20 + wh {
+                    hovered = Some(HoverTarget {
+                        window_id: wid,
+                        button: ChromeButton::None,
+                        is_titlebar: false,
+                        resize_edge: ResizeEdge::None,
+                    });
+                    cursor_type = crate::cursor::CursorType::Default;
+                    break;
+                }
+            }
+        }
+
+        self.hovered_target = hovered;
+        crate::cursor::set_cursor_type(cursor_type);
     }
 
     /// Cleans up all windows owned by a terminating process and re-evaluates focus.
