@@ -117,8 +117,8 @@ pub fn handle_interrupt() {
             
             if x < 0 { x = 0; }
             if y < 0 { y = 0; }
-            if x >= 1920 { x = 1919; }
-            if y >= 1080 { y = 1079; }
+            if x >= 640 { x = 639; }
+            if y >= 360 { y = 359; }
             
             MOUSE_X.store(x as u16, Ordering::Relaxed);
             MOUSE_Y.store(y as u16, Ordering::Relaxed);

@@ -3977,7 +3977,7 @@ mod invariant_tests {
         }
 
         pub fn create_window(&mut self, owner_pid: u64, surface_id: u64, x: i32, y: i32, width: u32, height: u32) -> core::result::Result<u64, MockWmError> {
-            if width == 0 || height == 0 || width > 1920 || height > 1080 {
+            if width == 0 || height == 0 || width > 640 || height > 360 {
                 return Err(MockWmError::InvalidDimensions);
             }
             let window_id = self.next_window_id;
@@ -4084,12 +4084,12 @@ mod invariant_tests {
                 let wid = win.window_id;
                 let owner = win.owner_pid;
 
-                if mx >= wx && mx < wx + ww && my >= wy && my < wy + 24 {
+                if mx >= wx && mx < wx + ww && my >= wy && my < wy + 20 {
                     self.dragging_window = Some((wid, mx - wx, my - wy));
                     let _ = self.raise_to_top_internal(wid);
                     return Some((wid, owner));
                 }
-                if mx >= wx && mx < wx + ww && my >= wy + 24 && my < wy + 24 + wh {
+                if mx >= wx && mx < wx + ww && my >= wy + 20 && my < wy + 20 + wh {
                     let _ = self.raise_to_top_internal(wid);
                     return Some((wid, owner));
                 }
@@ -4123,17 +4123,17 @@ mod invariant_tests {
     /// GUI_INV-1: Desktop Framebuffer & Display Initialization
     #[test]
     fn test_gui_inv_1_desktop_framebuffer_initialization() {
-        let width = 1920u16;
-        let height = 1080u16;
+        let width = 640u16;
+        let height = 360u16;
         let bpp = 32u8;
         let stride = width as usize * 4;
         let total_bytes = stride * height as usize;
         
-        assert_eq!(width, 1920);
-        assert_eq!(height, 1080);
+        assert_eq!(width, 640);
+        assert_eq!(height, 360);
         assert_eq!(bpp, 32);
-        assert_eq!(stride, 7680);
-        assert_eq!(total_bytes, 8_294_400); // ~8.29 MB framebuffer
+        assert_eq!(stride, 2560);
+        assert_eq!(total_bytes, 921_600); // ~921.6 KB framebuffer
     }
 
     /// GUI_INV-2: User-Space Process Window Creation
@@ -4142,16 +4142,16 @@ mod invariant_tests {
         let mut wm = MockDesktopWindowManager::new();
         let pid = 10u64;
         let surf_id = 1u64;
-        let win_id = wm.create_window(pid, surf_id, 80, 80, 320, 180).expect("Window create");
+        let win_id = wm.create_window(pid, surf_id, 30, 35, 220, 110).expect("Window create");
         
         assert_eq!(win_id, 1);
         assert_eq!(wm.windows.len(), 1);
         assert_eq!(wm.windows[0].owner_pid, 10);
         assert_eq!(wm.windows[0].surface_id, 1);
-        assert_eq!(wm.windows[0].x, 80);
-        assert_eq!(wm.windows[0].y, 80);
-        assert_eq!(wm.windows[0].width, 320);
-        assert_eq!(wm.windows[0].height, 180);
+        assert_eq!(wm.windows[0].x, 30);
+        assert_eq!(wm.windows[0].y, 35);
+        assert_eq!(wm.windows[0].width, 220);
+        assert_eq!(wm.windows[0].height, 110);
         assert_eq!(wm.windows[0].visible, true);
         assert_eq!(wm.windows[0].focused, true);
         assert_eq!(wm.focused_window, Some(1));
@@ -4161,8 +4161,8 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_3_surface_wm_display_pipeline() {
         let pid = 10u64;
-        let width = 320u32;
-        let height = 180u32;
+        let width = 220u32;
+        let height = 110u32;
         let stride = width * 4;
         let pages = ((stride as usize * height as usize + 4095) / 4096) as u64;
         
@@ -4180,11 +4180,11 @@ mod invariant_tests {
             pages,
         };
         assert_eq!(surf.vma_addr, 0x70000000);
-        assert_eq!(surf.width, 320);
-        assert_eq!(surf.height, 180);
+        assert_eq!(surf.width, 220);
+        assert_eq!(surf.height, 110);
 
         let mut wm = MockDesktopWindowManager::new();
-        let wid = wm.create_window(pid, 1, 100, 100, width, height).unwrap();
+        let wid = wm.create_window(pid, 1, 30, 35, width, height).unwrap();
         assert_eq!(wid, 1);
     }
 
@@ -4193,17 +4193,17 @@ mod invariant_tests {
     fn test_gui_inv_4_window_movement_via_mouse() {
         let mut wm = MockDesktopWindowManager::new();
         let pid = 10u64;
-        let wid = wm.create_window(pid, 1, 100, 100, 300, 200).unwrap();
+        let wid = wm.create_window(pid, 1, 30, 35, 220, 110).unwrap();
 
-        // 1. Mouse Down on Titlebar at (120, 110)
-        let hit = wm.handle_mouse_down(120, 110);
+        // 1. Mouse Down on Titlebar at (40, 45)
+        let hit = wm.handle_mouse_down(40, 45);
         assert_eq!(hit, Some((wid, pid)));
-        assert_eq!(wm.dragging_window, Some((wid, 20, 10)));
+        assert_eq!(wm.dragging_window, Some((wid, 10, 10)));
 
-        // 2. Mouse Move to (220, 210) -> window moves to (200, 200)
-        wm.handle_mouse_move(220, 210);
-        assert_eq!(wm.windows[0].x, 200);
-        assert_eq!(wm.windows[0].y, 200);
+        // 2. Mouse Move to (140, 145) -> window moves to (130, 135)
+        wm.handle_mouse_move(140, 145);
+        assert_eq!(wm.windows[0].x, 130);
+        assert_eq!(wm.windows[0].y, 135);
 
         // 3. Mouse Up
         let up_hit = wm.handle_mouse_up();
@@ -4215,15 +4215,15 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_5_focus_switching() {
         let mut wm = MockDesktopWindowManager::new();
-        let wid1 = wm.create_window(10, 1, 50, 50, 200, 150).unwrap();
-        let wid2 = wm.create_window(11, 2, 100, 100, 200, 150).unwrap();
+        let wid1 = wm.create_window(10, 1, 30, 35, 200, 100).unwrap();
+        let wid2 = wm.create_window(11, 2, 80, 80, 200, 100).unwrap();
 
         assert_eq!(wm.focused_window, Some(wid2));
         assert_eq!(wm.windows[0].focused, false); // wid1
         assert_eq!(wm.windows[1].focused, true);  // wid2
 
-        // Click on Window 1's titlebar at (60, 60)
-        let hit = wm.handle_mouse_down(60, 60);
+        // Click on Window 1's titlebar at (40, 45)
+        let hit = wm.handle_mouse_down(40, 45);
         assert_eq!(hit, Some((wid1, 10)));
         assert_eq!(wm.focused_window, Some(wid1));
         
@@ -4238,8 +4238,8 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_6_keyboard_delivered_only_to_focused_window() {
         let mut wm = MockDesktopWindowManager::new();
-        let wid1 = wm.create_window(10, 1, 50, 50, 200, 150).unwrap();
-        let wid2 = wm.create_window(11, 2, 100, 100, 200, 150).unwrap();
+        let wid1 = wm.create_window(10, 1, 30, 35, 200, 100).unwrap();
+        let wid2 = wm.create_window(11, 2, 80, 80, 200, 100).unwrap();
 
         // Focused is Window 2 (PID 11)
         let (target_win, target_pid) = wm.dispatch_keyboard_input(0x1E).expect("Key route");
@@ -4257,8 +4257,8 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_7_minimize_and_restore() {
         let mut wm = MockDesktopWindowManager::new();
-        let wid1 = wm.create_window(10, 1, 50, 50, 200, 150).unwrap();
-        let wid2 = wm.create_window(11, 2, 100, 100, 200, 150).unwrap();
+        let wid1 = wm.create_window(10, 1, 30, 35, 200, 100).unwrap();
+        let wid2 = wm.create_window(11, 2, 80, 80, 200, 100).unwrap();
 
         // Minimize Window 2
         assert!(wm.minimize_window(11, wid2).is_ok());
@@ -4280,8 +4280,8 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_8_window_destruction_cleans_resources() {
         let mut wm = MockDesktopWindowManager::new();
-        let wid1 = wm.create_window(10, 1, 50, 50, 200, 150).unwrap();
-        let wid2 = wm.create_window(11, 2, 100, 100, 200, 150).unwrap();
+        let wid1 = wm.create_window(10, 1, 30, 35, 200, 100).unwrap();
+        let wid2 = wm.create_window(11, 2, 80, 80, 200, 100).unwrap();
 
         assert_eq!(wm.windows.len(), 2);
         // Destroy Window 2
@@ -4295,8 +4295,8 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_9_two_independent_processes_own_windows_and_surfaces() {
         let mut wm = MockDesktopWindowManager::new();
-        let win_a = wm.create_window(100, 1, 50, 50, 300, 200).unwrap();
-        let win_b = wm.create_window(200, 2, 400, 50, 300, 200).unwrap();
+        let win_a = wm.create_window(100, 1, 30, 35, 220, 110).unwrap();
+        let win_b = wm.create_window(200, 2, 300, 45, 260, 140).unwrap();
 
         assert_eq!(wm.windows[0].owner_pid, 100);
         assert_eq!(wm.windows[0].surface_id, 1);
@@ -4309,8 +4309,8 @@ mod invariant_tests {
     #[test]
     fn test_gui_inv_10_cross_process_window_surface_manipulation_denied() {
         let mut wm = MockDesktopWindowManager::new();
-        let _win_a = wm.create_window(100, 1, 50, 50, 300, 200).unwrap();
-        let win_b = wm.create_window(200, 2, 400, 50, 300, 200).unwrap();
+        let _win_a = wm.create_window(100, 1, 30, 35, 220, 110).unwrap();
+        let win_b = wm.create_window(200, 2, 300, 45, 260, 140).unwrap();
 
         // Process 100 attempts to destroy, move, or minimize Process 200's window
         assert_eq!(wm.destroy_window(100, win_b), Err(MockWmError::PermissionDenied));

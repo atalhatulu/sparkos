@@ -77,12 +77,15 @@ async fn clock_task() {
         core::fmt::write(&mut time_str, format_args!(" UP: {:04}s ", seconds)).unwrap();
         
         if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
-            let mut px = 1920 - 95;
-            for c in time_str.chars() {
-                crate::gui::draw_char(px, 1080 - 20, c, 0x00000000, 0x00C0C0C0);
-                px += 8;
+            let (sw, sh) = unsafe { (crate::gui::VESA.width, crate::gui::VESA.height) };
+            if sw >= 100 && sh >= 30 {
+                let mut px = sw.saturating_sub(95);
+                for c in time_str.chars() {
+                    crate::gui::draw_char(px, sh.saturating_sub(18), c, 0x00E2E8F0, 0x000F172A);
+                    px += 8;
+                }
+                crate::gui::flush_rect(sw.saturating_sub(100), sh.saturating_sub(24), 96, 24);
             }
-            crate::gui::flush_rect(1920 - 100, 1080 - 30, 96, 26);
         } else {
             let mut w = crate::vga_buffer::WRITE_LOCK.lock();
             w.write_at(0, 69, &time_str, crate::vga_buffer::Color::Yellow, crate::vga_buffer::Color::Blue);

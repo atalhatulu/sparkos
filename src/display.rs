@@ -20,8 +20,8 @@ use crate::gui;
 use crate::vga_buffer::GUI_MODE;
 
 /// Varsayılan (boot) çözünürlük — gui.rs'in `init`'te kurduğu değerler.
-pub const DEFAULT_WIDTH: u16 = 1920;
-pub const DEFAULT_HEIGHT: u16 = 1080;
+pub const DEFAULT_WIDTH: u16 = 640;
+pub const DEFAULT_HEIGHT: u16 = 360;
 pub const DEFAULT_BPP: u8 = 32;
 
 /// VBE (Bochs) index/data port çifti.

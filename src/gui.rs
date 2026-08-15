@@ -7,8 +7,8 @@ pub struct Vesa {
 }
 
 pub static mut VESA: Vesa = Vesa {
-    width: 1920,
-    height: 1080,
+    width: 640,
+    height: 360,
     framebuffer: core::ptr::null_mut(),
 };
 
@@ -53,17 +53,20 @@ pub fn init(backbuffer_ptr: Option<u64>) {
     let mut data_port: Port<u16> = Port::new(0x01CF);
     
     unsafe {
+        VESA.width = 640;
+        VESA.height = 360;
+
         // VBE'yi devre dışı bırak
         index_port.write(4);
         data_port.write(0);
         
-        // Genişlik = 1280
+        // Genişlik = 640
         index_port.write(1);
-        data_port.write(1920);
+        data_port.write(640);
         
-        // Yükseklik = 720
+        // Yükseklik = 360
         index_port.write(2);
-        data_port.write(1080);
+        data_port.write(360);
         
         // Renk Derinliği = 32 BPP (Bits Per Pixel)
         index_port.write(3);
@@ -78,6 +81,9 @@ pub fn init(backbuffer_ptr: Option<u64>) {
         
         if let Some(ptr) = backbuffer_ptr {
             BACKBUFFER = ptr as *mut u32;
+        } else if BACKBUFFER.is_null() {
+            let layout = alloc::alloc::Layout::from_size_align(640 * 360 * 4, 64).unwrap();
+            BACKBUFFER = alloc::alloc::alloc_zeroed(layout) as *mut u32;
         }
     }
 }
@@ -85,7 +91,8 @@ pub fn init(backbuffer_ptr: Option<u64>) {
 pub fn swap_buffers() {
     unsafe {
         if BACKBUFFER.is_null() || VESA.framebuffer.is_null() { return; }
-        core::ptr::copy_nonoverlapping(BACKBUFFER, VESA.framebuffer, 1920 * 1080);
+        let total_pixels = (VESA.width as usize) * (VESA.height as usize);
+        core::ptr::copy_nonoverlapping(BACKBUFFER, VESA.framebuffer, total_pixels);
     }
 }
 
