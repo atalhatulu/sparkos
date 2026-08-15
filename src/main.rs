@@ -57,6 +57,7 @@ pub mod input;
 pub mod pkg;
 pub mod service;
 pub mod auth;
+pub mod app_registry;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

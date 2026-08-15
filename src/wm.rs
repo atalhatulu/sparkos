@@ -1,10 +1,16 @@
-//! SparkOS — Window Manager & Compositor Subsystem (Faz 12)
+//! SparkOS — Window Manager, Compositor, Dock & Launcher Subsystem (Desktop V1.1 / Steps 1-6)
 //!
 //! Provides Ring-3 / Microkernel Window Management, Z-Order Back-to-Front Compositing,
-//! Hit-Testing, Focus Elevation, Isolated Input Routing, and Teardown Cleanup.
+//! Window Chrome (Titlebar & Buttons), Window Geometry & Resize Hardening, Bottom Dock,
+//! Application Launcher, Application Registry, and Icon Rendering.
 
 use alloc::vec::Vec;
 use spin::Mutex;
+
+pub const WORK_AREA_TOP: i32 = 20;
+pub const DOCK_HEIGHT: u16 = 24;
+pub const MIN_WINDOW_WIDTH: u32 = 120;
+pub const MIN_WINDOW_HEIGHT: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WmError {
@@ -21,6 +27,16 @@ pub enum WindowState {
     Minimized,
     Maximized,
     Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    None,
+    Left,
+    Right,
+    Bottom,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +60,8 @@ pub struct WindowManager {
     pub next_window_id: u64,
     pub focused_window: Option<u64>,
     pub dragging_window: Option<(u64, i32, i32)>,
+    pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
+    pub launcher_open: bool,
 }
 
 impl WindowManager {
@@ -53,6 +71,8 @@ impl WindowManager {
             next_window_id: 1,
             focused_window: None,
             dragging_window: None,
+            resizing_window: None,
+            launcher_open: false,
         }
     }
 
@@ -81,9 +101,10 @@ impl WindowManager {
             }
         }
 
-        // Clamp coordinates to prevent integer overflow
-        let clamped_x = x.clamp(-1000, max_w as i32 + 1000);
-        let clamped_y = y.clamp(0, max_h as i32 + 1000);
+        let clamped_w = width.clamp(MIN_WINDOW_WIDTH, max_w);
+        let clamped_h = height.clamp(MIN_WINDOW_HEIGHT, max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32));
+        let clamped_x = x.clamp(0, (max_w.saturating_sub(clamped_w)) as i32);
+        let clamped_y = y.clamp(WORK_AREA_TOP, (max_h.saturating_sub(clamped_h + DOCK_HEIGHT as u32 + 20)) as i32);
 
         let window_id = self.next_window_id;
         self.next_window_id += 1;
@@ -99,8 +120,8 @@ impl WindowManager {
             surface_id,
             x: clamped_x,
             y: clamped_y,
-            width,
-            height,
+            width: clamped_w,
+            height: clamped_h,
             visible: true,
             focused: true,
             state: WindowState::Normal,
@@ -112,7 +133,7 @@ impl WindowManager {
         self.focused_window = Some(window_id);
 
         crate::serial_println!("[WM] Process {} created Window {} (surface {}, [{}, {}, {}, {}], FOCUSED)",
-            owner_pid, window_id, surface_id, clamped_x, clamped_y, width, height);
+            owner_pid, window_id, surface_id, clamped_x, clamped_y, clamped_w, clamped_h);
 
         Ok(window_id)
     }
@@ -161,6 +182,8 @@ impl WindowManager {
     pub fn toggle_maximize_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
         let max_w = unsafe { crate::gui::VESA.width as u32 };
         let max_h = unsafe { crate::gui::VESA.height as u32 };
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32 + 20);
+
         let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
 
@@ -171,19 +194,24 @@ impl WindowManager {
         if win.state == WindowState::Maximized {
             // Restore previous geometry
             if let Some((px, py, pw, ph)) = win.saved_geom.take() {
-                win.x = px;
-                win.y = py;
-                win.width = pw;
-                win.height = ph;
+                win.x = px.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
+                win.y = py.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + DOCK_HEIGHT as u32 + 20)) as i32);
+                win.width = pw.clamp(MIN_WINDOW_WIDTH, max_w);
+                win.height = ph.clamp(MIN_WINDOW_HEIGHT, work_h);
+            } else {
+                win.x = 30;
+                win.y = 35;
+                win.width = 220;
+                win.height = 110;
             }
             win.state = WindowState::Normal;
         } else {
-            // Save current geometry and maximize to full desktop workspace (below 20px status bar)
+            // Save current geometry and maximize to full desktop workspace (between top bar and dock)
             win.saved_geom = Some((win.x, win.y, win.width, win.height));
             win.x = 0;
-            win.y = 20;
+            win.y = WORK_AREA_TOP;
             win.width = max_w;
-            win.height = max_h.saturating_sub(20);
+            win.height = work_h;
             win.state = WindowState::Maximized;
         }
 
@@ -217,6 +245,9 @@ impl WindowManager {
 
     /// Moves a window to new coordinates with strict ownership verification.
     pub fn move_window(&mut self, caller_pid: u64, window_id: u64, new_x: i32, new_y: i32) -> Result<(), WmError> {
+        let max_w = unsafe { crate::gui::VESA.width as i32 };
+        let max_h = unsafe { crate::gui::VESA.height as i32 };
+
         let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
 
@@ -224,8 +255,8 @@ impl WindowManager {
             return Err(WmError::PermissionDenied);
         }
 
-        win.x = new_x;
-        win.y = new_y;
+        win.x = new_x.clamp(-100, max_w - 50);
+        win.y = new_y.clamp(WORK_AREA_TOP, max_h - (DOCK_HEIGHT as i32 + 30));
         Ok(())
     }
 
@@ -265,7 +296,7 @@ impl WindowManager {
         for win in self.windows.iter().rev() {
             if win.visible &&
                mx >= win.x && mx < win.x + (win.width as i32) &&
-               my >= win.y && my < win.y + (win.height as i32) {
+               my >= win.y && my < win.y + (win.height as i32 + 20) {
                 return Some(win.window_id);
             }
         }
@@ -289,7 +320,7 @@ impl WindowManager {
         Some((target_id, owner_pid))
     }
 
-    /// Composite all windows and surfaces to the hardware backbuffer and swap to screen
+    /// Composite all windows, surfaces, dock, launcher, and cursor to the hardware backbuffer
     pub fn composite_desktop(&self, mouse_x: i32, mouse_y: i32) {
         unsafe {
             if crate::gui::BACKBUFFER.is_null() { return; }
@@ -297,6 +328,7 @@ impl WindowManager {
 
         let screen_w = unsafe { crate::gui::VESA.width };
         let screen_h = unsafe { crate::gui::VESA.height };
+        let dock_y = screen_h.saturating_sub(DOCK_HEIGHT);
 
         // 1. Draw solid wallpaper / desktop background (Dark Slate #1E293B)
         crate::gui::draw_rect(0, 0, screen_w, screen_h, 0x001E293B);
@@ -313,9 +345,10 @@ impl WindowManager {
             }
 
             let wx = win.x.max(0).min(screen_w as i32 - 1) as u16;
-            let wy = win.y.max(20).min(screen_h as i32 - 1) as u16;
+            let wy = win.y.max(20).min(dock_y as i32 - 1) as u16;
             let ww = (win.width as u16).min(screen_w.saturating_sub(wx));
-            let wh = (win.height as u16).min(screen_h.saturating_sub(wy + 20));
+            let max_wh = dock_y.saturating_sub(wy + 20);
+            let wh = (win.height as u16).min(max_wh);
 
             if ww == 0 || wh == 0 {
                 continue;
@@ -329,14 +362,23 @@ impl WindowManager {
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
             
+            // Draw App Icon
+            let icon_type = match win.owner_pid {
+                1 => crate::app_registry::AppIcon::Terminal,
+                2 => crate::app_registry::AppIcon::Demo,
+                3 => crate::app_registry::AppIcon::Files,
+                _ => crate::app_registry::AppIcon::Generic,
+            };
+            crate::gui::draw_icon_glyph(wx + 6, wy + 6, icon_type, title_fg, title_bg);
+
             // Title text (App Name / PID)
             let app_name = match win.owner_pid {
-                1 => "Hello SparkOS",
-                2 => "Interactive Demo",
-                3 => "Terminal",
+                1 => "Terminal",
+                2 => "Demo App",
+                3 => "Files",
                 _ => "SparkOS Application",
             };
-            crate::gui::draw_string(wx + 8, wy + 6, app_name, title_fg, title_bg);
+            crate::gui::draw_string(wx + 18, wy + 6, app_name, title_fg, title_bg);
 
             // Control Buttons on Right (— □ ×)
             // Minimize Button [—]
@@ -375,7 +417,7 @@ impl WindowManager {
                     if !crate::gui::BACKBUFFER.is_null() {
                         for r in 0..copy_h {
                             let dst_row = (wy + 20 + r as u16) as usize;
-                            if dst_row >= screen_h as usize { break; }
+                            if dst_row >= dock_y as usize { break; }
                             let dst_col = wx as usize;
                             let src_offset = r * (surface.width as usize);
                             let dst_offset = dst_row * (screen_w as usize) + dst_col;
@@ -397,17 +439,172 @@ impl WindowManager {
         }
         drop(surf_reg);
 
-        // 4. Draw mouse cursor
+        // 4. Bottom Bar / Dock (y = dock_y, h = 24)
+        crate::gui::draw_rect(0, dock_y, screen_w, DOCK_HEIGHT, 0x000F172A);
+        crate::gui::draw_rect(0, dock_y, screen_w, 1, 0x00334155); // Top border
+
+        // 4a. SparkOS Launcher Button on Dock
+        let l_bg = if self.launcher_open { 0x002563EB } else { 0x001E293B };
+        crate::gui::draw_rect(4, dock_y + 2, 74, 20, l_bg);
+        crate::gui::draw_icon_glyph(8, dock_y + 8, crate::app_registry::AppIcon::Logo, 0x0038BDF8, l_bg);
+        crate::gui::draw_string(20, dock_y + 7, "SparkOS", 0x00FFFFFF, l_bg);
+
+        // 4b. Window Tabs on Dock
+        let mut tab_x = 84u16;
+        for win in self.windows.iter() {
+            let is_focused = self.focused_window == Some(win.window_id);
+            let tab_bg = if is_focused {
+                0x002563EB // Focused Blue
+            } else if win.state == WindowState::Minimized {
+                0x0009090B // Minimized dark
+            } else {
+                0x001E293B // Unfocused normal
+            };
+            let tab_fg = if is_focused { 0x00FFFFFF } else if win.state == WindowState::Minimized { 0x0064748B } else { 0x00E2E8F0 };
+
+            if tab_x + 84 <= screen_w.saturating_sub(80) {
+                crate::gui::draw_rect(tab_x, dock_y + 2, 80, 20, tab_bg);
+                let tab_icon = match win.owner_pid {
+                    1 => crate::app_registry::AppIcon::Terminal,
+                    2 => crate::app_registry::AppIcon::Demo,
+                    3 => crate::app_registry::AppIcon::Files,
+                    _ => crate::app_registry::AppIcon::Generic,
+                };
+                crate::gui::draw_icon_glyph(tab_x + 4, dock_y + 8, tab_icon, tab_fg, tab_bg);
+                let short_name = match win.owner_pid {
+                    1 => "Term",
+                    2 => "Demo",
+                    3 => "Files",
+                    _ => "App",
+                };
+                crate::gui::draw_string(tab_x + 16, dock_y + 7, short_name, tab_fg, tab_bg);
+
+                // Active dot indicator
+                if is_focused {
+                    crate::gui::draw_rect(tab_x + 36, dock_y + 19, 8, 2, 0x0060A5FA);
+                }
+                tab_x += 84;
+            }
+        }
+
+        // 4c. Clock on right side of Dock
+        let clock_x = screen_w.saturating_sub(76);
+        crate::gui::draw_rect(clock_x, dock_y + 2, 72, 20, 0x001E293B);
+
+        // 5. Application Launcher Popup (if open)
+        if self.launcher_open {
+            let px = 4u16;
+            let py = 170u16;
+            let pw = 154u16;
+            let ph = 162u16;
+
+            // Background & Border
+            crate::gui::draw_rect(px, py, pw, ph, 0x000F172A);
+            crate::gui::draw_rect(px, py, pw, 1, 0x003B82F6);
+            crate::gui::draw_rect(px, py, 1, ph, 0x003B82F6);
+            crate::gui::draw_rect(px + pw - 1, py, 1, ph, 0x003B82F6);
+            crate::gui::draw_rect(px, py + ph - 1, pw, 1, 0x003B82F6);
+
+            // Header
+            crate::gui::draw_rect(px + 2, py + 2, pw - 4, 22, 0x001E293B);
+            crate::gui::draw_string(px + 8, py + 8, "SparkOS Launcher", 0x00FFFFFF, 0x001E293B);
+
+            // Registered App Items
+            let mut item_y = py + 28;
+            for app in crate::app_registry::REGISTERED_APPS.iter() {
+                crate::gui::draw_rect(px + 4, item_y, pw - 8, 24, 0x001E293B);
+                crate::gui::draw_icon_glyph(px + 8, item_y + 8, app.icon, 0x00FFFFFF, 0x001E293B);
+                crate::gui::draw_string(px + 22, item_y + 7, app.name, 0x00E2E8F0, 0x001E293B);
+                item_y += 28;
+            }
+
+            // Close launcher button
+            crate::gui::draw_rect(px + 4, item_y, pw - 8, 20, 0x00334155);
+            crate::gui::draw_string(px + 36, item_y + 5, "Close Menu", 0x0094A3B8, 0x00334155);
+        }
+
+        // 6. Draw mouse cursor
         let cur_x = (mouse_x.max(0).min(screen_w as i32 - 1)) as u16;
         let cur_y = (mouse_y.max(0).min(screen_h as i32 - 1)) as u16;
         crate::gui::draw_cursor(cur_x, cur_y);
 
-        // 5. Swap buffers to hardware VESA Framebuffer
+        // 7. Swap buffers to hardware VESA Framebuffer
         crate::gui::swap_buffers();
     }
 
-    /// Handles mouse down: performs titlebar dragging, close/maximize/minimize buttons, or client focus
+    /// Handles mouse down: performs titlebar dragging, resize, close/maximize/minimize buttons, dock interaction, or client focus
     pub fn handle_mouse_down(&mut self, mx: i32, my: i32) -> Option<(u64, u64)> {
+        let screen_h = unsafe { crate::gui::VESA.height as i32 };
+        let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
+
+        // 1. Check Launcher Popup Click (if open)
+        if self.launcher_open {
+            let px = 4;
+            let py = 170;
+            let pw = 154;
+            let ph = 162;
+
+            if mx >= px && mx < px + pw && my >= py && my < py + ph {
+                // Item 1: Terminal
+                if my >= py + 28 && my < py + 52 {
+                    let _ = crate::app_registry::spawn_registered_app(1);
+                    self.launcher_open = false;
+                    return None;
+                }
+                // Item 2: Demo App
+                if my >= py + 56 && my < py + 80 {
+                    let _ = crate::app_registry::spawn_registered_app(2);
+                    self.launcher_open = false;
+                    return None;
+                }
+                // Item 3: Files
+                if my >= py + 84 && my < py + 108 {
+                    let _ = crate::app_registry::spawn_registered_app(3);
+                    self.launcher_open = false;
+                    return None;
+                }
+                // Close Menu button
+                if my >= py + 112 && my < py + 136 {
+                    self.launcher_open = false;
+                    return None;
+                }
+            } else if !(mx >= 4 && mx <= 80 && my >= dock_y) {
+                // Clicked outside launcher popup -> close launcher
+                self.launcher_open = false;
+            }
+        }
+
+        // 2. Check Bottom Bar / Dock Click (y >= dock_y)
+        if my >= dock_y {
+            // Launcher button click (x in 4..80)
+            if mx >= 4 && mx <= 80 {
+                self.launcher_open = !self.launcher_open;
+                return None;
+            }
+
+            // Window Tab click (x >= 84)
+            if mx >= 84 {
+                let tab_idx = ((mx - 84) / 84) as usize;
+                if tab_idx < self.windows.len() {
+                    let win = &self.windows[tab_idx];
+                    let wid = win.window_id;
+                    let owner = win.owner_pid;
+                    let is_focused = self.focused_window == Some(wid);
+
+                    if win.state == WindowState::Minimized {
+                        let _ = self.restore_window(owner, wid);
+                    } else if is_focused {
+                        let _ = self.minimize_window(owner, wid);
+                    } else {
+                        let _ = self.raise_to_top_internal(wid);
+                    }
+                    return Some((wid, owner));
+                }
+            }
+            return None;
+        }
+
+        // 3. Check Windows Click (Top-to-Bottom)
         for i in (0..self.windows.len()).rev() {
             let win = &self.windows[i];
             if !win.visible || win.state == WindowState::Minimized {
@@ -421,7 +618,41 @@ impl WindowManager {
             let wid = win.window_id;
             let owner = win.owner_pid;
 
-            // Check Titlebar click (20px high)
+            // 3a. Check Resize Borders (4px margin around window edges)
+            if win.state != WindowState::Maximized {
+                // Bottom-Right Corner (8x8)
+                if mx >= wx + ww - 8 && mx <= wx + ww + 4 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 4 {
+                    self.resizing_window = Some((wid, ResizeEdge::BottomRight, mx, my, wx, wy, win.width, win.height));
+                    let _ = self.raise_to_top_internal(wid);
+                    return Some((wid, owner));
+                }
+                // Bottom-Left Corner (8x8)
+                if mx >= wx - 4 && mx <= wx + 8 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 4 {
+                    self.resizing_window = Some((wid, ResizeEdge::BottomLeft, mx, my, wx, wy, win.width, win.height));
+                    let _ = self.raise_to_top_internal(wid);
+                    return Some((wid, owner));
+                }
+                // Right Edge
+                if mx >= wx + ww - 4 && mx <= wx + ww + 4 && my >= wy && my <= wy + 20 + wh {
+                    self.resizing_window = Some((wid, ResizeEdge::Right, mx, my, wx, wy, win.width, win.height));
+                    let _ = self.raise_to_top_internal(wid);
+                    return Some((wid, owner));
+                }
+                // Left Edge
+                if mx >= wx - 4 && mx <= wx + 4 && my >= wy && my <= wy + 20 + wh {
+                    self.resizing_window = Some((wid, ResizeEdge::Left, mx, my, wx, wy, win.width, win.height));
+                    let _ = self.raise_to_top_internal(wid);
+                    return Some((wid, owner));
+                }
+                // Bottom Edge
+                if mx >= wx && mx <= wx + ww && my >= wy + 20 + wh - 4 && my <= wy + 20 + wh + 4 {
+                    self.resizing_window = Some((wid, ResizeEdge::Bottom, mx, my, wx, wy, win.width, win.height));
+                    let _ = self.raise_to_top_internal(wid);
+                    return Some((wid, owner));
+                }
+            }
+
+            // 3b. Check Titlebar click (20px high)
             if mx >= wx && mx < wx + ww && my >= wy && my < wy + 20 {
                 // 1. Close button [×] (Rightmost: wx + ww - 20 .. wx + ww - 4)
                 if mx >= wx + ww - 20 && mx <= wx + ww - 4 && my >= wy + 2 && my <= wy + 18 {
@@ -445,7 +676,7 @@ impl WindowManager {
                 return Some((wid, owner));
             }
 
-            // Check Client area click -> focus only (Surface content click does NOT start dragging)
+            // 3c. Check Client area click -> focus only (Surface content click does NOT start dragging)
             if mx >= wx && mx < wx + ww && my >= wy + 20 && my < wy + 20 + wh {
                 let _ = self.raise_to_top_internal(wid);
                 return Some((wid, owner));
@@ -454,19 +685,68 @@ impl WindowManager {
         None
     }
 
-    /// Handles mouse up: stops dragging
+    /// Handles mouse up: stops dragging and resizing
     pub fn handle_mouse_up(&mut self) -> Option<(u64, u64)> {
         self.dragging_window = None;
+        self.resizing_window = None;
         let target_id = self.focused_window?;
         let owner_pid = self.windows.iter().find(|w| w.window_id == target_id).map(|w| w.owner_pid)?;
         Some((target_id, owner_pid))
     }
 
-    /// Handles mouse move: updates dragging window coordinates
+    /// Handles mouse move: updates dragging or resizing window coordinates with strict bounds clamping
     pub fn handle_mouse_move(&mut self, mx: i32, my: i32) {
+        let max_w = unsafe { crate::gui::VESA.width as i32 };
+        let max_h = unsafe { crate::gui::VESA.height as i32 };
+        let dock_y = max_h.saturating_sub(DOCK_HEIGHT as i32);
+
+        // 1. Handle Window Resizing
+        if let Some((wid, edge, start_mx, start_my, orig_x, orig_y, orig_w, orig_h)) = self.resizing_window {
+            let dx = mx - start_mx;
+            let dy = my - start_my;
+
+            if let Some(win) = self.windows.iter_mut().find(|w| w.window_id == wid) {
+                let max_avail_h = (dock_y - (orig_y + 20)).max(MIN_WINDOW_HEIGHT as i32) as u32;
+
+                match edge {
+                    ResizeEdge::Right => {
+                        let new_w = ((orig_w as i32) + dx).clamp(MIN_WINDOW_WIDTH as i32, max_w - orig_x) as u32;
+                        win.width = new_w;
+                    }
+                    ResizeEdge::Bottom => {
+                        let new_h = ((orig_h as i32) + dy).clamp(MIN_WINDOW_HEIGHT as i32, max_avail_h as i32) as u32;
+                        win.height = new_h;
+                    }
+                    ResizeEdge::BottomRight => {
+                        let new_w = ((orig_w as i32) + dx).clamp(MIN_WINDOW_WIDTH as i32, max_w - orig_x) as u32;
+                        let new_h = ((orig_h as i32) + dy).clamp(MIN_WINDOW_HEIGHT as i32, max_avail_h as i32) as u32;
+                        win.width = new_w;
+                        win.height = new_h;
+                    }
+                    ResizeEdge::Left => {
+                        let max_left = orig_x + (orig_w as i32) - (MIN_WINDOW_WIDTH as i32);
+                        let new_x = (orig_x + dx).clamp(0, max_left);
+                        let new_w = ((orig_x + (orig_w as i32)) - new_x) as u32;
+                        win.x = new_x;
+                        win.width = new_w;
+                    }
+                    ResizeEdge::BottomLeft => {
+                        let max_left = orig_x + (orig_w as i32) - (MIN_WINDOW_WIDTH as i32);
+                        let new_x = (orig_x + dx).clamp(0, max_left);
+                        let new_w = ((orig_x + (orig_w as i32)) - new_x) as u32;
+                        let new_h = ((orig_h as i32) + dy).clamp(MIN_WINDOW_HEIGHT as i32, max_avail_h as i32) as u32;
+                        win.x = new_x;
+                        win.width = new_w;
+                        win.height = new_h;
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // 2. Handle Window Dragging
         if let Some((wid, ox, oy)) = self.dragging_window {
-            let max_w = unsafe { crate::gui::VESA.width as i32 };
-            let max_h = unsafe { crate::gui::VESA.height as i32 };
             if let Some(win) = self.windows.iter_mut().find(|w| w.window_id == wid) {
                 // If dragged while maximized, restore normal state and continue dragging smoothly
                 if win.state == WindowState::Maximized {
@@ -476,8 +756,8 @@ impl WindowManager {
                     }
                     win.state = WindowState::Normal;
                 }
-                win.x = (mx - ox).max(-100).min(max_w.saturating_sub(50));
-                win.y = (my - oy).max(20).min(max_h.saturating_sub(30));
+                win.x = (mx - ox).clamp(-100, max_w.saturating_sub(50));
+                win.y = (my - oy).clamp(WORK_AREA_TOP, dock_y.saturating_sub(30));
             }
         }
     }

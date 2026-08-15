@@ -117,6 +117,14 @@ pub fn flush_rect(x: u16, y: u16, w: u16, h: u16) {
 }
 
 
+pub fn draw_pixel(x: u16, y: u16, color: u32) {
+    unsafe {
+        if BACKBUFFER.is_null() || x >= VESA.width || y >= VESA.height { return; }
+        let offset = (y as usize) * (VESA.width as usize) + (x as usize);
+        *BACKBUFFER.add(offset) = color;
+    }
+}
+
 pub fn draw_rect(x: u16, y: u16, w: u16, h: u16, color: u32) {
     unsafe {
         if BACKBUFFER.is_null() { return; }
@@ -267,6 +275,88 @@ pub fn draw_icon(x: u16, y: u16, text: &str) {
             draw_char(px as u16, y + 54, c, 0x00FFFFFF, 0x001A2421); // Desktop arkaplanı ile eşleşmeli
         }
         px += 8;
+    }
+}
+
+pub fn draw_bitmap_8x8(x: u16, y: u16, bitmap: &[u8; 8], fg: u32, bg: u32) {
+    for row in 0..8 {
+        let b = bitmap[row];
+        for col in 0..8 {
+            let px = x + col as u16;
+            let py = y + row as u16;
+            let col_val = if (b & (1 << (7 - col))) != 0 { fg } else { bg };
+            draw_pixel(px, py, col_val);
+        }
+    }
+}
+
+pub fn draw_icon_glyph(x: u16, y: u16, icon: crate::app_registry::AppIcon, fg: u32, bg: u32) {
+    match icon {
+        crate::app_registry::AppIcon::Logo => {
+            let bitmap: [u8; 8] = [
+                0b00111100,
+                0b01111110,
+                0b11011011,
+                0b11111111,
+                0b11111111,
+                0b11011011,
+                0b01111110,
+                0b00111100,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0038BDF8 /* Sky Blue */, bg);
+        }
+        crate::app_registry::AppIcon::Terminal => {
+            let bitmap: [u8; 8] = [
+                0b00000000,
+                0b10000000,
+                0b01000000,
+                0b00100000,
+                0b01000000,
+                0b10000000,
+                0b00001111,
+                0b00000000,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0034D399 /* Emerald Green */, bg);
+        }
+        crate::app_registry::AppIcon::Demo => {
+            let bitmap: [u8; 8] = [
+                0b00111100,
+                0b00011000,
+                0b00011000,
+                0b00111100,
+                0b01111110,
+                0b11100111,
+                0b11111111,
+                0b01111110,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x00F59E0B /* Amber */, bg);
+        }
+        crate::app_registry::AppIcon::Files => {
+            let bitmap: [u8; 8] = [
+                0b01110000,
+                0b11111110,
+                0b10000001,
+                0b11111111,
+                0b11111111,
+                0b11111111,
+                0b11111111,
+                0b01111110,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0060A5FA /* Blue */, bg);
+        }
+        _ => {
+            let bitmap: [u8; 8] = [
+                0b11111111,
+                0b10000001,
+                0b10000001,
+                0b10000001,
+                0b10000001,
+                0b10000001,
+                0b10000001,
+                0b11111111,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, fg, bg);
+        }
     }
 }
 
