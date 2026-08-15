@@ -177,6 +177,23 @@ pub async fn mouse_task() {
                         };
                         crate::input::deliver_event_to_pid(owner_pid, ev);
                     }
+                } else {
+                    drop(wm);
+                    if let Some(action) = crate::desktop::DESKTOP_ENV.lock().handle_mouse_click(cx, cy, crate::interrupts::get_tick()) {
+                        match action {
+                            crate::desktop::DesktopIconAction::OpenHome | crate::desktop::DesktopIconAction::OpenComputer => {
+                                let _ = crate::files_app::spawn_files_app("files.app");
+                            }
+                            crate::desktop::DesktopIconAction::OpenApplications => {
+                                let _ = crate::settings_app::spawn_settings_app("settings.app");
+                            }
+                            crate::desktop::DesktopIconAction::OpenTrash => {
+                                let _ = crate::files_app::spawn_files_app("trash.app");
+                            }
+                        }
+                    } else if cy < 24 && cx > 1000 {
+                        crate::network_manager::NETWORK_MANAGER.lock().toggle_popup();
+                    }
                 }
             } else if !click && last_click {
                 let mut wm = crate::wm::WM.lock();

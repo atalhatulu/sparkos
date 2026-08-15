@@ -2726,12 +2726,12 @@ pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
     Ok(pid)
 }
 
-/// Spawns the live persistent Ring-3 GUI runtime application for Desktop V1 validation.
+/// Spawns the live desktop applications (terminal, files) for interactive GUI usage.
 pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
-    let pid_live = spawn_live_demo_app("live_demo_app")?;
-    enter_service(pid_live);
+    let pid_term = crate::terminal_app::spawn_terminal_app("terminal.app")?;
+    let pid_files = crate::files_app::spawn_files_app("files.app")?;
 
-    Ok((pid_live, 0, 0))
+    Ok((pid_term, pid_files, 0))
 }
 
 
