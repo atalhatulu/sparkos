@@ -59,6 +59,8 @@ pub mod service;
 pub mod auth;
 pub mod app_registry;
 pub mod cursor;
+pub mod shell_service;
+pub mod terminal_app;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

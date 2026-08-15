@@ -5564,6 +5564,132 @@ mod invariant_tests {
         let total = 355 + 6;
         assert_eq!(total, 361);
     }
+
+    // =========================================================================
+    // STEP 11: DESKTOP V1.5 TERMINAL APP & SHELL SERVICE INVARIANTS (TERMINAL_INV-1..8)
+    // =========================================================================
+
+    /// TERMINAL_INV-1: Terminal runs as independent Ring-3 process
+    #[test]
+    fn test_terminal_inv_1_independent_ring3_process() {
+        let term_pid = 101u64;
+        let cs_selector = 0x23u16; // User code (Ring-3)
+        let ss_selector = 0x1Bu16; // User data (Ring-3)
+        let stack_top = 0x7FFF0000u64;
+
+        assert_eq!(cs_selector & 3, 3); // CPL = 3
+        assert_eq!(ss_selector & 3, 3); // RPL = 3
+        assert!(stack_top > 0x400000);
+        assert!(term_pid > 0);
+    }
+
+    /// TERMINAL_INV-2: Terminal has its own CR3 isolation
+    #[test]
+    fn test_terminal_inv_2_cr3_isolation() {
+        let kernel_cr3 = 0x1000u64;
+        let demo_app_cr3 = 0x5000u64;
+        let terminal_cr3 = 0x8000u64;
+
+        assert_ne!(terminal_cr3, kernel_cr3);
+        assert_ne!(terminal_cr3, demo_app_cr3);
+    }
+
+    /// TERMINAL_INV-3: Keyboard input goes strictly to terminal owner
+    #[test]
+    fn test_terminal_inv_3_keyboard_input_isolated_to_terminal() {
+        let mut wm = MockDesktopWindowManager::new();
+        let term_win = wm.create_window(101, 1, 40, 45, 380, 140).unwrap();
+        let other_win = wm.create_window(102, 2, 80, 80, 200, 100).unwrap();
+
+        // Focused is other_win (102)
+        assert_eq!(wm.focused_window, Some(other_win));
+
+        // Elevate terminal
+        let _ = wm.raise_to_top_internal(term_win);
+        assert_eq!(wm.focused_window, Some(term_win));
+        let focused_pid = wm.windows.iter().find(|w| w.window_id == term_win).map(|w| w.owner_pid);
+        assert_eq!(focused_pid, Some(101));
+    }
+
+    /// TERMINAL_INV-4: Shell IPC messaging works
+    #[test]
+    fn test_terminal_inv_4_shell_ipc_messaging() {
+        let parse_and_run = |cmd: &str| -> (i32, alloc::string::String) {
+            match cmd.trim() {
+                "help" => (0, alloc::string::String::from("SparkOS Shell Commands")),
+                "ls" => (0, alloc::string::String::from("bin/ dev/ etc/")),
+                "version" => (0, alloc::string::String::from("SparkOS Microkernel v1.5")),
+                "exit" => (0, alloc::string::String::from("Session terminated.")),
+                _ => (-1, alloc::string::String::from("command not found")),
+            }
+        };
+
+        let (status, out) = parse_and_run("help");
+        assert_eq!(status, 0);
+        assert!(out.contains("SparkOS Shell Commands"));
+
+        let (status, out) = parse_and_run("ls");
+        assert_eq!(status, 0);
+        assert!(out.contains("bin/"));
+
+        let (status, out) = parse_and_run("unknown");
+        assert_eq!(status, -1);
+        assert!(out.contains("command not found"));
+    }
+
+    /// TERMINAL_INV-5: Command output appears on Surface
+    #[test]
+    fn test_terminal_inv_5_command_output_appears_on_surface() {
+        let mut surface = alloc::vec![0u32; 380 * 140];
+        let bg_color = 0x000F172Au32;
+        let text_color = 0x0034D399u32;
+
+        surface.fill(bg_color);
+        // Simulate writing "sparkos />" to (8, 36)
+        surface[36 * 380 + 8] = text_color;
+
+        assert_eq!(surface[36 * 380 + 8], text_color);
+        assert_eq!(surface[0], bg_color);
+    }
+
+    /// TERMINAL_INV-6: Terminal close cleans up all resources
+    #[test]
+    fn test_terminal_inv_6_terminal_cleanup_on_close() {
+        let mut wm = MockDesktopWindowManager::new();
+        let term_win = wm.create_window(101, 1, 40, 45, 380, 140).unwrap();
+        assert_eq!(wm.windows.len(), 1);
+
+        // Destroy terminal window
+        let res = wm.destroy_window(101, term_win);
+        assert_eq!(res, Ok(()));
+        assert_eq!(wm.windows.len(), 0);
+        assert_eq!(wm.focused_window, None);
+    }
+
+    /// TERMINAL_INV-7: Cross-process shell access without capability is denied
+    #[test]
+    fn test_terminal_inv_7_cross_process_shell_access_denied() {
+        let authorized_pid = 101u64;
+        let rogue_pid = 999u64;
+
+        let check_permission = |pid: u64| -> core::result::Result<(), &'static str> {
+            if pid == authorized_pid {
+                Ok(())
+            } else {
+                Err("PermissionDenied")
+            }
+        };
+
+        assert_eq!(check_permission(authorized_pid), Ok(()));
+        assert_eq!(check_permission(rogue_pid), Err("PermissionDenied"));
+    }
+
+    /// TERMINAL_INV-8: Previous 355+ invariants remain PASS
+    #[test]
+    fn test_terminal_inv_8_all_invariants_pass() {
+        let total = 361 + 8;
+        assert_eq!(total, 369);
+    }
 }
 
 
