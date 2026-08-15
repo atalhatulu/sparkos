@@ -35,6 +35,7 @@ pub struct Window {
     pub visible: bool,
     pub focused: bool,
     pub state: WindowState,
+    pub saved_geom: Option<(i32, i32, u32, u32)>,
 }
 
 pub struct WindowManager {
@@ -103,6 +104,7 @@ impl WindowManager {
             visible: true,
             focused: true,
             state: WindowState::Normal,
+            saved_geom: None,
         };
 
         // Appended at the end (top-most in Z-order)
@@ -152,6 +154,39 @@ impl WindowManager {
             win.visible = true;
             win.state = WindowState::Normal;
         }
+        self.raise_to_top_internal(window_id)
+    }
+
+    /// Toggles maximize state of a window, preserving previous geometry. Enforces caller ownership.
+    pub fn toggle_maximize_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
+        let max_w = unsafe { crate::gui::VESA.width as u32 };
+        let max_h = unsafe { crate::gui::VESA.height as u32 };
+        let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
+            .ok_or(WmError::NotFound)?;
+
+        if win.owner_pid != caller_pid {
+            return Err(WmError::PermissionDenied);
+        }
+
+        if win.state == WindowState::Maximized {
+            // Restore previous geometry
+            if let Some((px, py, pw, ph)) = win.saved_geom.take() {
+                win.x = px;
+                win.y = py;
+                win.width = pw;
+                win.height = ph;
+            }
+            win.state = WindowState::Normal;
+        } else {
+            // Save current geometry and maximize to full desktop workspace (below 20px status bar)
+            win.saved_geom = Some((win.x, win.y, win.width, win.height));
+            win.x = 0;
+            win.y = 20;
+            win.width = max_w;
+            win.height = max_h.saturating_sub(20);
+            win.state = WindowState::Maximized;
+        }
+
         self.raise_to_top_internal(window_id)
     }
 
@@ -268,7 +303,7 @@ impl WindowManager {
 
         // 2. Top menu / status bar (Navy #0F172A)
         crate::gui::draw_rect(0, 0, screen_w, 20, 0x000F172A);
-        crate::gui::draw_string(8, 6, "SparkOS Desktop v1.0 (640x360) | Isolated CSpace", 0x00E2E8F0, 0x000F172A);
+        crate::gui::draw_string(8, 6, "SparkOS Desktop v1.1 | Isolated CSpace", 0x00E2E8F0, 0x000F172A);
 
         // 3. Composite windows Back-to-Front
         let surf_reg = crate::surface::SURFACE_REGISTRY.lock();
@@ -287,45 +322,43 @@ impl WindowManager {
             }
 
             let is_focused = self.focused_window == Some(win.window_id);
-            let title_bg = if is_focused { 0x002563EB /* Blue */ } else { 0x00475569 /* Slate Gray */ };
+            let title_bg = if is_focused { 0x001D4ED8 /* Focused Vibrant Navy */ } else { 0x00334155 /* Unfocused Slate */ };
+            let title_fg = if is_focused { 0x00FFFFFF /* Bright White */ } else { 0x0094A3B8 /* Muted Silver */ };
+            let border_col = if is_focused { 0x003B82F6 /* Electric Blue Border */ } else { 0x00475569 /* Dark Border */ };
 
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
             
-            // Title text (Window <id> - PID <pid>)
-            let mut title_buf = [0u8; 32];
-            let title_str = {
-                use core::fmt::Write;
-                struct BufWriter<'a> { buf: &'a mut [u8], pos: usize }
-                impl<'a> Write for BufWriter<'a> {
-                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                        for b in s.bytes() {
-                            if self.pos < self.buf.len() {
-                                self.buf[self.pos] = b;
-                                self.pos += 1;
-                            }
-                        }
-                        Ok(())
-                    }
-                }
-                let mut bw = BufWriter { buf: &mut title_buf, pos: 0 };
-                let _ = write!(bw, "Win {} (PID {})", win.window_id, win.owner_pid);
-                core::str::from_utf8(&bw.buf[..bw.pos]).unwrap_or("Win")
+            // Title text (App Name / PID)
+            let app_name = match win.owner_pid {
+                1 => "Hello SparkOS",
+                2 => "Interactive Demo",
+                3 => "Terminal",
+                _ => "SparkOS Application",
             };
-            crate::gui::draw_string(wx + 6, wy + 6, title_str, 0x00FFFFFF, title_bg);
+            crate::gui::draw_string(wx + 8, wy + 6, app_name, title_fg, title_bg);
 
-            // Minimize Button [-]
-            if ww > 40 {
-                let min_x = wx + ww - 36;
-                crate::gui::draw_rect(min_x, wy + 3, 14, 14, 0x00334155);
-                crate::gui::draw_char(min_x + 4, wy + 6, '-', 0x00FFFFFF, 0x00334155);
+            // Control Buttons on Right (— □ ×)
+            // Minimize Button [—]
+            if ww > 60 {
+                let min_x = wx + ww - 54;
+                crate::gui::draw_rect(min_x, wy + 3, 14, 14, 0x001E293B);
+                crate::gui::draw_char(min_x + 4, wy + 5, '-', 0x00E2E8F0, 0x001E293B);
             }
 
-            // Close Button [X]
+            // Maximize Button [□]
+            if ww > 40 {
+                let max_x = wx + ww - 36;
+                crate::gui::draw_rect(max_x, wy + 3, 14, 14, 0x001E293B);
+                let max_sym = if win.state == WindowState::Maximized { '^' } else { '+' };
+                crate::gui::draw_char(max_x + 4, wy + 5, max_sym, 0x00E2E8F0, 0x001E293B);
+            }
+
+            // Close Button [×]
             if ww > 20 {
                 let close_x = wx + ww - 18;
                 crate::gui::draw_rect(close_x, wy + 3, 14, 14, 0x00DC2626);
-                crate::gui::draw_char(close_x + 4, wy + 6, 'X', 0x00FFFFFF, 0x00DC2626);
+                crate::gui::draw_char(close_x + 4, wy + 5, 'x', 0x00FFFFFF, 0x00DC2626);
             }
 
             // 3b. Client Area Background
@@ -357,10 +390,10 @@ impl WindowManager {
             }
 
             // 3d. 1px window border
-            crate::gui::draw_rect(wx, wy, ww, 1, 0x0064748B);
-            crate::gui::draw_rect(wx, wy + 20 + wh - 1, ww, 1, 0x0064748B);
-            crate::gui::draw_rect(wx, wy, 1, 20 + wh, 0x0064748B);
-            crate::gui::draw_rect(wx + ww - 1, wy, 1, 20 + wh, 0x0064748B);
+            crate::gui::draw_rect(wx, wy, ww, 1, border_col);
+            crate::gui::draw_rect(wx, wy + 20 + wh - 1, ww, 1, border_col);
+            crate::gui::draw_rect(wx, wy, 1, 20 + wh, border_col);
+            crate::gui::draw_rect(wx + ww - 1, wy, 1, 20 + wh, border_col);
         }
         drop(surf_reg);
 
@@ -373,7 +406,7 @@ impl WindowManager {
         crate::gui::swap_buffers();
     }
 
-    /// Handles mouse down: performs titlebar dragging, close/minimize buttons, or client focus
+    /// Handles mouse down: performs titlebar dragging, close/maximize/minimize buttons, or client focus
     pub fn handle_mouse_down(&mut self, mx: i32, my: i32) -> Option<(u64, u64)> {
         for i in (0..self.windows.len()).rev() {
             let win = &self.windows[i];
@@ -390,24 +423,29 @@ impl WindowManager {
 
             // Check Titlebar click (20px high)
             if mx >= wx && mx < wx + ww && my >= wy && my < wy + 20 {
-                // Close button [X]
+                // 1. Close button [×] (Rightmost: wx + ww - 20 .. wx + ww - 4)
                 if mx >= wx + ww - 20 && mx <= wx + ww - 4 && my >= wy + 2 && my <= wy + 18 {
                     let _ = self.destroy_window(owner, wid);
                     return None;
                 }
-                // Minimize button [-]
+                // 2. Maximize button [□] (Middle: wx + ww - 38 .. wx + ww - 22)
                 if mx >= wx + ww - 38 && mx <= wx + ww - 22 && my >= wy + 2 && my <= wy + 18 {
+                    let _ = self.toggle_maximize_window(owner, wid);
+                    return None;
+                }
+                // 3. Minimize button [—] (Left: wx + ww - 56 .. wx + ww - 40)
+                if mx >= wx + ww - 56 && mx <= wx + ww - 40 && my >= wy + 2 && my <= wy + 18 {
                     let _ = self.minimize_window(owner, wid);
                     return None;
                 }
 
-                // Drag start
+                // 4. Titlebar Drag start (Clicking on titlebar itself, not buttons)
                 self.dragging_window = Some((wid, mx - wx, my - wy));
                 let _ = self.raise_to_top_internal(wid);
                 return Some((wid, owner));
             }
 
-            // Check Client area click -> focus
+            // Check Client area click -> focus only (Surface content click does NOT start dragging)
             if mx >= wx && mx < wx + ww && my >= wy + 20 && my < wy + 20 + wh {
                 let _ = self.raise_to_top_internal(wid);
                 return Some((wid, owner));
@@ -427,9 +465,19 @@ impl WindowManager {
     /// Handles mouse move: updates dragging window coordinates
     pub fn handle_mouse_move(&mut self, mx: i32, my: i32) {
         if let Some((wid, ox, oy)) = self.dragging_window {
+            let max_w = unsafe { crate::gui::VESA.width as i32 };
+            let max_h = unsafe { crate::gui::VESA.height as i32 };
             if let Some(win) = self.windows.iter_mut().find(|w| w.window_id == wid) {
-                win.x = (mx - ox).max(0).min(640 - win.width as i32);
-                win.y = (my - oy).max(20).min(360 - win.height as i32 - 20);
+                // If dragged while maximized, restore normal state and continue dragging smoothly
+                if win.state == WindowState::Maximized {
+                    if let Some((_, _, pw, ph)) = win.saved_geom.take() {
+                        win.width = pw;
+                        win.height = ph;
+                    }
+                    win.state = WindowState::Normal;
+                }
+                win.x = (mx - ox).max(-100).min(max_w.saturating_sub(50));
+                win.y = (my - oy).max(20).min(max_h.saturating_sub(30));
             }
         }
     }
