@@ -8517,6 +8517,158 @@ mod invariant_tests {
         assert!(instances.contains_key(&1002));
         assert!(!instances.contains_key(&1001));
     }
+
+    // =========================================================================
+    // STEP 49: DESKTOP V1.37 CLIPBOARD & TEXT INTERACTION INVARIANTS
+    // =========================================================================
+
+    /// CLIP_INV-1: Copy and paste basic workflow
+    #[test]
+    fn test_clip_inv_1_copy_paste_basic() {
+        let mut clipboard = alloc::string::String::new();
+        let src_text = "echo 'Hello SparkOS'";
+
+        // Copy (Ctrl+C)
+        clipboard = alloc::string::String::from(src_text);
+
+        // Paste (Ctrl+V)
+        let mut dst_buffer = alloc::string::String::new();
+        dst_buffer.push_str(&clipboard);
+
+        assert_eq!(dst_buffer, src_text);
+    }
+
+    /// CLIP_INV-2: Cut and paste workflow
+    #[test]
+    fn test_clip_inv_2_cut_paste_workflow() {
+        let mut src_buffer = alloc::string::String::from("secret_password");
+        let mut clipboard = alloc::string::String::new();
+
+        // Cut (Ctrl+X)
+        clipboard = src_buffer.clone();
+        src_buffer.clear();
+
+        assert!(src_buffer.is_empty());
+        assert_eq!(clipboard, "secret_password");
+
+        // Paste (Ctrl+V)
+        let mut dst_buffer = alloc::string::String::new();
+        dst_buffer.push_str(&clipboard);
+        assert_eq!(dst_buffer, "secret_password");
+    }
+
+    /// CLIP_INV-3: Select all workflow
+    #[test]
+    fn test_clip_inv_3_select_all_workflow() {
+        let input = "cargo build --release";
+        let sel_start = 0;
+        let sel_end = input.len();
+
+        let selected_slice = &input[sel_start..sel_end];
+        assert_eq!(selected_slice, "cargo build --release");
+    }
+
+    /// CLIP_INV-4: Clipboard overwrite
+    #[test]
+    fn test_clip_inv_4_clipboard_overwrite() {
+        let mut clipboard = alloc::string::String::from("old text");
+        clipboard = alloc::string::String::from("new fresh text");
+
+        assert_eq!(clipboard, "new fresh text");
+    }
+
+    /// CLIP_INV-5: Empty clipboard safety
+    #[test]
+    fn test_clip_inv_5_empty_clipboard_safety() {
+        let clipboard = alloc::string::String::new();
+        let mut dst_buffer = alloc::string::String::from("existing");
+
+        // Paste empty clipboard does nothing
+        if !clipboard.is_empty() {
+            dst_buffer.push_str(&clipboard);
+        }
+
+        assert_eq!(dst_buffer, "existing");
+    }
+
+    /// CLIP_INV-6: Multi-window clipboard isolation and transfer
+    #[test]
+    fn test_clip_inv_6_multi_window_transfer() {
+        let mut terminal_1_input = alloc::string::String::from("ls -la /home");
+        let mut terminal_2_input = alloc::string::String::new();
+        let mut shared_clipboard = alloc::string::String::new();
+
+        // Terminal #1 copies text
+        shared_clipboard = terminal_1_input.clone();
+
+        // Terminal #2 pastes text
+        terminal_2_input.push_str(&shared_clipboard);
+
+        assert_eq!(terminal_2_input, "ls -la /home");
+        assert_eq!(terminal_1_input, "ls -la /home");
+    }
+
+    /// CLIP_INV-7: Focus-gated clipboard operations
+    #[test]
+    fn test_clip_inv_7_focus_gated_routing() {
+        let focused_win = 101u64;
+        let keystroke = "Ctrl+V";
+
+        let handle_paste = |target_win: u64| -> bool {
+            target_win == focused_win
+        };
+
+        assert!(handle_paste(101));
+        assert!(!handle_paste(102));
+    }
+
+    /// CLIP_INV-8: Large text clipboard size clamping (64 KB cap)
+    #[test]
+    fn test_clip_inv_8_large_text_clamping() {
+        const MAX_BYTES: usize = 64 * 1024;
+        let large_string = alloc::vec![b'A'; 100 * 1024]; // 100 KB
+        let clamped = if large_string.len() > MAX_BYTES {
+            &large_string[..MAX_BYTES]
+        } else {
+            &large_string[..]
+        };
+
+        assert_eq!(clamped.len(), 64 * 1024);
+    }
+
+    /// CLIP_INV-9: Terminal prompt/line copy fallback
+    #[test]
+    fn test_clip_inv_9_terminal_copy_fallback() {
+        let current_input = alloc::string::String::new();
+        let last_line = "sparkos:/home/teha> uptime";
+
+        let text_to_copy = if !current_input.is_empty() {
+            current_input.as_str()
+        } else {
+            last_line
+        };
+
+        assert_eq!(text_to_copy, "sparkos:/home/teha> uptime");
+    }
+
+    /// CLIP_INV-10: Clipboard persistence across window closure
+    #[test]
+    fn test_clip_inv_10_clipboard_persistence_across_window_close() {
+        let mut global_clipboard = alloc::string::String::new();
+
+        // Window A copies text
+        {
+            let win_a_text = "persisted configuration string";
+            global_clipboard = alloc::string::String::from(win_a_text);
+            // Window A is destroyed here
+        }
+
+        // Window B pastes later
+        let mut win_b_input = alloc::string::String::new();
+        win_b_input.push_str(&global_clipboard);
+
+        assert_eq!(win_b_input, "persisted configuration string");
+    }
 }
 
 

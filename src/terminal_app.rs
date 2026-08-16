@@ -187,21 +187,53 @@ impl TerminalState {
     pub fn handle_key_input(&mut self, key_code: u8, pressed: bool) {
         if !pressed { return; }
         let caller_pid = self.pid;
+        let is_ctrl = crate::keyboard::is_ctrl_pressed();
 
-        match key_code {
-            0x1C => { // Enter
-                self.execute_command();
+        if is_ctrl {
+            match key_code {
+                0x2E => { // Ctrl + C: Copy
+                    if !self.current_input.is_empty() {
+                        crate::clipboard::copy_to_clipboard(&self.current_input);
+                    } else if let Some(last_line) = self.lines.last() {
+                        crate::clipboard::copy_to_clipboard(&last_line.text);
+                    }
+                }
+                0x2D => { // Ctrl + X: Cut
+                    if !self.current_input.is_empty() {
+                        crate::clipboard::copy_to_clipboard(&self.current_input);
+                        self.current_input.clear();
+                    }
+                }
+                0x2F => { // Ctrl + V: Paste
+                    let text = crate::clipboard::get_clipboard_text();
+                    for c in text.chars() {
+                        if (c as u32) >= 32 && (c as u32) <= 126 {
+                            self.current_input.push(c);
+                        }
+                    }
+                }
+                0x1E => { // Ctrl + A: Select all (highlight state)
+                    self.selection_start = Some((0, 0));
+                    self.selection_end = Some((self.current_input.len(), 0));
+                }
+                _ => {}
             }
-            0x0E => { // Backspace
-                self.current_input.pop();
-            }
-            0x01 => { // Escape
-                self.current_input.clear();
-            }
-            _ => {
-                if let Some(ascii_byte) = crate::keyboard::scancode_to_ascii(key_code, false) {
-                    if ascii_byte >= 32 && ascii_byte <= 126 {
-                        self.current_input.push(ascii_byte as char);
+        } else {
+            match key_code {
+                0x1C => { // Enter
+                    self.execute_command();
+                }
+                0x0E => { // Backspace
+                    self.current_input.pop();
+                }
+                0x01 => { // Escape
+                    self.current_input.clear();
+                }
+                _ => {
+                    if let Some(ascii_byte) = crate::keyboard::scancode_to_ascii(key_code, false) {
+                        if ascii_byte >= 32 && ascii_byte <= 126 {
+                            self.current_input.push(ascii_byte as char);
+                        }
                     }
                 }
             }

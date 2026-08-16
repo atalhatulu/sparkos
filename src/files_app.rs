@@ -223,6 +223,20 @@ impl FilesAppState {
         }
     }
 
+    pub fn copy_selected_path(&mut self) {
+        if let Some(idx) = self.selected_idx {
+            if let Some(entry) = self.entries.get(idx) {
+                let full_path = if self.current_path == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{}/{}", self.current_path.trim_end_matches('/'), entry.name)
+                };
+                crate::clipboard::copy_to_clipboard(&full_path);
+                self.status_message = format!("Copied path '{}'", full_path);
+            }
+        }
+    }
+
     pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) {
         let now_tick = crate::interrupts::get_tick();
 

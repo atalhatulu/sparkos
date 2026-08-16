@@ -105,6 +105,7 @@ impl Keyboard {
             }
             if make == 0x1D {
                 self.ctrl = false;
+                CTRL_PRESSED.store(false, core::sync::atomic::Ordering::Relaxed);
             }
             if make == 0x38 {
                 ALT_PRESSED.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -114,7 +115,10 @@ impl Keyboard {
 
         // Normal tuslar (Make code)
         match scancode {
-            0x1D => self.ctrl = true,                    // Ctrl bas
+            0x1D => {
+                self.ctrl = true;
+                CTRL_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
             0x2A | 0x36 => self.shift = true,           // Shift bas
             0x38 => {
                 ALT_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -142,9 +146,14 @@ impl Keyboard {
 }
 
 pub static ALT_PRESSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub static CTRL_PRESSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn is_alt_pressed() -> bool {
     ALT_PRESSED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn is_ctrl_pressed() -> bool {
+    CTRL_PRESSED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 pub static KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard::new());
