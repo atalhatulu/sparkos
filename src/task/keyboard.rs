@@ -72,8 +72,8 @@ pub async fn keyboard_task() {
                 _ => {}
             }
 
-            let modifiers = (if is_ctrl { 1 } else { 0 })
-                | (if is_shift { 2 } else { 0 })
+            let modifiers = (if is_ctrl || crate::keyboard::is_ctrl_pressed() { 1 } else { 0 })
+                | (if is_shift || crate::keyboard::is_shift_pressed() { 2 } else { 0 })
                 | (if is_alt || crate::keyboard::is_alt_pressed() { 8 } else { 0 });
 
             crate::input::dispatch_keyboard_event(key_code, pressed, modifiers);

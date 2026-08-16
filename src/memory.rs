@@ -87,14 +87,21 @@ pub fn init_user_memory(memory_map: &'static MemoryMap) {
     if guard.is_some() {
         return;
     }
+    let (heap_phys_start, heap_phys_end) = *crate::allocator::KERNEL_HEAP_RANGE.lock();
     let mut regions = Vec::new();
+
+    // The user frame pool resides safely in the primary usable memory block after the kernel heap
     for region in memory_map.iter() {
         if region.region_type == MemoryRegionType::Usable {
             let start = region.range.start_addr();
             let end = region.range.end_addr();
-            // Skip tiny runs.
-            if end.saturating_sub(start) >= 4096 {
-                // Align to page boundary to keep frames clean.
+
+            if start <= heap_phys_start && end >= heap_phys_end {
+                let user_start = (heap_phys_end + 4095) & !4095;
+                if user_start < end {
+                    regions.push((user_start, end));
+                }
+            } else if start >= 0x100_0000 && (start >= heap_phys_end || end <= heap_phys_start) {
                 let start_aligned = (start + 4095) & !4095;
                 if start_aligned < end {
                     regions.push((start_aligned, end));
@@ -102,6 +109,7 @@ pub fn init_user_memory(memory_map: &'static MemoryMap) {
             }
         }
     }
+
     *guard = Some(UserFrameAllocator {
         regions,
         next_region: 0,

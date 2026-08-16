@@ -374,8 +374,12 @@ pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
     );
 
     let surf_id = crate::surface::create_surface_for_pid(pid, TERM_WIDTH, TERM_HEIGHT)?;
+    let (win_x, win_y) = {
+        let count = crate::wm::WM.lock().windows.len() as i32;
+        (40 + ((count * 30) % 200), 40 + ((count * 25) % 150))
+    };
     let win_id = crate::wm::WM.lock()
-        .create_window(pid, surf_id, 40, 40, TERM_WIDTH, TERM_HEIGHT)
+        .create_window(pid, surf_id, win_x, win_y, TERM_WIDTH, TERM_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
     {

@@ -10,7 +10,9 @@ use crate::app_registry::AppIcon;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopIconAction {
     OpenHome,
+    OpenTerminal,
     OpenComputer,
+    OpenEditor,
     OpenTrash,
     OpenApplications,
 }
@@ -25,7 +27,7 @@ pub struct DesktopIcon {
 }
 
 pub struct DesktopEnvironment {
-    pub icons: [DesktopIcon; 4],
+    pub icons: [DesktopIcon; 5],
     pub selected_icon_id: Option<u32>,
     pub last_click_id: Option<u32>,
     pub last_click_tick: u64,
@@ -47,23 +49,30 @@ impl DesktopEnvironment {
                 DesktopIcon {
                     id: 2,
                     position: (24, 115),
-                    icon: AppIcon::Generic,
-                    label: "Computer",
-                    action: DesktopIconAction::OpenComputer,
+                    icon: AppIcon::Terminal,
+                    label: "Terminal",
+                    action: DesktopIconAction::OpenTerminal,
                 },
                 DesktopIcon {
                     id: 3,
                     position: (24, 190),
                     icon: AppIcon::Generic,
-                    label: "Trash",
-                    action: DesktopIconAction::OpenTrash,
+                    label: "Computer",
+                    action: DesktopIconAction::OpenComputer,
                 },
                 DesktopIcon {
                     id: 4,
                     position: (24, 265),
-                    icon: AppIcon::Logo,
-                    label: "Apps",
-                    action: DesktopIconAction::OpenApplications,
+                    icon: AppIcon::Generic,
+                    label: "Editor",
+                    action: DesktopIconAction::OpenEditor,
+                },
+                DesktopIcon {
+                    id: 5,
+                    position: (24, 340),
+                    icon: AppIcon::Generic,
+                    label: "Trash",
+                    action: DesktopIconAction::OpenTrash,
                 },
             ],
             selected_icon_id: None,

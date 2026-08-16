@@ -238,11 +238,17 @@ pub async fn mouse_task() {
                     }
                 } else if let Some(action) = crate::desktop::DESKTOP_ENV.lock().handle_mouse_click(cx, cy, crate::interrupts::get_tick()) {
                     match action {
+                        crate::desktop::DesktopIconAction::OpenTerminal => {
+                            let _ = crate::terminal_app::spawn_terminal_app("terminal.app");
+                        }
                         crate::desktop::DesktopIconAction::OpenHome | crate::desktop::DesktopIconAction::OpenComputer => {
                             let _ = crate::files_app::spawn_files_app("files.app");
                         }
+                        crate::desktop::DesktopIconAction::OpenEditor => {
+                            let _ = crate::editor_app::spawn_editor_app("editor.app", None);
+                        }
                         crate::desktop::DesktopIconAction::OpenApplications => {
-                            let _ = crate::settings_app::spawn_settings_app("settings.app");
+                            crate::wm::WM.lock().launcher_open = true;
                         }
                         crate::desktop::DesktopIconAction::OpenTrash => {
                             let _ = crate::files_app::spawn_files_app("trash.app");

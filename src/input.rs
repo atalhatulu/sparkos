@@ -196,6 +196,33 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         return owner;
     }
 
+    let is_ctrl = (modifiers & 0x01 != 0) || crate::keyboard::is_ctrl_pressed();
+    let is_alt = (modifiers & 0x08 != 0) || crate::keyboard::is_alt_pressed();
+
+    if pressed {
+        crate::serial_println!("[INPUT] key=0x{:02x} pressed, is_ctrl={}, is_alt={}", key_code, is_ctrl, is_alt);
+    }
+
+    // 2. Global Shortcut: Ctrl+Alt+T -> Open/Spawn Terminal
+    if pressed && key_code == 0x14 && is_ctrl && is_alt {
+        let res = crate::terminal_app::spawn_terminal_app("terminal.app");
+        match res {
+            Ok(pid) => crate::serial_println!("[INPUT] Successfully spawned Terminal PID {}", pid),
+            Err(e) => crate::serial_println!("[INPUT] Failed to spawn Terminal: {:?}", e),
+        }
+        crate::wm::WM.lock().composite_desktop(0, 0);
+        return res.ok();
+    }
+
+    // 3. Global Shortcut: Ctrl+Escape -> Toggle Application Launcher Menu
+    if pressed && key_code == 0x01 && is_ctrl {
+        let mut wm = crate::wm::WM.lock();
+        wm.launcher_open = !wm.launcher_open;
+        drop(wm);
+        crate::wm::WM.lock().composite_desktop(0, 0);
+        return None;
+    }
+
     let (focused_pid, focused_win_id) = {
         let wm = crate::wm::WM.lock();
         let fid = wm.focused_window?;

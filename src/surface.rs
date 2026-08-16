@@ -163,6 +163,10 @@ pub fn destroy_surface(surface_id: u64) -> Result<(), &'static str> {
     
     // SEC-06 Fix: Unmap virtual pages & free frames
     let _ = crate::memory::unmap_user_range(surface.vma_addr, surface.pages);
+    for i in 0..surface.pages {
+        let paddr = surface.shmem_phys_addr + i * 4096;
+        crate::memory::user_free_frame(x86_64::structures::paging::PhysFrame::containing_address(PhysAddr::new(paddr)));
+    }
 
     crate::serial_println!("[SURFACE] Process {} destroyed surface {} (slot {} unmapped)", pid, surface.surface_id, surface.slot);
 
@@ -172,11 +176,27 @@ pub fn destroy_surface(surface_id: u64) -> Result<(), &'static str> {
 /// Destroys and cleans up all surfaces owned by a terminating process (Zero-Leak Teardown).
 pub fn cleanup_surfaces_for_pid(pid: u64) {
     let mut reg = SURFACE_REGISTRY.lock();
-    let initial_count = reg.len();
+    let mut removed = alloc::vec::Vec::new();
 
-    reg.retain(|s| s.owner_pid != pid);
-    let cleaned = initial_count - reg.len();
-    if cleaned > 0 {
-        crate::serial_println!("[SURFACE] Cleaned up & unmapped {} orphaned surface(s) for terminating PID {}", cleaned, pid);
+    reg.retain(|s| {
+        if s.owner_pid == pid {
+            removed.push((s.vma_addr, s.pages, s.shmem_phys_addr));
+            false
+        } else {
+            true
+        }
+    });
+
+    let count = removed.len();
+    for (vma, pages, phys_addr) in removed {
+        let _ = crate::memory::unmap_user_range(vma, pages);
+        for i in 0..pages {
+            let paddr = phys_addr + i * 4096;
+            crate::memory::user_free_frame(x86_64::structures::paging::PhysFrame::containing_address(PhysAddr::new(paddr)));
+        }
+    }
+
+    if count > 0 {
+        crate::serial_println!("[SURFACE] Cleaned up, freed & unmapped {} orphaned surface(s) for terminating PID {}", count, pid);
     }
 }
