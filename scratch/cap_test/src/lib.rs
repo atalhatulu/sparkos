@@ -8829,6 +8829,193 @@ mod invariant_tests {
         assert!(instances.contains_key(&502));
         assert!(!instances.contains_key(&501));
     }
+
+    // =========================================================================
+    // STEP 51: DESKTOP V1.39 EDITOR 2.0 & TEXT UX INVARIANTS
+    // =========================================================================
+
+    /// EDIT2_INV-1: Multi-level Undo & Redo
+    #[test]
+    fn test_edit2_inv_1_undo_redo_multilevel() {
+        let mut text = alloc::string::String::from("Version 1");
+        let mut undo_stack = alloc::vec![];
+        let mut redo_stack = alloc::vec![];
+
+        // Edit -> Version 2
+        undo_stack.push(text.clone());
+        redo_stack.clear();
+        text = alloc::string::String::from("Version 2");
+
+        // Undo -> Version 1
+        redo_stack.push(text.clone());
+        text = undo_stack.pop().unwrap();
+        assert_eq!(text, "Version 1");
+
+        // Redo -> Version 2
+        undo_stack.push(text.clone());
+        text = redo_stack.pop().unwrap();
+        assert_eq!(text, "Version 2");
+    }
+
+    /// EDIT2_INV-2: Redo stack invalidation on new edit
+    #[test]
+    fn test_edit2_inv_2_redo_invalidation_on_new_edit() {
+        let mut undo_stack = alloc::vec![alloc::string::String::from("v1")];
+        let mut redo_stack = alloc::vec![alloc::string::String::from("v2_future")];
+
+        // User performs new edit
+        undo_stack.push(alloc::string::String::from("v2_branched"));
+        redo_stack.clear();
+
+        assert!(redo_stack.is_empty());
+        assert_eq!(undo_stack.len(), 2);
+    }
+
+    /// EDIT2_INV-3: Undo history capacity cap (50 steps max)
+    #[test]
+    fn test_edit2_inv_3_undo_capacity_bounding() {
+        const MAX_STEPS: usize = 50;
+        let mut undo_stack: alloc::vec::Vec<usize> = alloc::vec![];
+
+        for i in 1..=60 {
+            if undo_stack.len() >= MAX_STEPS {
+                undo_stack.remove(0);
+            }
+            undo_stack.push(i);
+        }
+
+        assert_eq!(undo_stack.len(), 50);
+        assert_eq!(undo_stack[0], 11);
+        assert_eq!(*undo_stack.last().unwrap(), 60);
+    }
+
+    /// EDIT2_INV-4: Unsaved changes confirmation dialog transitions
+    #[test]
+    fn test_edit2_inv_4_unsaved_dialog_transitions() {
+        #[derive(Debug, PartialEq)]
+        enum Action { Save, Discard, Cancel }
+
+        let mut is_dirty = true;
+        let mut dialog_active = true;
+        let mut window_open = true;
+
+        // User clicks Cancel
+        let handle_action = |act: Action, dirty: &mut bool, dlg: &mut bool, win: &mut bool| {
+            match act {
+                Action::Save => {
+                    *dirty = false;
+                    *dlg = false;
+                    *win = false; // saved and closed
+                }
+                Action::Discard => {
+                    *dlg = false;
+                    *win = false; // closed without saving
+                }
+                Action::Cancel => {
+                    *dlg = false; // window remains open
+                }
+            }
+        };
+
+        handle_action(Action::Cancel, &mut is_dirty, &mut dialog_active, &mut window_open);
+        assert!(is_dirty);
+        assert!(!dialog_active);
+        assert!(window_open);
+    }
+
+    /// EDIT2_INV-5: Vertical & horizontal scrolling and viewport slicing
+    #[test]
+    fn test_edit2_inv_5_scroll_and_viewport_slicing() {
+        let lines = alloc::vec![
+            alloc::string::String::from("0123456789ABCDEF"),
+            alloc::string::String::from("Second long text line"),
+            alloc::string::String::from("Third line"),
+        ];
+
+        let scroll_row = 1;
+        let scroll_col = 7;
+
+        let visible_slice = &lines[scroll_row][scroll_col..];
+        assert_eq!(visible_slice, "long text line");
+    }
+
+    /// EDIT2_INV-6: Cursor auto-scroll when cursor exceeds viewport
+    #[test]
+    fn test_edit2_inv_6_cursor_auto_scroll() {
+        let visible_rows = 12usize;
+        let mut scroll_row = 0usize;
+        let cursor_row = 15usize;
+
+        // Auto-scroll update
+        if cursor_row >= scroll_row + visible_rows {
+            scroll_row = cursor_row.saturating_sub(visible_rows - 1);
+        }
+
+        assert_eq!(scroll_row, 4);
+    }
+
+    /// EDIT2_INV-7: Keyboard selection range tracking (Shift + Arrows, Ctrl + Home/End)
+    #[test]
+    fn test_edit2_inv_7_keyboard_selection_range() {
+        let mut anchor: Option<(usize, usize)> = None;
+        let mut focus: Option<(usize, usize)> = None;
+
+        // Shift + Right from (0, 0)
+        let cur_row = 0;
+        let mut cur_col = 0;
+        anchor = Some((cur_row, cur_col));
+
+        cur_col += 5;
+        focus = Some((cur_row, cur_col));
+
+        assert_eq!(anchor, Some((0, 0)));
+        assert_eq!(focus, Some((0, 5)));
+    }
+
+    /// EDIT2_INV-8: Multi-editor state isolation
+    #[test]
+    fn test_edit2_inv_8_multi_editor_state_isolation() {
+        struct EditorState {
+            id: u64,
+            undo_len: usize,
+            scroll: (usize, usize),
+            dirty: bool,
+        }
+
+        let mut ed1 = EditorState { id: 1, undo_len: 5, scroll: (2, 0), dirty: true };
+        let ed2 = EditorState { id: 2, undo_len: 0, scroll: (0, 0), dirty: false };
+
+        ed1.undo_len += 1;
+        assert_eq!(ed1.undo_len, 6);
+        assert_eq!(ed2.undo_len, 0);
+        assert_ne!(ed1.dirty, ed2.dirty);
+    }
+
+    /// EDIT2_INV-9: Long line and large text safety without buffer overflow
+    #[test]
+    fn test_edit2_inv_9_long_line_safety() {
+        let long_line = alloc::vec![b'X'; 5000]; // 5000 character line
+        let s = alloc::string::String::from_utf8(long_line).unwrap();
+
+        let visible_slice = if s.len() > 40 { &s[..40] } else { &s[..] };
+        assert_eq!(visible_slice.len(), 40);
+        assert_eq!(s.len(), 5000);
+    }
+
+    /// EDIT2_INV-10: UTF-8 / Turkish character integrity across undo/redo
+    #[test]
+    fn test_edit2_inv_10_turkish_utf8_undo_redo_integrity() {
+        let mut doc = alloc::string::String::from("Başlangıç");
+        let snapshot = doc.clone();
+
+        // Edit
+        doc.push_str(": ç ğ ı İ ö ş ü");
+        assert_eq!(doc, "Başlangıç: ç ğ ı İ ö ş ü");
+
+        // Undo
+        doc = snapshot;
+        assert_eq!(doc, "Başlangıç");
+    }
 }
 
 

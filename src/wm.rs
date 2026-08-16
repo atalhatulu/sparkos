@@ -842,6 +842,20 @@ impl WindowManager {
             if mx >= wx && mx < wx + ww && my >= wy && my < wy + 20 {
                 // 1. Close button [×] (Rightmost: wx + ww - 20 .. wx + ww - 4)
                 if mx >= wx + ww - 20 && mx <= wx + ww - 4 && my >= wy + 2 && my <= wy + 18 {
+                    let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+                    if let Some(editor_state) = editors.get_mut(&wid) {
+                        if editor_state.is_dirty {
+                            editor_state.show_unsaved_dialog = true;
+                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner) {
+                                let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                                editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                            }
+                            drop(editors);
+                            return Some((wid, owner));
+                        }
+                    }
+                    drop(editors);
+
                     let _ = self.destroy_window(owner, wid);
                     return None;
                 }

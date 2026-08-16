@@ -102,6 +102,7 @@ impl Keyboard {
             let make = scancode & 0x7F;
             if make == 0x2A || make == 0x36 {
                 self.shift = false;
+                SHIFT_PRESSED.store(false, core::sync::atomic::Ordering::Relaxed);
             }
             if make == 0x1D {
                 self.ctrl = false;
@@ -119,7 +120,10 @@ impl Keyboard {
                 self.ctrl = true;
                 CTRL_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
             }
-            0x2A | 0x36 => self.shift = true,           // Shift bas
+            0x2A | 0x36 => {
+                self.shift = true;
+                SHIFT_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
             0x38 => {
                 ALT_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
             }
@@ -147,6 +151,7 @@ impl Keyboard {
 
 pub static ALT_PRESSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 pub static CTRL_PRESSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub static SHIFT_PRESSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn is_alt_pressed() -> bool {
     ALT_PRESSED.load(core::sync::atomic::Ordering::Relaxed)
@@ -154,6 +159,10 @@ pub fn is_alt_pressed() -> bool {
 
 pub fn is_ctrl_pressed() -> bool {
     CTRL_PRESSED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn is_shift_pressed() -> bool {
+    SHIFT_PRESSED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 pub static KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard::new());
