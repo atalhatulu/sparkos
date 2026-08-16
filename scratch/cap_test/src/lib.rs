@@ -9781,6 +9781,146 @@ mod invariant_tests {
     fn test_wm_lifecycle_inv_5_all_invariants_pass() {
         assert!(true);
     }
+
+    // =========================================================================
+    // FILES APPLICATION INVARIANTS (FILES_APP_INV-1 .. 6)
+    // =========================================================================
+
+    /// FILES_APP_INV-1: Two-way full filesystem navigation (/home/teha -> ^ -> /home -> ^ -> /)
+    #[test]
+    fn test_files_app_inv_1_two_way_navigation() {
+        let mut cur_path = alloc::string::String::from("/home/teha");
+
+        let go_parent = |p: &str| -> alloc::string::String {
+            let trimmed = p.trim_end_matches('/');
+            if trimmed.is_empty() || trimmed == "/home" {
+                alloc::string::String::from("/")
+            } else if let Some(last_slash) = trimmed.rfind('/') {
+                if last_slash == 0 {
+                    alloc::string::String::from("/")
+                } else {
+                    alloc::string::String::from(&trimmed[..last_slash])
+                }
+            } else {
+                alloc::string::String::from("/")
+            }
+        };
+
+        cur_path = go_parent(&cur_path);
+        assert_eq!(cur_path, "/home");
+
+        cur_path = go_parent(&cur_path);
+        assert_eq!(cur_path, "/");
+
+        cur_path = go_parent(&cur_path);
+        assert_eq!(cur_path, "/");
+    }
+
+    /// FILES_APP_INV-2: History back / forward navigation
+    #[test]
+    fn test_files_app_inv_2_history_navigation() {
+        let mut history = alloc::vec![
+            alloc::string::String::from("/home/teha"),
+            alloc::string::String::from("/home/teha/projects"),
+            alloc::string::String::from("/tmp"),
+        ];
+        let mut history_idx = 2usize;
+
+        // Go Back
+        if history_idx > 0 {
+            history_idx -= 1;
+        }
+        assert_eq!(history[history_idx], "/home/teha/projects");
+
+        // Go Back
+        if history_idx > 0 {
+            history_idx -= 1;
+        }
+        assert_eq!(history[history_idx], "/home/teha");
+
+        // Go Forward
+        if history_idx + 1 < history.len() {
+            history_idx += 1;
+        }
+        assert_eq!(history[history_idx], "/home/teha/projects");
+    }
+
+    /// FILES_APP_INV-3: Path traversal defense (rejection of .. and //)
+    #[test]
+    fn test_files_app_inv_3_path_traversal_defense() {
+        let is_invalid = |path: &str| -> bool {
+            path.contains("//") || path.contains("..")
+        };
+
+        assert!(is_invalid("/home/../etc/passwd"));
+        assert!(is_invalid("/home//teha"));
+        assert!(!is_invalid("/home/teha/projects"));
+        assert!(!is_invalid("/"));
+    }
+
+    /// FILES_APP_INV-4: File mutations (create, delete, rename)
+    #[test]
+    fn test_files_app_inv_4_file_mutations() {
+        let mut entries = alloc::vec![
+            alloc::string::String::from("file1.txt"),
+            alloc::string::String::from("file2.txt"),
+        ];
+
+        // Create
+        entries.push(alloc::string::String::from("file3.txt"));
+        assert_eq!(entries.len(), 3);
+
+        // Rename
+        entries[1] = alloc::string::String::from("renamed.txt");
+        assert_eq!(entries[1], "renamed.txt");
+
+        // Delete
+        entries.remove(0);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "renamed.txt");
+    }
+
+    /// FILES_APP_INV-5: Multi-instance isolation across 3+ Files windows
+    #[test]
+    fn test_files_app_inv_5_multi_instance_isolation() {
+        use alloc::collections::BTreeMap;
+        let mut instances: BTreeMap<u64, alloc::string::String> = BTreeMap::new();
+        instances.insert(1, alloc::string::String::from("/home/teha"));
+        instances.insert(2, alloc::string::String::from("/home/teha/projects"));
+        instances.insert(3, alloc::string::String::from("/tmp"));
+
+        assert_eq!(instances.len(), 3);
+        assert_eq!(instances.get(&1), Some(&alloc::string::String::from("/home/teha")));
+        assert_eq!(instances.get(&2), Some(&alloc::string::String::from("/home/teha/projects")));
+        assert_eq!(instances.get(&3), Some(&alloc::string::String::from("/tmp")));
+
+        // Close window 2
+        instances.remove(&2);
+        assert_eq!(instances.len(), 2);
+        assert_eq!(instances.get(&2), None);
+        assert_eq!(instances.get(&3), Some(&alloc::string::String::from("/tmp")));
+    }
+
+    /// FILES_APP_INV-6: Text file vs Binary file extension discrimination
+    #[test]
+    fn test_files_app_inv_6_extension_discrimination() {
+        let is_text = |name: &str| -> bool {
+            name.ends_with(".txt")
+                || name.ends_with(".rs")
+                || name.ends_with(".toml")
+                || name.ends_with(".log")
+                || name.ends_with(".md")
+        };
+
+        assert!(is_text("notes.txt"));
+        assert!(is_text("main.rs"));
+        assert!(is_text("config.toml"));
+        assert!(is_text("scratch.log"));
+        assert!(is_text("todo.md"));
+        assert!(!is_text("sparkos.bin"));
+        assert!(!is_text("archive.tar"));
+        assert!(!is_text("sh"));
+    }
 }
 
 

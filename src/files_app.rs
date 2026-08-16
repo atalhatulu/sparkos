@@ -59,13 +59,46 @@ impl FilesAppState {
     }
 
     pub fn load_directory(&mut self, path: &str) {
-        let clean_path = if path.is_empty() { "/" } else { path };
+        let clean_path = if path.is_empty() { "/" } else { path.trim_end_matches('/') };
+        let clean_path = if clean_path.is_empty() { "/" } else { clean_path };
         self.current_path = String::from(clean_path);
         self.entries.clear();
         self.selected_idx = None;
 
         // Populate directory entries based on path
-        if clean_path == "/home/teha" || clean_path == "/home/teha/" {
+        if clean_path == "/" {
+            self.entries.push(FileEntry {
+                name: String::from("home"),
+                size_bytes: 4096,
+                item_type: FileItemType::Directory,
+            });
+            self.entries.push(FileEntry {
+                name: String::from("tmp"),
+                size_bytes: 4096,
+                item_type: FileItemType::Directory,
+            });
+            self.entries.push(FileEntry {
+                name: String::from("bin"),
+                size_bytes: 4096,
+                item_type: FileItemType::Directory,
+            });
+            self.entries.push(FileEntry {
+                name: String::from("etc"),
+                size_bytes: 4096,
+                item_type: FileItemType::Directory,
+            });
+            self.entries.push(FileEntry {
+                name: String::from("system.cfg"),
+                size_bytes: 512,
+                item_type: FileItemType::File,
+            });
+        } else if clean_path == "/home" {
+            self.entries.push(FileEntry {
+                name: String::from("teha"),
+                size_bytes: 4096,
+                item_type: FileItemType::Directory,
+            });
+        } else if clean_path == "/home/teha" {
             self.entries.push(FileEntry {
                 name: String::from("projects"),
                 size_bytes: 4096,
@@ -112,6 +145,23 @@ impl FilesAppState {
                 size_bytes: 348160,
                 item_type: FileItemType::Executable,
             });
+        } else if clean_path == "/home/teha/documents" {
+            self.entries.push(FileEntry {
+                name: String::from("manual.txt"),
+                size_bytes: 2048,
+                item_type: FileItemType::File,
+            });
+            self.entries.push(FileEntry {
+                name: String::from("todo.md"),
+                size_bytes: 1024,
+                item_type: FileItemType::File,
+            });
+        } else if clean_path == "/home/teha/downloads" {
+            self.entries.push(FileEntry {
+                name: String::from("archive.tar"),
+                size_bytes: 65536,
+                item_type: FileItemType::File,
+            });
         } else if clean_path == "/tmp" {
             self.entries.push(FileEntry {
                 name: String::from("scratch.log"),
@@ -122,6 +172,17 @@ impl FilesAppState {
                 name: String::from("dump.bin"),
                 size_bytes: 8192,
                 item_type: FileItemType::File,
+            });
+        } else if clean_path == "/bin" {
+            self.entries.push(FileEntry {
+                name: String::from("sh"),
+                size_bytes: 40960,
+                item_type: FileItemType::Executable,
+            });
+            self.entries.push(FileEntry {
+                name: String::from("ls"),
+                size_bytes: 16384,
+                item_type: FileItemType::Executable,
             });
         } else {
             // Default directory listing
@@ -136,7 +197,7 @@ impl FilesAppState {
     }
 
     pub fn navigate_to(&mut self, path: &str) {
-        if path.contains("//") {
+        if path.contains("//") || path.contains("..") {
             self.status_message = String::from("Invalid path format");
             return;
         }
@@ -147,20 +208,23 @@ impl FilesAppState {
         if self.history_idx + 1 < self.history.len() {
             self.history.truncate(self.history_idx + 1);
         }
-        self.history.push(String::from(path));
+        self.history.push(self.current_path.clone());
         self.history_idx = self.history.len().saturating_sub(1);
     }
 
     pub fn go_parent(&mut self) {
-        if self.current_path == "/" || self.current_path == "/home" {
+        let trimmed = self.current_path.trim_end_matches('/');
+        if trimmed.is_empty() || trimmed == "/home" {
             self.navigate_to("/");
-        } else if let Some(last_slash) = self.current_path.rfind('/') {
+        } else if let Some(last_slash) = trimmed.rfind('/') {
             if last_slash == 0 {
                 self.navigate_to("/");
             } else {
-                let parent = String::from(&self.current_path[..last_slash]);
+                let parent = String::from(&trimmed[..last_slash]);
                 self.navigate_to(&parent);
             }
+        } else {
+            self.navigate_to("/");
         }
     }
 
