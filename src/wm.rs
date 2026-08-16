@@ -186,11 +186,9 @@ impl WindowManager {
         win.state = WindowState::Minimized;
 
         if self.focused_window == Some(window_id) {
-            self.focused_window = self.windows.iter().rev().find(|w| w.visible).map(|w| w.window_id);
-            if let Some(fid) = self.focused_window {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.window_id == fid) {
-                    w.focused = true;
-                }
+            self.focused_window = self.windows.iter().rev().find(|w| w.visible && w.state != WindowState::Minimized).map(|w| w.window_id);
+            for w in self.windows.iter_mut() {
+                w.focused = Some(w.window_id) == self.focused_window;
             }
         }
         Ok(())
@@ -332,10 +330,8 @@ impl WindowManager {
         if self.focused_window == Some(window_id) {
             // Transfer focus to the next topmost visible window
             self.focused_window = self.windows.iter().rev().find(|w| w.visible && w.state != WindowState::Minimized).map(|w| w.window_id);
-            if let Some(fid) = self.focused_window {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.window_id == fid) {
-                    w.focused = true;
-                }
+            for w in self.windows.iter_mut() {
+                w.focused = Some(w.window_id) == self.focused_window;
             }
         }
 
@@ -764,6 +760,7 @@ impl WindowManager {
 
     /// Handles mouse down: performs titlebar dragging, resize, close/maximize/minimize buttons, dock interaction, or client focus
     pub fn handle_mouse_down(&mut self, mx: i32, my: i32) -> Option<(u64, u64)> {
+        let screen_w = unsafe { crate::gui::VESA.width as i32 };
         let screen_h = unsafe { crate::gui::VESA.height as i32 };
         let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
 
@@ -804,8 +801,8 @@ impl WindowManager {
                 return None;
             }
 
-            // Window Tab click (x >= 84)
-            if mx >= 84 {
+            // Window Tab click (x in 84 .. screen_w - 80)
+            if mx >= 84 && mx <= screen_w.saturating_sub(80) {
                 let tab_idx = ((mx - 84) / 84) as usize;
                 if tab_idx < self.windows.len() {
                     let win = &self.windows[tab_idx];
