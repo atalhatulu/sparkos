@@ -28,8 +28,12 @@ impl SimpleExecutor {
             for _ in 0..queue_len {
                 if let Some(mut task) = self.task_queue.pop_front() {
                     let task_id = task.id.0;
-                    
-                    {
+                    let is_system_task = task.name == "clock"
+                        || task.name == "mouse"
+                        || task.name == "keyboard"
+                        || task.name == "boot_orchestrator";
+
+                    if !is_system_task {
                         let mut killed = super::KILLED_PROCESSES.lock();
                         if let Some(pos) = killed.iter().position(|&id| id == task_id) {
                             killed.remove(pos);

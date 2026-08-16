@@ -1052,29 +1052,30 @@ pub fn exit_current() -> ! {
         {
             let mut s = SCHEDULER.lock();
             if let Some(pid) = s.current {
-                if let Some(p) = s.table.get_mut(&pid) {
+                let (parent_pid, is_user) = if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Terminated;
                     p.exited = true;
                     crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
-                    // Görev A (CAP_INV-13): CSpace otomatik temizliği
                     crate::cap::destroy_process_cspace(&mut p.cap_table);
-                    // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
                     crate::ipc::hangup_channel_for_pid(pid as u32);
-                    // Faz 11: Sürece ait tüm Shmem Surface'leri temizle (Zero-Leak Teardown)
                     crate::surface::cleanup_surfaces_for_pid(pid);
-                    // Faz 12: Sürece ait tüm Window'ları temizle (Zero-Leak Window Teardown)
                     crate::wm::cleanup_windows_for_pid(pid);
-                    // Faz 13: Sürece ait Input Event Kuyruğunu temizle (Zero-Leak Event Teardown)
                     crate::input::cleanup_input_for_pid(pid);
                     p.allowed_ports = None;
-                    if let Some(parent_pid) = p.parent_pid {
-                        if let Some(parent) = s.table.get_mut(&parent_pid) {
-                            if parent.state == ProcessState::Blocked {
-                                parent.state = ProcessState::Ready;
-                                s.ready.push_back(parent_pid);
-                            }
+                    (p.parent_pid, p.is_user)
+                } else {
+                    (None, false)
+                };
+
+                if let Some(parent_pid) = parent_pid {
+                    if let Some(parent) = s.table.get_mut(&parent_pid) {
+                        if parent.state == ProcessState::Blocked {
+                            parent.state = ProcessState::Ready;
+                            s.ready.push_back(parent_pid);
                         }
                     }
+                }
+                if !is_user {
                     crate::task::KILLED_PROCESSES.lock().push(pid);
                 }
             }
@@ -1101,28 +1102,29 @@ pub fn exit_current() -> ! {
     let next_ctx: *const RegisterContext = {
         let mut s = SCHEDULER.lock();
         if let Some(pid) = s.current {
-            if let Some(p) = s.table.get_mut(&pid) {
+            let (parent_pid, is_user) = if let Some(p) = s.table.get_mut(&pid) {
                 p.state = ProcessState::Terminated;
                 p.exited = true;
-                // Görev A (CAP_INV-13): CSpace otomatik temizliği
                 crate::cap::destroy_process_cspace(&mut p.cap_table);
-                // Görev A (CAP_INV-13): Kanal ve IRQ unbind / hangup
                 crate::ipc::hangup_channel_for_pid(pid as u32);
-                // Faz 11: Sürece ait tüm Shmem Surface'leri temizle (Zero-Leak Teardown)
                 crate::surface::cleanup_surfaces_for_pid(pid);
-                // Faz 12: Sürece ait tüm Window'ları temizle (Zero-Leak Window Teardown)
                 crate::wm::cleanup_windows_for_pid(pid);
-                // Faz 13: Sürece ait Input Event Kuyruğunu temizle (Zero-Leak Event Teardown)
                 crate::input::cleanup_input_for_pid(pid);
                 p.allowed_ports = None;
-                if let Some(parent_pid) = p.parent_pid {
-                    if let Some(parent) = s.table.get_mut(&parent_pid) {
-                        if parent.state == ProcessState::Blocked {
-                            parent.state = ProcessState::Ready;
-                            s.ready.push_back(parent_pid);
-                        }
+                (p.parent_pid, p.is_user)
+            } else {
+                (None, false)
+            };
+
+            if let Some(parent_pid) = parent_pid {
+                if let Some(parent) = s.table.get_mut(&parent_pid) {
+                    if parent.state == ProcessState::Blocked {
+                        parent.state = ProcessState::Ready;
+                        s.ready.push_back(parent_pid);
                     }
                 }
+            }
+            if !is_user {
                 crate::task::KILLED_PROCESSES.lock().push(pid);
             }
         }

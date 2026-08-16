@@ -376,18 +376,9 @@ impl WindowManager {
                     crate::cap::destroy_process_cspace(&mut proc.cap_table);
                     crate::ipc::hangup_channel_for_pid(caller_pid as u32);
                     need_purge = true;
-
-                    let mut killed = crate::task::KILLED_PROCESSES.lock();
-                    if !killed.contains(&caller_pid) {
-                        killed.push(caller_pid);
-                    }
                 }
             } else if !remaining_windows {
                 need_purge = true;
-                let mut killed = crate::task::KILLED_PROCESSES.lock();
-                if !killed.contains(&caller_pid) {
-                    killed.push(caller_pid);
-                }
             }
 
             if need_purge {
