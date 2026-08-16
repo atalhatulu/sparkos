@@ -250,9 +250,6 @@ pub async fn mouse_task() {
                         crate::desktop::DesktopIconAction::OpenTaskMgr => {
                             let _ = crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app");
                         }
-                        crate::desktop::DesktopIconAction::OpenSysMon => {
-                            let _ = crate::sysmon_app::spawn_sysmon_app("sysmon.app");
-                        }
                         crate::desktop::DesktopIconAction::OpenSettings => {
                             let _ = crate::settings_app::spawn_settings_app("settings.app");
                         }

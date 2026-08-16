@@ -504,43 +504,33 @@ impl WindowManager {
             let border_col = if is_focused { active_theme.accent_color } else { active_theme.border_color };
 
             if win.state == WindowState::Fullscreen {
-                // 3-FS. True Fullscreen: Scaled blit across entire display area
+                // 3-FS. True Fullscreen: 1:1 Aspect-Preserved Fast Centered Blit (Zero Lag, Crisp Pixels)
                 if let Some(surface) = surf_reg.iter().find(|s| s.surface_id == win.surface_id) {
                     let phys_addr = surface.shmem_phys_addr;
                     let src_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *const u32 };
-                    let target_w = screen_w as usize;
-                    let target_h = screen_h as usize;
+                    let surf_w = surface.width as usize;
+                    let surf_h = surface.height as usize;
+                    let screen_w_usize = screen_w as usize;
+                    let screen_h_usize = screen_h as usize;
+
+                    // Clean dark backdrop for fullscreen
+                    crate::gui::draw_rect(0, 0, screen_w, screen_h, active_theme.window_active);
+
+                    let offset_x = screen_w_usize.saturating_sub(surf_w) / 2;
+                    let offset_y = screen_h_usize.saturating_sub(surf_h) / 2;
+                    let copy_w = surf_w.min(screen_w_usize);
+                    let copy_h = surf_h.min(screen_h_usize);
 
                     unsafe {
-                        if !crate::gui::BACKBUFFER.is_null() && target_w > 0 && target_h > 0 {
-                            let surf_w = surface.width as usize;
-                            let surf_h = surface.height as usize;
-
-                            if surf_w == target_w && surf_h == target_h {
-                                for r in 0..target_h {
-                                    let src_offset = r * surf_w;
-                                    let dst_offset = r * (screen_w as usize);
-                                    core::ptr::copy_nonoverlapping(
-                                        src_ptr.add(src_offset),
-                                        crate::gui::BACKBUFFER.add(dst_offset),
-                                        target_w,
-                                    );
-                                }
-                            } else {
-                                let step_x = ((surf_w as u64) << 16) / (target_w as u64);
-                                let step_y = ((surf_h as u64) << 16) / (target_h as u64);
-
-                                for r in 0..target_h {
-                                    let src_y = (((r as u64) * step_y) >> 16) as usize;
-                                    let src_row_offset = src_y.min(surf_h.saturating_sub(1)) * surf_w;
-                                    let dst_row_offset = r * (screen_w as usize);
-
-                                    for c in 0..target_w {
-                                        let src_x = (((c as u64) * step_x) >> 16) as usize;
-                                        let pixel = *src_ptr.add(src_row_offset + src_x.min(surf_w.saturating_sub(1)));
-                                        *crate::gui::BACKBUFFER.add(dst_row_offset + c) = pixel;
-                                    }
-                                }
+                        if !crate::gui::BACKBUFFER.is_null() && copy_w > 0 && copy_h > 0 {
+                            for r in 0..copy_h {
+                                let src_offset = r * surf_w;
+                                let dst_offset = (offset_y + r) * screen_w_usize + offset_x;
+                                core::ptr::copy_nonoverlapping(
+                                    src_ptr.add(src_offset),
+                                    crate::gui::BACKBUFFER.add(dst_offset),
+                                    copy_w,
+                                );
                             }
                         }
                     }
@@ -621,45 +611,29 @@ impl WindowManager {
             // 3b. Client Area Background
             crate::gui::draw_rect(wx, wy + 20, ww, wh, active_theme.window_active);
 
-            // 3c. Blit shared-memory surface if present (with 1:1 or scaled fill)
+            // 3c. Blit shared-memory surface if present (1:1 Crisp Fast Row Copy - Zero Lag)
             if let Some(surface) = surf_reg.iter().find(|s| s.surface_id == win.surface_id) {
                 let phys_addr = surface.shmem_phys_addr;
                 let src_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *const u32 };
+                let surf_w = surface.width as usize;
+                let surf_h = surface.height as usize;
                 let target_w = (ww as usize).min((screen_w.saturating_sub(wx)) as usize);
                 let target_h = (wh as usize).min((dock_y.saturating_sub(wy + 20)) as usize);
 
+                let copy_w = surf_w.min(target_w);
+                let copy_h = surf_h.min(target_h);
+
                 unsafe {
-                    if !crate::gui::BACKBUFFER.is_null() && target_w > 0 && target_h > 0 {
-                        let surf_w = surface.width as usize;
-                        let surf_h = surface.height as usize;
-
-                        if surf_w == target_w && surf_h == target_h {
-                            for r in 0..target_h {
-                                let dst_row = (wy + 20) as usize + r;
-                                let src_offset = r * surf_w;
-                                let dst_offset = dst_row * (screen_w as usize) + (wx as usize);
-                                core::ptr::copy_nonoverlapping(
-                                    src_ptr.add(src_offset),
-                                    crate::gui::BACKBUFFER.add(dst_offset),
-                                    target_w,
-                                );
-                            }
-                        } else {
-                            let step_x = ((surf_w as u64) << 16) / (target_w as u64);
-                            let step_y = ((surf_h as u64) << 16) / (target_h as u64);
-
-                            for r in 0..target_h {
-                                let dst_row = (wy + 20) as usize + r;
-                                let src_y = (((r as u64) * step_y) >> 16) as usize;
-                                let src_row_offset = src_y.min(surf_h.saturating_sub(1)) * surf_w;
-                                let dst_row_offset = dst_row * (screen_w as usize) + (wx as usize);
-
-                                for c in 0..target_w {
-                                    let src_x = (((c as u64) * step_x) >> 16) as usize;
-                                    let pixel = *src_ptr.add(src_row_offset + src_x.min(surf_w.saturating_sub(1)));
-                                    *crate::gui::BACKBUFFER.add(dst_row_offset + c) = pixel;
-                                }
-                            }
+                    if !crate::gui::BACKBUFFER.is_null() && copy_w > 0 && copy_h > 0 {
+                        for r in 0..copy_h {
+                            let dst_row = (wy + 20) as usize + r;
+                            let src_offset = r * surf_w;
+                            let dst_offset = dst_row * (screen_w as usize) + (wx as usize);
+                            core::ptr::copy_nonoverlapping(
+                                src_ptr.add(src_offset),
+                                crate::gui::BACKBUFFER.add(dst_offset),
+                                copy_w,
+                            );
                         }
                     }
                 }

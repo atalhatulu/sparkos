@@ -17,22 +17,27 @@ pub fn render_taskmgr_surface(surface_ptr: *mut u32, w: u32, h: u32) {
     crate::font::draw_text(surface_ptr, w, h, 8, 22, "PID   NAME            STATE    MEM", header_color, bg_color);
     crate::font::draw_text(surface_ptr, w, h, 8, 32, "-----------------------------------", 0x00475569, bg_color);
 
-    let rows = [
-        "1     kernel_core     Running  1.2 MB",
-        "2     compositor_wm   Running  3.6 MB",
-        "3     input_service   Running  64 KB",
-        "4     shell_service   Running  128 KB",
-        "5     taskmgr.app     Running  512 KB",
-    ];
+    let (used_mem, total_mem) = crate::memory::get_memory_stats();
+    let used_mb = (used_mem / (1024 * 1024)).max(1);
+    let total_mb = total_mem / (1024 * 1024);
 
+    let procs = crate::task::process::get_system_metrics_snapshot();
     let mut y = 44u32;
-    for row in &rows {
-        if y + 10 > h { break; }
-        crate::font::draw_text(surface_ptr, w, h, 8, y, row, text_color, bg_color);
-        y += 12;
+    for p in procs.iter().take(8) {
+        if y + 12 > h.saturating_sub(20) { break; }
+        let state_str = match p.state {
+            crate::task::process::ProcessState::Running => "Running",
+            crate::task::process::ProcessState::Ready => "Ready",
+            _ => "Sleeping",
+        };
+        let mem_kb = (p.current_memory_bytes / 1024).max(4);
+        let row = alloc::format!("{:<5} {:<15} {:<8} {} KB", p.pid, p.name, state_str, mem_kb);
+        crate::font::draw_text(surface_ptr, w, h, 8, y, &row, text_color, bg_color);
+        y += 13;
     }
 
-    crate::font::draw_text(surface_ptr, w, h, 8, 170, "Total RAM: 256 MB | Free: 248 MB", 0x00A855F7, bg_color);
+    let footer = alloc::format!("RAM: {} / {} MB | Active PIDs: {}", used_mb, total_mb, procs.len());
+    crate::font::draw_text(surface_ptr, w, h, 8, h.saturating_sub(16), &footer, 0x00A855F7, bg_color);
 }
 
 pub fn spawn_taskmgr_app(name: &str) -> Result<u64, &'static str> {

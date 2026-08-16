@@ -39,14 +39,6 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
     },
     AppDescriptor {
         id: 2,
-        name: "Demo App",
-        exec_name: "live_demo_app",
-        icon: AppIcon::Demo,
-        default_w: 260,
-        default_h: 140,
-    },
-    AppDescriptor {
-        id: 3,
         name: "Files",
         exec_name: "files.app",
         icon: AppIcon::Files,
@@ -54,20 +46,28 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
         default_h: 180,
     },
     AppDescriptor {
-        id: 4,
-        name: "Settings",
-        exec_name: "settings.app",
-        icon: AppIcon::Settings,
-        default_w: 300,
-        default_h: 180,
+        id: 3,
+        name: "Text Editor",
+        exec_name: "editor.app",
+        icon: AppIcon::Editor,
+        default_w: 420,
+        default_h: 260,
     },
     AppDescriptor {
-        id: 5,
+        id: 4,
         name: "Task Manager",
         exec_name: "taskmgr.app",
         icon: AppIcon::TaskMgr,
         default_w: 360,
         default_h: 200,
+    },
+    AppDescriptor {
+        id: 5,
+        name: "Settings",
+        exec_name: "settings.app",
+        icon: AppIcon::Settings,
+        default_w: 300,
+        default_h: 180,
     },
     AppDescriptor {
         id: 6,
@@ -76,22 +76,6 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
         icon: AppIcon::Browser,
         default_w: 360,
         default_h: 220,
-    },
-    AppDescriptor {
-        id: 7,
-        name: "System Monitor",
-        exec_name: "sysmon.app",
-        icon: AppIcon::SysMon,
-        default_w: 440,
-        default_h: 260,
-    },
-    AppDescriptor {
-        id: 8,
-        name: "Text Editor",
-        exec_name: "editor.app",
-        icon: AppIcon::Editor,
-        default_w: 420,
-        default_h: 260,
     },
 ];
 
@@ -108,12 +92,11 @@ pub fn find_app_by_name(name: &str) -> Option<&'static AppDescriptor> {
 pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
     match app_id {
         1 => return crate::terminal_app::spawn_terminal_app("terminal.app"),
-        3 => return crate::files_app::spawn_files_app("files.app"),
-        4 => return crate::settings_app::spawn_settings_app("settings.app"),
-        5 => return crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"),
+        2 => return crate::files_app::spawn_files_app("files.app"),
+        3 => return crate::editor_app::spawn_editor_app("editor.app", None),
+        4 => return crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"),
+        5 => return crate::settings_app::spawn_settings_app("settings.app"),
         6 => return crate::browser_app::spawn_browser_app("browser.app"),
-        7 => return crate::sysmon_app::spawn_sysmon_app("sysmon.app"),
-        8 => return crate::editor_app::spawn_editor_app("editor.app", None),
         _ => {}
     }
     let app = find_app_by_id(app_id).ok_or("Unknown application ID")?;

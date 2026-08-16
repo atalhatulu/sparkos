@@ -13,7 +13,6 @@ pub enum DesktopIconAction {
     OpenTerminal,
     OpenEditor,
     OpenTaskMgr,
-    OpenSysMon,
     OpenSettings,
     OpenTrash,
     OpenApplications,
@@ -29,7 +28,7 @@ pub struct DesktopIcon {
 }
 
 pub struct DesktopEnvironment {
-    pub icons: [DesktopIcon; 7],
+    pub icons: [DesktopIcon; 6],
     pub selected_icon_id: Option<u32>,
     pub last_click_id: Option<u32>,
     pub last_click_tick: u64,
@@ -43,49 +42,42 @@ impl DesktopEnvironment {
             icons: [
                 DesktopIcon {
                     id: 1,
-                    position: (24, 36),
+                    position: (24, 40),
                     icon: AppIcon::Files,
                     label: "Files",
                     action: DesktopIconAction::OpenHome,
                 },
                 DesktopIcon {
                     id: 2,
-                    position: (24, 106),
+                    position: (24, 115),
                     icon: AppIcon::Terminal,
                     label: "Terminal",
                     action: DesktopIconAction::OpenTerminal,
                 },
                 DesktopIcon {
                     id: 3,
-                    position: (24, 176),
+                    position: (24, 190),
                     icon: AppIcon::Editor,
                     label: "Editor",
                     action: DesktopIconAction::OpenEditor,
                 },
                 DesktopIcon {
                     id: 4,
-                    position: (24, 246),
+                    position: (24, 265),
                     icon: AppIcon::TaskMgr,
                     label: "TaskMgr",
                     action: DesktopIconAction::OpenTaskMgr,
                 },
                 DesktopIcon {
                     id: 5,
-                    position: (24, 316),
-                    icon: AppIcon::SysMon,
-                    label: "SysMon",
-                    action: DesktopIconAction::OpenSysMon,
-                },
-                DesktopIcon {
-                    id: 6,
-                    position: (24, 386),
+                    position: (24, 340),
                     icon: AppIcon::Settings,
                     label: "Settings",
                     action: DesktopIconAction::OpenSettings,
                 },
                 DesktopIcon {
-                    id: 7,
-                    position: (24, 456),
+                    id: 6,
+                    position: (24, 415),
                     icon: AppIcon::Trash,
                     label: "Trash",
                     action: DesktopIconAction::OpenTrash,
