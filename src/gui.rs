@@ -344,6 +344,84 @@ pub fn draw_icon_glyph(x: u16, y: u16, icon: crate::app_registry::AppIcon, fg: u
             ];
             draw_bitmap_8x8(x, y, &bitmap, 0x0060A5FA /* Blue */, bg);
         }
+        crate::app_registry::AppIcon::Editor => {
+            let bitmap: [u8; 8] = [
+                0b01111100,
+                0b01000110,
+                0b01111110,
+                0b01000010,
+                0b01111010,
+                0b01000010,
+                0b01111110,
+                0b00000000,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x00F472B6 /* Pink */, bg);
+        }
+        crate::app_registry::AppIcon::TaskMgr => {
+            let bitmap: [u8; 8] = [
+                0b00000000,
+                0b00010000,
+                0b00011000,
+                0b01010100,
+                0b10100010,
+                0b00000001,
+                0b11111111,
+                0b00000000,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0034D399 /* Mint */, bg);
+        }
+        crate::app_registry::AppIcon::SysMon => {
+            let bitmap: [u8; 8] = [
+                0b01111110,
+                0b10011001,
+                0b10111101,
+                0b10100101,
+                0b10111101,
+                0b10011001,
+                0b01111110,
+                0b00000000,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0038BDF8 /* Cyan */, bg);
+        }
+        crate::app_registry::AppIcon::Settings => {
+            let bitmap: [u8; 8] = [
+                0b00111100,
+                0b01011010,
+                0b10111101,
+                0b11100111,
+                0b11100111,
+                0b10111101,
+                0b01011010,
+                0b00111100,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0094A3B8 /* Slate */, bg);
+        }
+        crate::app_registry::AppIcon::Browser => {
+            let bitmap: [u8; 8] = [
+                0b00111100,
+                0b01011010,
+                0b11011011,
+                0b11111111,
+                0b11011011,
+                0b01011010,
+                0b00111100,
+                0b00000000,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x0038BDF8 /* Sky Blue */, bg);
+        }
+        crate::app_registry::AppIcon::Trash => {
+            let bitmap: [u8; 8] = [
+                0b00111100,
+                0b01111110,
+                0b00011000,
+                0b01111110,
+                0b01010110,
+                0b01010110,
+                0b01010110,
+                0b00111100,
+            ];
+            draw_bitmap_8x8(x, y, &bitmap, 0x00EF4444 /* Red */, bg);
+        }
         _ => {
             let bitmap: [u8; 8] = [
                 0b11111111,

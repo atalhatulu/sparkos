@@ -471,8 +471,12 @@ pub fn spawn_files_app(name: &str) -> Result<u64, &'static str> {
     );
 
     let surf_id = crate::surface::create_surface_for_pid(pid, FILES_WIDTH, FILES_HEIGHT)?;
+    let (win_x, win_y) = {
+        let count = crate::wm::WM.lock().windows.len() as i32;
+        (50 + ((count * 30) % 200), 50 + ((count * 25) % 150))
+    };
     let win_id = crate::wm::WM.lock()
-        .create_window(pid, surf_id, 60, 60, FILES_WIDTH, FILES_HEIGHT)
+        .create_window(pid, surf_id, win_x, win_y, FILES_WIDTH, FILES_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
     {

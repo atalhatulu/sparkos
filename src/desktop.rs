@@ -11,8 +11,10 @@ use crate::app_registry::AppIcon;
 pub enum DesktopIconAction {
     OpenHome,
     OpenTerminal,
-    OpenComputer,
     OpenEditor,
+    OpenTaskMgr,
+    OpenSysMon,
+    OpenSettings,
     OpenTrash,
     OpenApplications,
 }
@@ -27,7 +29,7 @@ pub struct DesktopIcon {
 }
 
 pub struct DesktopEnvironment {
-    pub icons: [DesktopIcon; 5],
+    pub icons: [DesktopIcon; 7],
     pub selected_icon_id: Option<u32>,
     pub last_click_id: Option<u32>,
     pub last_click_tick: u64,
@@ -41,36 +43,50 @@ impl DesktopEnvironment {
             icons: [
                 DesktopIcon {
                     id: 1,
-                    position: (24, 40),
+                    position: (24, 36),
                     icon: AppIcon::Files,
-                    label: "Home",
+                    label: "Files",
                     action: DesktopIconAction::OpenHome,
                 },
                 DesktopIcon {
                     id: 2,
-                    position: (24, 115),
+                    position: (24, 106),
                     icon: AppIcon::Terminal,
                     label: "Terminal",
                     action: DesktopIconAction::OpenTerminal,
                 },
                 DesktopIcon {
                     id: 3,
-                    position: (24, 190),
-                    icon: AppIcon::Generic,
-                    label: "Computer",
-                    action: DesktopIconAction::OpenComputer,
-                },
-                DesktopIcon {
-                    id: 4,
-                    position: (24, 265),
-                    icon: AppIcon::Generic,
+                    position: (24, 176),
+                    icon: AppIcon::Editor,
                     label: "Editor",
                     action: DesktopIconAction::OpenEditor,
                 },
                 DesktopIcon {
+                    id: 4,
+                    position: (24, 246),
+                    icon: AppIcon::TaskMgr,
+                    label: "TaskMgr",
+                    action: DesktopIconAction::OpenTaskMgr,
+                },
+                DesktopIcon {
                     id: 5,
-                    position: (24, 340),
-                    icon: AppIcon::Generic,
+                    position: (24, 316),
+                    icon: AppIcon::SysMon,
+                    label: "SysMon",
+                    action: DesktopIconAction::OpenSysMon,
+                },
+                DesktopIcon {
+                    id: 6,
+                    position: (24, 386),
+                    icon: AppIcon::Settings,
+                    label: "Settings",
+                    action: DesktopIconAction::OpenSettings,
+                },
+                DesktopIcon {
+                    id: 7,
+                    position: (24, 456),
+                    icon: AppIcon::Trash,
                     label: "Trash",
                     action: DesktopIconAction::OpenTrash,
                 },
@@ -146,8 +162,8 @@ impl DesktopEnvironment {
         for icon in &self.icons {
             let (ix, iy) = icon.position;
             if mx >= ix - 4 && mx <= ix + 60 && my >= iy - 4 && my <= iy + 60 {
-                // Check for double click (within 30 ticks / ~500ms)
-                if self.last_click_id == Some(icon.id) && current_tick.saturating_sub(self.last_click_tick) <= 30 {
+                // Check for double click (within 500 ticks / ~500ms)
+                if self.last_click_id == Some(icon.id) && current_tick.saturating_sub(self.last_click_tick) <= 500 {
                     self.last_click_id = None;
                     self.last_click_tick = 0;
                     crate::serial_println!("[DESKTOP] Double-click activated icon '{}'", icon.label);

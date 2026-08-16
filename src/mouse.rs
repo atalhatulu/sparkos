@@ -238,14 +238,23 @@ pub async fn mouse_task() {
                     }
                 } else if let Some(action) = crate::desktop::DESKTOP_ENV.lock().handle_mouse_click(cx, cy, crate::interrupts::get_tick()) {
                     match action {
+                        crate::desktop::DesktopIconAction::OpenHome => {
+                            let _ = crate::files_app::spawn_files_app("files.app");
+                        }
                         crate::desktop::DesktopIconAction::OpenTerminal => {
                             let _ = crate::terminal_app::spawn_terminal_app("terminal.app");
                         }
-                        crate::desktop::DesktopIconAction::OpenHome | crate::desktop::DesktopIconAction::OpenComputer => {
-                            let _ = crate::files_app::spawn_files_app("files.app");
-                        }
                         crate::desktop::DesktopIconAction::OpenEditor => {
                             let _ = crate::editor_app::spawn_editor_app("editor.app", None);
+                        }
+                        crate::desktop::DesktopIconAction::OpenTaskMgr => {
+                            let _ = crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app");
+                        }
+                        crate::desktop::DesktopIconAction::OpenSysMon => {
+                            let _ = crate::sysmon_app::spawn_sysmon_app("sysmon.app");
+                        }
+                        crate::desktop::DesktopIconAction::OpenSettings => {
+                            let _ = crate::settings_app::spawn_settings_app("settings.app");
                         }
                         crate::desktop::DesktopIconAction::OpenApplications => {
                             crate::wm::WM.lock().launcher_open = true;

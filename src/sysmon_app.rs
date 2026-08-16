@@ -118,8 +118,12 @@ pub fn spawn_sysmon_app(name: &str) -> Result<u64, &'static str> {
     );
 
     let surf_id = crate::surface::create_surface_for_pid(pid, SYSMON_WIDTH, SYSMON_HEIGHT)?;
+    let (win_x, win_y) = {
+        let count = crate::wm::WM.lock().windows.len() as i32;
+        (80 + ((count * 30) % 200), 70 + ((count * 25) % 150))
+    };
     let _win_id = crate::wm::WM.lock()
-        .create_window(pid, surf_id, 120, 80, SYSMON_WIDTH, SYSMON_HEIGHT)
+        .create_window(pid, surf_id, win_x, win_y, SYSMON_WIDTH, SYSMON_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
     if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {

@@ -551,27 +551,38 @@ impl WindowManager {
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
             
-            // Draw App Icon
-            let icon_type = match win.owner_pid {
-                1 => crate::app_registry::AppIcon::Terminal,
-                2 => crate::app_registry::AppIcon::Files,
-                3 => crate::app_registry::AppIcon::Generic,
-                _ => crate::app_registry::AppIcon::Generic,
+            // Draw App Icon & Title from Process PCB
+            let (app_name, icon_type) = {
+                let sched = crate::task::process::SCHEDULER.lock();
+                if let Some(p) = sched.get_process(win.owner_pid) {
+                    let icon = match p.name.as_str() {
+                        "terminal.app" => crate::app_registry::AppIcon::Terminal,
+                        "files.app" => crate::app_registry::AppIcon::Files,
+                        "editor.app" => crate::app_registry::AppIcon::Editor,
+                        "taskmgr.app" => crate::app_registry::AppIcon::TaskMgr,
+                        "sysmon.app" => crate::app_registry::AppIcon::SysMon,
+                        "settings.app" => crate::app_registry::AppIcon::Settings,
+                        "browser.app" => crate::app_registry::AppIcon::Browser,
+                        "live_demo_app" => crate::app_registry::AppIcon::Demo,
+                        _ => crate::app_registry::AppIcon::Generic,
+                    };
+                    let title = match p.name.as_str() {
+                        "terminal.app" => "Terminal",
+                        "files.app" => "Files",
+                        "editor.app" => "Text Editor",
+                        "taskmgr.app" => "Task Manager",
+                        "sysmon.app" => "System Monitor",
+                        "settings.app" => "Settings",
+                        "browser.app" => "Web Browser",
+                        "live_demo_app" => "Demo App",
+                        _ => "SparkOS Application",
+                    };
+                    (title, icon)
+                } else {
+                    ("SparkOS Application", crate::app_registry::AppIcon::Generic)
+                }
             };
             crate::gui::draw_icon_glyph(wx + 6, wy + 6, icon_type, title_fg, title_bg);
-
-            // Title text (App Name / PID)
-            let app_name = match win.owner_pid {
-                1 => "Terminal",
-                2 => "Demo App",
-                3 => "Files",
-                4 => "Settings",
-                5 => "Task Manager",
-                6 => "Web Browser",
-                7 => "System Monitor",
-                8 => "Text Editor",
-                _ => "SparkOS Application",
-            };
             crate::gui::draw_string(wx + 18, wy + 6, app_name, title_fg, title_bg);
 
             // Control Buttons on Right (— □ ×)
@@ -687,24 +698,37 @@ impl WindowManager {
 
             if tab_x + 84 <= screen_w.saturating_sub(80) {
                 crate::gui::draw_rect(tab_x, dock_y + 2, 80, 20, tab_bg);
-                let tab_icon = match win.owner_pid {
-                    1 => crate::app_registry::AppIcon::Terminal,
-                    2 => crate::app_registry::AppIcon::Demo,
-                    3 => crate::app_registry::AppIcon::Files,
-                    _ => crate::app_registry::AppIcon::Generic,
+                let (app_prefix, tab_icon) = {
+                    let sched = crate::task::process::SCHEDULER.lock();
+                    if let Some(p) = sched.get_process(win.owner_pid) {
+                        let icon = match p.name.as_str() {
+                            "terminal.app" => crate::app_registry::AppIcon::Terminal,
+                            "files.app" => crate::app_registry::AppIcon::Files,
+                            "editor.app" => crate::app_registry::AppIcon::Editor,
+                            "taskmgr.app" => crate::app_registry::AppIcon::TaskMgr,
+                            "sysmon.app" => crate::app_registry::AppIcon::SysMon,
+                            "settings.app" => crate::app_registry::AppIcon::Settings,
+                            "browser.app" => crate::app_registry::AppIcon::Browser,
+                            "live_demo_app" => crate::app_registry::AppIcon::Demo,
+                            _ => crate::app_registry::AppIcon::Generic,
+                        };
+                        let prefix = match p.name.as_str() {
+                            "terminal.app" => "Term",
+                            "files.app" => "Files",
+                            "editor.app" => "Edit",
+                            "taskmgr.app" => "Task",
+                            "sysmon.app" => "Sys",
+                            "settings.app" => "Set",
+                            "browser.app" => "Web",
+                            "live_demo_app" => "Demo",
+                            _ => "Win",
+                        };
+                        (prefix, icon)
+                    } else {
+                        ("Win", crate::app_registry::AppIcon::Generic)
+                    }
                 };
                 crate::gui::draw_icon_glyph(tab_x + 4, dock_y + 8, tab_icon, tab_fg, tab_bg);
-                let app_prefix = match win.owner_pid {
-                    1 => "Term",
-                    2 => "Demo",
-                    3 => "Files",
-                    4 => "Set",
-                    5 => "Task",
-                    6 => "Web",
-                    7 => "Sys",
-                    8 => "Edit",
-                    _ => "Win",
-                };
                 let short_name = alloc::format!("{}-{}", app_prefix, win.window_id);
                 crate::gui::draw_string(tab_x + 16, dock_y + 7, &short_name, tab_fg, tab_bg);
 

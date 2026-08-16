@@ -1153,8 +1153,12 @@ pub fn spawn_editor_app(name: &str, file_to_open: Option<&str>) -> Result<u64, &
     );
 
     let surf_id = crate::surface::create_surface_for_pid(pid, EDITOR_WIDTH, EDITOR_HEIGHT)?;
+    let (win_x, win_y) = {
+        let count = crate::wm::WM.lock().windows.len() as i32;
+        (60 + ((count * 30) % 200), 50 + ((count * 25) % 150))
+    };
     let win_id = crate::wm::WM.lock()
-        .create_window(pid, surf_id, 80, 80, EDITOR_WIDTH, EDITOR_HEIGHT)
+        .create_window(pid, surf_id, win_x, win_y, EDITOR_WIDTH, EDITOR_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
     {

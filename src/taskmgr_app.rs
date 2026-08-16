@@ -56,8 +56,12 @@ pub fn spawn_taskmgr_app(name: &str) -> Result<u64, &'static str> {
     );
 
     let surf_id = crate::surface::create_surface_for_pid(pid, TASKMGR_WIDTH, TASKMGR_HEIGHT)?;
+    let (win_x, win_y) = {
+        let count = crate::wm::WM.lock().windows.len() as i32;
+        (70 + ((count * 30) % 200), 60 + ((count * 25) % 150))
+    };
     let _win_id = crate::wm::WM.lock()
-        .create_window(pid, surf_id, 140, 100, TASKMGR_WIDTH, TASKMGR_HEIGHT)
+        .create_window(pid, surf_id, win_x, win_y, TASKMGR_WIDTH, TASKMGR_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
     if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
