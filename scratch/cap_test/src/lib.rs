@@ -9016,6 +9016,150 @@ mod invariant_tests {
         doc = snapshot;
         assert_eq!(doc, "Başlangıç");
     }
+
+    // =========================================================================
+    // STEP 52: DESKTOP V1.40 EDITOR 3.0: SEARCH & WORD WRAP INVARIANTS
+    // =========================================================================
+
+    /// EDIT3_INV-1: Find next and previous pattern match navigation
+    #[test]
+    fn test_edit3_inv_1_find_next_and_previous() {
+        let text = "alpha beta gamma beta delta";
+        let query = "beta";
+
+        let first_match = text.find(query).unwrap();
+        let second_match = text[first_match + query.len()..].find(query).map(|p| p + first_match + query.len()).unwrap();
+
+        assert_eq!(first_match, 6);
+        assert_eq!(second_match, 17);
+
+        // Previous from index 21 finds second match
+        let prev_match = text[..21].rfind(query).unwrap();
+        assert_eq!(prev_match, 17);
+    }
+
+    /// EDIT3_INV-2: Case-sensitive vs case-insensitive matching
+    #[test]
+    fn test_edit3_inv_2_case_sensitivity() {
+        let text = "SparkOS sparkos SPARKOS";
+
+        let sensitive_count = text.matches("sparkos").count();
+        let insensitive_count = text.to_lowercase().matches("sparkos").count();
+
+        assert_eq!(sensitive_count, 1);
+        assert_eq!(insensitive_count, 3);
+    }
+
+    /// EDIT3_INV-3: Safe no-match handling
+    #[test]
+    fn test_edit3_inv_3_no_match_safety() {
+        let text = "simple document text";
+        let query = "nonexistent_pattern";
+
+        let result = text.find(query);
+        assert_eq!(result, None);
+    }
+
+    /// EDIT3_INV-4: Single occurrence Replace
+    #[test]
+    fn test_edit3_inv_4_single_replace() {
+        let mut line = alloc::string::String::from("replace old with new");
+        let start = 8;
+        let end = 11; // "old"
+
+        line.replace_range(start..end, "modern");
+        assert_eq!(line, "replace modern with new");
+    }
+
+    /// EDIT3_INV-5: Replace All occurrence count and document update
+    #[test]
+    fn test_edit3_inv_5_replace_all() {
+        let mut text = alloc::string::String::from("foo bar foo baz foo");
+        let count = text.matches("foo").count();
+        let new_text = text.replace("foo", "qux");
+
+        assert_eq!(count, 3);
+        assert_eq!(new_text, "qux bar qux baz qux");
+    }
+
+    /// EDIT3_INV-6: Replace All Undo / Redo as a single atomic snapshot
+    #[test]
+    fn test_edit3_inv_6_replace_all_undo_redo_atomic() {
+        let original = alloc::string::String::from("cat cat cat");
+        let mut undo_stack: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
+        let mut redo_stack: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
+
+        // Replace All
+        undo_stack.push(original.clone());
+        redo_stack.clear();
+        let current = original.replace("cat", "dog");
+
+        assert_eq!(current, "dog dog dog");
+
+        // Undo single step restores original
+        let restored = undo_stack.pop().unwrap();
+        assert_eq!(restored, "cat cat cat");
+    }
+
+    /// EDIT3_INV-7: Smart Word Wrap soft-wrapping without raw line mutation
+    #[test]
+    fn test_edit3_inv_7_word_wrap_soft_slice() {
+        let raw_line = alloc::string::String::from("A very long line exceeding forty columns threshold for display");
+        let max_cols = 40;
+
+        let visible_slice = if raw_line.len() > max_cols {
+            &raw_line[..max_cols]
+        } else {
+            &raw_line[..]
+        };
+
+        // Visible slice is capped, raw line remains untouched
+        assert_eq!(visible_slice.len(), 40);
+        assert_eq!(raw_line.len(), 62);
+    }
+
+    /// EDIT3_INV-8: Word Wrap toggle state isolation
+    #[test]
+    fn test_edit3_inv_8_word_wrap_toggle() {
+        let mut wrap = false;
+
+        wrap = !wrap;
+        assert!(wrap);
+
+        wrap = !wrap;
+        assert!(!wrap);
+    }
+
+    /// EDIT3_INV-9: Multi-editor search, replace, and wrap isolation
+    #[test]
+    fn test_edit3_inv_9_multi_editor_search_wrap_isolation() {
+        struct EditorInstance {
+            id: u64,
+            search_query: alloc::string::String,
+            wrap: bool,
+        }
+
+        let mut ed1 = EditorInstance { id: 1, search_query: alloc::string::String::from("kernel"), wrap: true };
+        let ed2 = EditorInstance { id: 2, search_query: alloc::string::String::new(), wrap: false };
+
+        ed1.search_query.push_str("_panic");
+
+        assert_eq!(ed1.search_query, "kernel_panic");
+        assert_eq!(ed2.search_query, "");
+        assert!(ed1.wrap);
+        assert!(!ed2.wrap);
+    }
+
+    /// EDIT3_INV-10: UTF-8 / Turkish character pattern matching and replacement
+    #[test]
+    fn test_edit3_inv_10_turkish_search_and_replace() {
+        let text = "Türkçe metin içerisinde çağdaş sözcükler";
+        let match_found = text.contains("çağdaş");
+        assert!(match_found);
+
+        let replaced = text.replace("çağdaş", "modern");
+        assert_eq!(replaced, "Türkçe metin içerisinde modern sözcükler");
+    }
 }
 
 

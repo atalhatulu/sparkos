@@ -1,9 +1,8 @@
-//! SparkOS Desktop V1.39 — Editor 2.0 & Text UX (`editor.app`)
+//! SparkOS Desktop V1.40 — Editor 3.0: Search, Replace & Word Wrap (`editor.app`)
 //!
-//! Features multi-level Undo/Redo (Ctrl+Z/Ctrl+Y with 50-step capacity cap),
-//! unsaved changes dialog (Save/Discard/Cancel), vertical & horizontal scrolling,
-//! cursor auto-scroll, mouse & keyboard selection (Shift+Arrows, Ctrl+Home/End, Ctrl+A),
-//! and robust UTF-8 / multi-document state isolation.
+//! Features Find (Ctrl+F, Enter/Shift+Enter, Case Toggle), Replace (Ctrl+H, Replace, Replace All),
+//! Smart Word Wrap (soft-wrap without content mutation), Multi-level Undo/Redo (Ctrl+Z/Y),
+//! Unsaved Changes Dialog (Save/Discard/Cancel), and strict Multi-Document State Isolation.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -43,6 +42,13 @@ pub struct EditorAppState {
     pub selection_anchor: Option<(usize, usize)>,
     pub selection_focus: Option<(usize, usize)>,
     pub show_unsaved_dialog: bool,
+    pub show_find_dialog: bool,
+    pub show_replace_dialog: bool,
+    pub search_query: String,
+    pub replace_query: String,
+    pub case_sensitive: bool,
+    pub word_wrap: bool,
+    pub active_input_field: u8, // 0: Editor Canvas, 1: Find Field, 2: Replace Field
     pub status_message: String,
 }
 
@@ -63,6 +69,13 @@ impl EditorAppState {
             selection_anchor: None,
             selection_focus: None,
             show_unsaved_dialog: false,
+            show_find_dialog: false,
+            show_replace_dialog: false,
+            search_query: String::new(),
+            replace_query: String::new(),
+            case_sensitive: false,
+            word_wrap: false,
+            active_input_field: 0,
             status_message: String::from("Ready"),
         };
 
@@ -70,7 +83,7 @@ impl EditorAppState {
             state.open_file(path);
         } else {
             state.lines = alloc::vec![
-                String::from("// SparkOS Text Editor 2.0"),
+                String::from("// SparkOS Text Editor 3.0"),
                 String::from("Welcome to editor.app!"),
                 String::from(""),
             ];
@@ -151,20 +164,20 @@ impl EditorAppState {
         self.redo_stack.clear();
 
         if path.ends_with("notes.txt") {
-            self.lines.push(String::from("SparkOS V1.39 Desktop Notes"));
+            self.lines.push(String::from("SparkOS V1.40 Desktop Notes"));
             self.lines.push(String::from("- Full Window Manager 2.0 active"));
             self.lines.push(String::from("- Real File Manager & Clipboard active"));
-            self.lines.push(String::from("- Editor 2.0 with Undo/Redo & Selection"));
+            self.lines.push(String::from("- Editor 3.0: Search, Replace & Word Wrap"));
             self.lines.push(String::from("- Türkçe karakter desteği: ç ğ ı İ ö ş ü"));
         } else if path.ends_with("main.rs") {
             self.lines.push(String::from("fn main() {"));
-            self.lines.push(String::from("    println!(\"Hello SparkOS 2.0!\");"));
+            self.lines.push(String::from("    println!(\"Hello SparkOS 3.0!\");"));
             self.lines.push(String::from("}"));
         } else if path.ends_with("config.toml") {
             self.lines.push(String::from("[desktop]"));
             self.lines.push(String::from("theme = \"dark\""));
             self.lines.push(String::from("font_size = 14"));
-            self.lines.push(String::from("undo_limit = 50"));
+            self.lines.push(String::from("word_wrap = true"));
         } else {
             self.lines.push(format!("// File: {}", path));
             self.lines.push(String::from(""));
@@ -209,6 +222,175 @@ impl EditorAppState {
         self.status_message = String::from("New document");
     }
 
+    pub fn toggle_word_wrap(&mut self) {
+        self.word_wrap = !self.word_wrap;
+        self.scroll_col = 0;
+        self.status_message = format!("Word Wrap: {}", if self.word_wrap { "ON" } else { "OFF" });
+    }
+
+    pub fn toggle_case_sensitive(&mut self) {
+        self.case_sensitive = !self.case_sensitive;
+        self.status_message = format!("Match Case: {}", if self.case_sensitive { "ON" } else { "OFF" });
+    }
+
+    pub fn find_next(&mut self) -> bool {
+        if self.search_query.is_empty() || self.lines.is_empty() {
+            self.status_message = String::from("Empty search term");
+            return false;
+        }
+
+        let query = if self.case_sensitive {
+            self.search_query.clone()
+        } else {
+            self.search_query.to_lowercase()
+        };
+
+        let start_row = self.cursor_row;
+        let start_col = self.cursor_col;
+        let total_rows = self.lines.len();
+
+        for i in 0..total_rows {
+            let r = (start_row + i) % total_rows;
+            let line_content = if self.case_sensitive {
+                self.lines[r].clone()
+            } else {
+                self.lines[r].to_lowercase()
+            };
+
+            let search_start = if i == 0 { (start_col + 1).min(line_content.len()) } else { 0 };
+            if search_start <= line_content.len() {
+                if let Some(pos) = line_content[search_start..].find(&query) {
+                    let match_col = search_start + pos;
+                    self.cursor_row = r;
+                    self.cursor_col = match_col + query.len();
+                    self.selection_anchor = Some((r, match_col));
+                    self.selection_focus = Some((r, match_col + query.len()));
+                    self.ensure_cursor_visible();
+                    self.status_message = format!("Match found at Ln {}, Col {}", r + 1, match_col + 1);
+                    return true;
+                }
+            }
+        }
+
+        self.status_message = format!("Pattern '{}' not found", self.search_query);
+        false
+    }
+
+    pub fn find_previous(&mut self) -> bool {
+        if self.search_query.is_empty() || self.lines.is_empty() {
+            self.status_message = String::from("Empty search term");
+            return false;
+        }
+
+        let query = if self.case_sensitive {
+            self.search_query.clone()
+        } else {
+            self.search_query.to_lowercase()
+        };
+
+        let start_row = self.cursor_row;
+        let total_rows = self.lines.len();
+
+        for i in 0..total_rows {
+            let r = if start_row >= i { start_row - i } else { total_rows - (i - start_row) };
+            let line_content = if self.case_sensitive {
+                self.lines[r].clone()
+            } else {
+                self.lines[r].to_lowercase()
+            };
+
+            let search_end = if i == 0 { self.cursor_col.saturating_sub(query.len()) } else { line_content.len() };
+            if search_end > 0 && search_end <= line_content.len() {
+                if let Some(pos) = line_content[..search_end].rfind(&query) {
+                    self.cursor_row = r;
+                    self.cursor_col = pos + query.len();
+                    self.selection_anchor = Some((r, pos));
+                    self.selection_focus = Some((r, pos + query.len()));
+                    self.ensure_cursor_visible();
+                    self.status_message = format!("Match found at Ln {}, Col {}", r + 1, pos + 1);
+                    return true;
+                }
+            }
+        }
+
+        self.status_message = format!("Pattern '{}' not found", self.search_query);
+        false
+    }
+
+    pub fn replace_current(&mut self) -> bool {
+        if self.search_query.is_empty() { return false; }
+
+        if let (Some((ar, ac)), Some((fr, fc))) = (self.selection_anchor, self.selection_focus) {
+            if ar == fr && ar < self.lines.len() {
+                self.push_undo_snapshot();
+                let (start_c, end_c) = if ac < fc { (ac, fc) } else { (fc, ac) };
+                let mut line = self.lines[ar].clone();
+                if start_c <= line.len() && end_c <= line.len() {
+                    line.replace_range(start_c..end_c, &self.replace_query);
+                    self.lines[ar] = line;
+                    self.cursor_row = ar;
+                    self.cursor_col = start_c + self.replace_query.len();
+                    self.is_dirty = true;
+                    self.selection_anchor = None;
+                    self.selection_focus = None;
+                    self.ensure_cursor_visible();
+                    self.status_message = String::from("Replaced 1 match");
+                    self.find_next();
+                    return true;
+                }
+            }
+        }
+
+        // If no match selected, find next match first
+        self.find_next()
+    }
+
+    pub fn replace_all(&mut self) -> usize {
+        if self.search_query.is_empty() || self.lines.is_empty() { return 0; }
+
+        self.push_undo_snapshot();
+        let mut count = 0usize;
+        let query = &self.search_query;
+        let replacement = &self.replace_query;
+
+        for line in self.lines.iter_mut() {
+            if self.case_sensitive {
+                let matches = line.matches(query).count();
+                if matches > 0 {
+                    *line = line.replace(query, replacement);
+                    count += matches;
+                }
+            } else {
+                let mut new_line = String::new();
+                let lower_line = line.to_lowercase();
+                let lower_query = query.to_lowercase();
+                let mut last_idx = 0;
+
+                while let Some(pos) = lower_line[last_idx..].find(&lower_query) {
+                    let match_start = last_idx + pos;
+                    new_line.push_str(&line[last_idx..match_start]);
+                    new_line.push_str(replacement);
+                    last_idx = match_start + lower_query.len();
+                    count += 1;
+                }
+                new_line.push_str(&line[last_idx..]);
+                *line = new_line;
+            }
+        }
+
+        if count > 0 {
+            self.is_dirty = true;
+            self.selection_anchor = None;
+            self.selection_focus = None;
+            self.ensure_cursor_visible();
+            self.status_message = format!("Replaced {} occurrence(s)", count);
+        } else {
+            self.status_message = format!("Pattern '{}' not found for replace", self.search_query);
+        }
+
+        count
+    }
+
     pub fn ensure_cursor_visible(&mut self) {
         // Vertical auto-scroll
         if self.cursor_row < self.scroll_row {
@@ -217,11 +399,15 @@ impl EditorAppState {
             self.scroll_row = self.cursor_row.saturating_sub(VISIBLE_ROWS - 1);
         }
 
-        // Horizontal auto-scroll
-        if self.cursor_col < self.scroll_col {
-            self.scroll_col = self.cursor_col;
-        } else if self.cursor_col >= self.scroll_col + VISIBLE_COLS {
-            self.scroll_col = self.cursor_col.saturating_sub(VISIBLE_COLS - 1);
+        // Horizontal auto-scroll (only if wrap is disabled)
+        if !self.word_wrap {
+            if self.cursor_col < self.scroll_col {
+                self.scroll_col = self.cursor_col;
+            } else if self.cursor_col >= self.scroll_col + VISIBLE_COLS {
+                self.scroll_col = self.cursor_col.saturating_sub(VISIBLE_COLS - 1);
+            }
+        } else {
+            self.scroll_col = 0;
         }
     }
 
@@ -496,8 +682,8 @@ impl EditorAppState {
         let is_ctrl = crate::keyboard::is_ctrl_pressed();
         let is_shift = crate::keyboard::is_shift_pressed();
 
+        // 1. Modal Dialog Handling (Unsaved Changes)
         if self.show_unsaved_dialog {
-            // Modal dialog shortcut handling
             match key_code {
                 0x1F | 0x1C => { // 'S' or Enter -> Save & Close
                     self.save_file();
@@ -517,8 +703,70 @@ impl EditorAppState {
             return;
         }
 
+        // 2. Find / Replace Field Input
+        if self.active_input_field == 1 || self.active_input_field == 2 {
+            match key_code {
+                0x01 => { // Escape -> Close search/replace toolbar
+                    self.show_find_dialog = false;
+                    self.show_replace_dialog = false;
+                    self.active_input_field = 0;
+                    return;
+                }
+                0x0F => { // Tab -> Switch between Find and Replace fields
+                    if self.show_replace_dialog {
+                        self.active_input_field = if self.active_input_field == 1 { 2 } else { 1 };
+                    }
+                    return;
+                }
+                0x1C => { // Enter -> Find next or Replace
+                    if is_shift {
+                        self.find_previous();
+                    } else if self.active_input_field == 2 {
+                        self.replace_current();
+                    } else {
+                        self.find_next();
+                    }
+                    return;
+                }
+                0x0E => { // Backspace in search field
+                    if self.active_input_field == 1 {
+                        self.search_query.pop();
+                    } else {
+                        self.replace_query.pop();
+                    }
+                    return;
+                }
+                _ => {
+                    if let Some(ascii_byte) = crate::keyboard::scancode_to_ascii(key_code, is_shift) {
+                        if ascii_byte >= 32 && ascii_byte <= 126 {
+                            if self.active_input_field == 1 {
+                                self.search_query.push(ascii_byte as char);
+                            } else {
+                                self.replace_query.push(ascii_byte as char);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        // 3. Canvas Shortcuts & Editor Navigation
         if is_ctrl {
             match key_code {
+                0x21 => { // Ctrl + F: Find
+                    self.show_find_dialog = true;
+                    self.show_replace_dialog = false;
+                    self.active_input_field = 1;
+                }
+                0x23 => { // Ctrl + H: Replace
+                    self.show_find_dialog = true;
+                    self.show_replace_dialog = true;
+                    self.active_input_field = 1;
+                }
+                0x11 => { // Ctrl + W: Toggle Word Wrap
+                    self.toggle_word_wrap();
+                }
                 0x2C => { // Ctrl + Z: Undo
                     self.undo();
                 }
@@ -591,27 +839,24 @@ impl EditorAppState {
     pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) {
         // Modal dialog button interaction
         if self.show_unsaved_dialog {
-            let dw = 240u32;
-            let dh = 100u32;
+            let dw = 250u32;
+            let dh = 104u32;
             let dx = (EDITOR_WIDTH.saturating_sub(dw)) / 2;
             let dy = (EDITOR_HEIGHT.saturating_sub(dh)) / 2;
 
-            if local_y >= dy + 60 && local_y <= dy + 84 {
-                // [Save] button (dx + 12 .. dx + 72)
+            if local_y >= dy + 64 && local_y <= dy + 88 {
                 if local_x >= dx + 12 && local_x <= dx + 72 {
                     self.save_file();
                     self.show_unsaved_dialog = false;
                     let _ = crate::wm::WM.lock().destroy_window(self.pid, self.window_id);
                     return;
                 }
-                // [Discard] button (dx + 84 .. dx + 154)
                 if local_x >= dx + 84 && local_x <= dx + 154 {
                     self.show_unsaved_dialog = false;
                     let _ = crate::wm::WM.lock().destroy_window(self.pid, self.window_id);
                     return;
                 }
-                // [Cancel] button (dx + 166 .. dx + 226)
-                if local_x >= dx + 166 && local_x <= dx + 226 {
+                if local_x >= dx + 166 && local_x <= dx + 232 {
                     self.show_unsaved_dialog = false;
                     self.status_message = String::from("Close cancelled");
                     return;
@@ -620,33 +865,83 @@ impl EditorAppState {
             return;
         }
 
-        // Toolbar buttons (y in 4..24)
+        // Top Toolbar buttons (y in 4..24)
         if local_y >= 4 && local_y <= 24 {
-            // [Save] button (x: 6..56)
-            if local_x >= 6 && local_x <= 56 {
+            // [Save] button (x: 6..54)
+            if local_x >= 6 && local_x <= 54 {
                 self.save_file();
                 return;
             }
-            // [New] button (x: 62..112)
-            if local_x >= 62 && local_x <= 112 {
+            // [New] button (x: 58..100)
+            if local_x >= 58 && local_x <= 100 {
                 self.new_document();
+                return;
+            }
+            // [Wrap] button (x: 104..150)
+            if local_x >= 104 && local_x <= 150 {
+                self.toggle_word_wrap();
+                return;
+            }
+            // [Find] button (x: 154..196)
+            if local_x >= 154 && local_x <= 196 {
+                self.show_find_dialog = !self.show_find_dialog;
+                if !self.show_find_dialog { self.show_replace_dialog = false; }
+                self.active_input_field = if self.show_find_dialog { 1 } else { 0 };
+                return;
+            }
+        }
+
+        // Find & Replace toolbar buttons (y in 28..54)
+        if self.show_find_dialog && local_y >= 28 && local_y <= 54 {
+            // Find input box click (x: 6..140)
+            if local_x >= 6 && local_x <= 140 {
+                self.active_input_field = 1;
+                return;
+            }
+            // [Next] button (x: 146..186)
+            if local_x >= 146 && local_x <= 186 {
+                self.find_next();
+                return;
+            }
+            // [Prev] button (x: 190..230)
+            if local_x >= 190 && local_x <= 230 {
+                self.find_previous();
+                return;
+            }
+            // [Aa] Case button (x: 234..264)
+            if local_x >= 234 && local_x <= 264 {
+                self.toggle_case_sensitive();
+                return;
+            }
+            // [Replace All] (x: 268..350)
+            if self.show_replace_dialog && local_x >= 268 && local_x <= 350 {
+                self.replace_all();
+                return;
+            }
+            // [Close] (x: 380..414)
+            if local_x >= 380 && local_x <= 414 {
+                self.show_find_dialog = false;
+                self.show_replace_dialog = false;
+                self.active_input_field = 0;
                 return;
             }
         }
 
         // Text area click -> set cursor and update selection
-        if local_y >= 30 && local_y < EDITOR_HEIGHT.saturating_sub(18) {
-            let row_offset = ((local_y - 30) / 16) as usize;
+        let text_start_y = if self.show_find_dialog { 58 } else { 30 };
+        if local_y >= text_start_y && local_y < EDITOR_HEIGHT.saturating_sub(18) {
+            let row_offset = ((local_y - text_start_y) / 16) as usize;
             let target_row = self.scroll_row + row_offset;
 
             if target_row < self.lines.len() {
                 self.cursor_row = target_row;
                 let col_offset = if local_x >= 34 { ((local_x - 34) / 8) as usize } else { 0 };
-                let target_col = self.scroll_col + col_offset;
+                let target_col = if self.word_wrap { col_offset } else { self.scroll_col + col_offset };
                 self.cursor_col = target_col.min(self.lines[target_row].len());
 
                 self.selection_anchor = Some((self.cursor_row, self.cursor_col));
                 self.selection_focus = None;
+                self.active_input_field = 0;
             }
         }
     }
@@ -666,22 +961,72 @@ impl EditorAppState {
         draw_surf_rect(surface_ptr, w, h, 0, 0, w, 26, panel_bg);
 
         // [Save]
-        draw_surf_rect(surface_ptr, w, h, 6, 4, 50, 18, 0x002563EB);
-        crate::font::draw_text(surface_ptr, w, h, 14, 7, "Save", text_color, 0x002563EB);
+        draw_surf_rect(surface_ptr, w, h, 6, 4, 46, 18, 0x002563EB);
+        crate::font::draw_text(surface_ptr, w, h, 12, 7, "Save", text_color, 0x002563EB);
 
         // [New]
-        draw_surf_rect(surface_ptr, w, h, 62, 4, 50, 18, 0x00334155);
-        crate::font::draw_text(surface_ptr, w, h, 74, 7, "New", text_color, 0x00334155);
+        draw_surf_rect(surface_ptr, w, h, 56, 4, 42, 18, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 64, 7, "New", text_color, 0x00334155);
+
+        // [Wrap]
+        let wrap_bg = if self.word_wrap { 0x0016A34A } else { 0x00334155 };
+        draw_surf_rect(surface_ptr, w, h, 102, 4, 46, 18, wrap_bg);
+        crate::font::draw_text(surface_ptr, w, h, 108, 7, "Wrap", text_color, wrap_bg);
+
+        // [Find]
+        let find_bg = if self.show_find_dialog { 0x00D97706 } else { 0x00334155 };
+        draw_surf_rect(surface_ptr, w, h, 152, 4, 42, 18, find_bg);
+        crate::font::draw_text(surface_ptr, w, h, 160, 7, "Find", text_color, find_bg);
 
         // File Title & Dirty Marker
         let file_label = self.file_path.as_deref().unwrap_or("[Untitled]");
         let dirty_marker = if self.is_dirty { " *" } else { "" };
         let full_title = format!("{}{}", file_label, dirty_marker);
         let title_col = if self.is_dirty { dirty_col } else { 0x0038BDF8 };
-        crate::font::draw_text(surface_ptr, w, h, 124, 7, &full_title, title_col, panel_bg);
+        crate::font::draw_text(surface_ptr, w, h, 202, 7, &full_title, title_col, panel_bg);
 
-        // 2. Main Editor Text Area (with Scroll Offsets)
-        let mut y = 32u32;
+        // 2. Find & Replace Overlay Toolbar (if open)
+        let text_start_y = if self.show_find_dialog {
+            draw_surf_rect(surface_ptr, w, h, 0, 26, w, 28, 0x000F172A);
+            draw_surf_rect(surface_ptr, w, h, 0, 53, w, 1, 0x00334155);
+
+            // Find Query Input Box
+            let f_box_bg = if self.active_input_field == 1 { 0x001E293B } else { 0x000B0F19 };
+            draw_surf_rect(surface_ptr, w, h, 6, 30, 134, 20, f_box_bg);
+            let f_display = if self.search_query.is_empty() { "Search..." } else { &self.search_query };
+            let f_col = if self.search_query.is_empty() { 0x0064748B } else { 0x00FFFFFF };
+            crate::font::draw_text(surface_ptr, w, h, 10, 33, f_display, f_col, f_box_bg);
+
+            // [Next]
+            draw_surf_rect(surface_ptr, w, h, 146, 30, 38, 20, 0x002563EB);
+            crate::font::draw_text(surface_ptr, w, h, 150, 33, "Next", 0x00FFFFFF, 0x002563EB);
+
+            // [Prev]
+            draw_surf_rect(surface_ptr, w, h, 188, 30, 38, 20, 0x00334155);
+            crate::font::draw_text(surface_ptr, w, h, 194, 33, "Prev", 0x00FFFFFF, 0x00334155);
+
+            // [Aa] Match Case
+            let case_bg = if self.case_sensitive { 0x0016A34A } else { 0x00334155 };
+            draw_surf_rect(surface_ptr, w, h, 230, 30, 28, 20, case_bg);
+            crate::font::draw_text(surface_ptr, w, h, 236, 33, "Aa", 0x00FFFFFF, case_bg);
+
+            if self.show_replace_dialog {
+                // [Replace All]
+                draw_surf_rect(surface_ptr, w, h, 264, 30, 86, 20, 0x007C3AED);
+                crate::font::draw_text(surface_ptr, w, h, 268, 33, "Replace All", 0x00FFFFFF, 0x007C3AED);
+            }
+
+            // Close Find Box [X]
+            draw_surf_rect(surface_ptr, w, h, w.saturating_sub(30), 30, 24, 20, 0x00DC2626);
+            crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(22), 33, "x", 0x00FFFFFF, 0x00DC2626);
+
+            58u32
+        } else {
+            30u32
+        };
+
+        // 3. Main Editor Text Area (with Scroll Offsets and Smart Word Wrap)
+        let mut y = text_start_y;
         let visible_lines = self.lines.iter().skip(self.scroll_row).take(VISIBLE_ROWS);
 
         for (rel_idx, line) in visible_lines.enumerate() {
@@ -692,11 +1037,11 @@ impl EditorAppState {
             let num_str = format!("{:2} ", abs_row + 1);
             crate::font::draw_text(surface_ptr, w, h, 6, y, &num_str, line_num_col, bg_color);
 
-            // Visible slice of line (horizontal scroll)
-            let visible_slice = if self.scroll_col < line.len() {
-                &line[self.scroll_col..]
+            // Visible slice of line (horizontal scroll or soft wrap)
+            let visible_slice = if self.word_wrap {
+                if line.len() > VISIBLE_COLS { &line[..VISIBLE_COLS] } else { line.as_str() }
             } else {
-                ""
+                if self.scroll_col < line.len() { &line[self.scroll_col..] } else { "" }
             };
 
             // Selection highlight
@@ -706,8 +1051,14 @@ impl EditorAppState {
             crate::font::draw_text(surface_ptr, w, h, 34, y, visible_slice, text_color, row_bg);
 
             // Draw cursor if on this row
-            if abs_row == self.cursor_row && self.cursor_col >= self.scroll_col {
-                let cur_rel_col = (self.cursor_col - self.scroll_col) as u32;
+            if abs_row == self.cursor_row {
+                let cur_rel_col = if self.word_wrap {
+                    self.cursor_col.min(VISIBLE_COLS) as u32
+                } else if self.cursor_col >= self.scroll_col {
+                    (self.cursor_col - self.scroll_col) as u32
+                } else {
+                    0
+                };
                 let cur_x = 34 + cur_rel_col * 8;
                 if cur_x < w.saturating_sub(8) {
                     draw_surf_rect(surface_ptr, w, h, cur_x, y, 2, 14, 0x0038BDF8);
@@ -717,13 +1068,13 @@ impl EditorAppState {
             y += 16;
         }
 
-        // 3. Status Bar at bottom
+        // 4. Status Bar at bottom
         let status_y = h.saturating_sub(18);
         draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, panel_bg);
         let cursor_info = format!("Ln {}, Col {} | {}", self.cursor_row + 1, self.cursor_col + 1, self.status_message);
         crate::font::draw_text(surface_ptr, w, h, 10, status_y + 2, &cursor_info, 0x0094A3B8, panel_bg);
 
-        // 4. Modal Dialog: Unsaved Changes (if active)
+        // 5. Modal Dialog: Unsaved Changes (if active)
         if self.show_unsaved_dialog {
             let dw = 250u32;
             let dh = 104u32;
