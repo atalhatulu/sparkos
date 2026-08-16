@@ -1,14 +1,14 @@
 //! SparkOS Desktop V1.33 — Modern Terminal UI Engine (`terminal.app`)
 //!
 //! Provides advanced terminal rendering featuring syntax/semantic colored lines (Prompt,
-//! Command, Success, Error), smooth mouse-wheel/page scrolling, visual scrollbar,
-//! mouse drag text selection, clipboard copy/paste API, dynamic window resizing,
-//! and accurate blinking block/bar cursor positioning.
+//! Command, Success, Error), command execution (help, clear, echo, pwd, ls, cd, ps, mem, uptime, exit),
+//! smooth mouse-wheel/page scrolling, visual scrollbar, clipboard copy/paste API,
+//! dynamic window resizing, and accurate blinking block/bar cursor positioning.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::libspark_ui::Widget;
+use spin::Mutex;
 
 pub const TERM_WIDTH: u32 = 420;
 pub const TERM_HEIGHT: u32 = 240;
@@ -56,8 +56,8 @@ pub struct TerminalState {
 }
 
 impl TerminalState {
-    pub fn new() -> Self {
-        let mut state = Self {
+    pub const fn new() -> Self {
+        Self {
             lines: Vec::new(),
             current_input: String::new(),
             history: Vec::new(),
@@ -70,11 +70,14 @@ impl TerminalState {
             selection_start: None,
             selection_end: None,
             clipboard: String::new(),
-        };
-        state.push_line("SparkOS Modern Terminal v1.33 [x86_64-smp]", TermLineKind::Prompt);
-        state.push_line("Type 'help' for command manual, 'clear' to reset.", TermLineKind::Normal);
-        state.push_line("", TermLineKind::Normal);
-        state
+        }
+    }
+
+    pub fn init_welcome(&mut self) {
+        self.lines.clear();
+        self.push_line("SparkOS Modern Terminal v1.31 [x86_64-smp]", TermLineKind::Prompt);
+        self.push_line("Type 'help' for command manual, 'clear' to reset.", TermLineKind::Normal);
+        self.push_line("", TermLineKind::Normal);
     }
 
     pub fn push_line(&mut self, text: &str, kind: TermLineKind) {
@@ -145,7 +148,7 @@ impl TerminalState {
         self.current_input.push_str(&text_to_paste);
     }
 
-    pub fn execute_command(&mut self) {
+    pub fn execute_command(&mut self, terminal_pid: u64) {
         let input = String::from(self.current_input.trim());
         if !input.is_empty() {
             if self.history.len() >= MAX_HISTORY {
@@ -157,39 +160,80 @@ impl TerminalState {
             let prompt_line = format!("sparkos> {}", input);
             self.push_line(&prompt_line, TermLineKind::Command);
 
-            match input.as_str() {
-                "help" => {
-                    self.push_line("Commands: help, clear, ps, mem, net, uptime, exit", TermLineKind::Normal);
+            if input == "help" {
+                self.push_line("Commands: help, clear, echo, pwd, ls, cd, ps, mem, uptime, exit", TermLineKind::Normal);
+            } else if input == "clear" {
+                self.lines.clear();
+            } else if input == "pwd" {
+                self.push_line("/home/teha/projects", TermLineKind::Normal);
+            } else if input == "ls" {
+                self.push_line("src/   docs/   main.rs   sparkos.bin   config.toml", TermLineKind::Normal);
+            } else if input == "ps" {
+                self.push_line("PID  NAME             STATUS", TermLineKind::Normal);
+                self.push_line("1    terminal.app     Running", TermLineKind::Normal);
+                self.push_line("2    files.app        Running", TermLineKind::Normal);
+                self.push_line("3    settings.app     Sleeping", TermLineKind::Normal);
+                self.push_line("Success: 3 active processes.", TermLineKind::Success);
+            } else if input == "mem" {
+                self.push_line("Total: 256 MB | Used: 43 MB | Free: 213 MB (Heap: 128 MB)", TermLineKind::Success);
+            } else if input == "uptime" {
+                let ticks = crate::interrupts::get_tick();
+                let sec = ticks / 1000;
+                let mins = sec / 60;
+                let s = sec % 60;
+                self.push_line(&format!("Uptime: {:02}:{:02} (Ticks: {}, SMP Cores: 2)", mins, s, ticks), TermLineKind::Normal);
+            } else if input.starts_with("echo ") {
+                let arg = input.strip_prefix("echo ").unwrap_or("").trim();
+                self.push_line(arg, TermLineKind::Normal);
+            } else if input == "echo" {
+                self.push_line("", TermLineKind::Normal);
+            } else if input.starts_with("cd ") {
+                let dir = input.strip_prefix("cd ").unwrap_or("").trim();
+                self.push_line(&format!("Switched directory to {}", dir), TermLineKind::Normal);
+            } else if input == "cd" {
+                self.push_line("Switched directory to /home/teha", TermLineKind::Normal);
+            } else if input == "exit" {
+                self.push_line("Session terminated.", TermLineKind::Normal);
+                if let Some(target_win) = crate::wm::WM.lock().windows.iter().find(|w| w.owner_pid == terminal_pid).map(|w| w.window_id) {
+                    let _ = crate::wm::WM.lock().destroy_window(terminal_pid, target_win);
                 }
-                "clear" => {
-                    self.lines.clear();
-                }
-                "ps" => {
-                    self.push_line("PID  NAME             STATUS", TermLineKind::Normal);
-                    self.push_line("1    kernel           Running", TermLineKind::Normal);
-                    self.push_line("2    terminal.app     Running", TermLineKind::Normal);
-                    self.push_line("3    browser.app      Sleeping", TermLineKind::Normal);
-                    self.push_line("Success: 3 active processes.", TermLineKind::Success);
-                }
-                "mem" => {
-                    self.push_line("Total: 256 MB | Used: 43 MB | Free: 213 MB", TermLineKind::Success);
-                }
-                "net" => {
-                    self.push_line("Interface eth0: 10.0.2.15 (Link: UP)", TermLineKind::Success);
-                }
-                "uptime" => {
-                    self.push_line("Uptime: 01:42 (SMP Cores: 2)", TermLineKind::Normal);
-                }
-                other => {
-                    let err = format!("error: command not found: '{}'", other);
-                    self.push_line(&err, TermLineKind::Error);
-                }
+            } else {
+                let err = format!("error: command not found: '{}'", input);
+                self.push_line(&err, TermLineKind::Error);
             }
         } else {
             self.push_line("sparkos>", TermLineKind::Prompt);
         }
         self.current_input.clear();
         self.scroll_offset = 0;
+    }
+
+    pub fn handle_key_input(&mut self, key_code: u8, pressed: bool, terminal_pid: u64) {
+        if !pressed { return; }
+        match key_code {
+            0x1C => { // Enter
+                self.execute_command(terminal_pid);
+            }
+            0x0E => { // Backspace
+                self.current_input.pop();
+            }
+            0x01 => { // Escape
+                self.current_input.clear();
+            }
+            _ => {
+                if let Some(ascii_byte) = crate::keyboard::scancode_to_ascii(key_code, false) {
+                    if ascii_byte >= 32 && ascii_byte <= 126 {
+                        self.current_input.push(ascii_byte as char);
+                    }
+                }
+            }
+        }
+
+        // Re-render to bound surface
+        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == terminal_pid) {
+            let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+            self.render_to_surface(surf_ptr, surface.width, surface.height);
+        }
     }
 
     pub fn render_to_surface(&mut self, surface_ptr: *mut u32, w: u32, h: u32) {
@@ -270,6 +314,8 @@ impl TerminalState {
     }
 }
 
+pub static TERMINAL_STATE: Mutex<TerminalState> = Mutex::new(TerminalState::new());
+
 pub fn clear_surface(ptr: *mut u32, w: u32, h: u32, color: u32) {
     if ptr.is_null() { return; }
     let count = (w as usize) * (h as usize);
@@ -312,11 +358,14 @@ pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
         .create_window(pid, surf_id, 40, 40, TERM_WIDTH, TERM_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
-    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
-        let phys_addr = surface.shmem_phys_addr;
-        let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
-        let mut state = TerminalState::new();
-        state.render_to_surface(surf_ptr, TERM_WIDTH, TERM_HEIGHT);
+    {
+        let mut state = TERMINAL_STATE.lock();
+        state.init_welcome();
+        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+            let phys_addr = surface.shmem_phys_addr;
+            let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
+            state.render_to_surface(surf_ptr, TERM_WIDTH, TERM_HEIGHT);
+        }
     }
 
     let _ = crate::surface::present_surface(surf_id, 0, 0, TERM_WIDTH, TERM_HEIGHT);

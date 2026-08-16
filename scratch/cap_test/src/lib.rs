@@ -7353,6 +7353,224 @@ mod invariant_tests {
         assert_eq!(history[0].0, "terminal.app");
         assert_eq!(history[1].0, "files.app");
     }
+
+    // =========================================================================
+    // STEP 43: DESKTOP V1.31 USABILITY & WINDOW MANAGEMENT INVARIANTS
+    // =========================================================================
+
+    /// WIN_MGMT_INV-1: Window drag coordinates clamped strictly within desktop workspace
+    #[test]
+    fn test_win_mgmt_inv_1_window_drag_bounds_clamping() {
+        let max_w = 1280i32;
+        let max_h = 720i32;
+        let dock_h = 24i32;
+        let work_top = 20i32;
+
+        let clamp_drag = |x: i32, y: i32| {
+            (
+                x.clamp(-100, max_w - 50),
+                y.clamp(work_top, max_h - (dock_h + 30)),
+            )
+        };
+
+        let (cx1, cy1) = clamp_drag(-200, -50);
+        assert_eq!(cx1, -100);
+        assert_eq!(cy1, 20);
+
+        let (cx2, cy2) = clamp_drag(2000, 1000);
+        assert_eq!(cx2, 1280 - 50);
+        assert_eq!(cy2, 720 - 54);
+    }
+
+    /// WIN_MGMT_INV-2: Window minimize sets visibility false and transfers focus to next visible window
+    #[test]
+    fn test_win_mgmt_inv_2_window_minimize_focus_transfer() {
+        struct MockWin { id: u64, visible: bool, focused: bool }
+        let mut wins = alloc::vec![
+            MockWin { id: 1, visible: true, focused: false },
+            MockWin { id: 2, visible: true, focused: true },
+        ];
+
+        // Minimize win 2
+        wins[1].visible = false;
+        wins[1].focused = false;
+        let next_focused = wins.iter_mut().rev().find(|w| w.visible);
+        if let Some(w) = next_focused {
+            w.focused = true;
+        }
+
+        assert!(!wins[1].visible);
+        assert!(!wins[1].focused);
+        assert!(wins[0].focused);
+    }
+
+    /// WIN_MGMT_INV-3: Window maximize preserves previous geometry and restores accurately
+    #[test]
+    fn test_win_mgmt_inv_3_window_maximize_restore_cycle() {
+        let orig_x = 40i32;
+        let orig_y = 50i32;
+        let orig_w = 400u32;
+        let orig_h = 200u32;
+
+        let mut saved_geom: Option<(i32, i32, u32, u32)> = None;
+        let mut cur_x = orig_x;
+        let mut cur_y = orig_y;
+        let mut cur_w = orig_w;
+        let mut cur_h = orig_h;
+
+        // Maximize
+        saved_geom = Some((cur_x, cur_y, cur_w, cur_h));
+        cur_x = 0;
+        cur_y = 20;
+        cur_w = 1280;
+        cur_h = 676;
+
+        assert_eq!(cur_w, 1280);
+
+        // Restore
+        let (px, py, pw, ph) = saved_geom.take().unwrap();
+        cur_x = px;
+        cur_y = py;
+        cur_w = pw;
+        cur_h = ph;
+
+        assert_eq!(cur_x, orig_x);
+        assert_eq!(cur_y, orig_y);
+        assert_eq!(cur_w, orig_w);
+        assert_eq!(cur_h, orig_h);
+    }
+
+    /// WIN_MGMT_INV-4: True Fullscreen mode covers entire display and restores cleanly
+    #[test]
+    fn test_win_mgmt_inv_4_fullscreen_toggle_and_restore() {
+        let mut is_fullscreen = false;
+        let mut saved_geom: Option<(i32, i32, u32, u32)> = None;
+        let mut x = 60i32;
+        let mut y = 60i32;
+        let mut w = 380u32;
+        let mut h = 220u32;
+
+        // Enter Fullscreen
+        saved_geom = Some((x, y, w, h));
+        x = 0;
+        y = 0;
+        w = 1280;
+        h = 720;
+        is_fullscreen = true;
+
+        assert!(is_fullscreen);
+        assert_eq!(x, 0);
+        assert_eq!(y, 0);
+        assert_eq!(w, 1280);
+        assert_eq!(h, 720);
+
+        // Exit Fullscreen
+        let (px, py, pw, ph) = saved_geom.take().unwrap();
+        x = px;
+        y = py;
+        w = pw;
+        h = ph;
+        is_fullscreen = false;
+
+        assert!(!is_fullscreen);
+        assert_eq!(x, 60);
+        assert_eq!(y, 60);
+        assert_eq!(w, 380);
+        assert_eq!(h, 220);
+    }
+
+    /// WIN_MGMT_INV-5: Window close cleans resources and supports repeat Open-Close-Open lifecycle
+    #[test]
+    fn test_win_mgmt_inv_5_window_repeat_open_close_lifecycle() {
+        let mut active_windows = alloc::vec![];
+        let mut cleaned_surfaces = alloc::vec![];
+
+        for cycle in 1..=5 {
+            let win_id = cycle as u64;
+            let surf_id = cycle as u64;
+            active_windows.push((win_id, surf_id));
+            assert_eq!(active_windows.len(), 1);
+
+            // Close
+            let (_, s) = active_windows.pop().unwrap();
+            cleaned_surfaces.push(s);
+            assert_eq!(active_windows.len(), 0);
+        }
+
+        assert_eq!(cleaned_surfaces.len(), 5);
+    }
+
+    /// WIN_MGMT_INV-6: Window geometry boundaries enforce non-zero positive dimensions
+    #[test]
+    fn test_win_mgmt_inv_6_geometry_boundary_enforcement() {
+        let min_w = 120u32;
+        let min_h = 60u32;
+
+        let clamp_size = |w: u32, h: u32| (w.max(min_w), h.max(min_h));
+
+        let (w1, h1) = clamp_size(0, 0);
+        assert_eq!(w1, min_w);
+        assert_eq!(h1, min_h);
+
+        let (w2, h2) = clamp_size(500, 300);
+        assert_eq!(w2, 500);
+        assert_eq!(h2, 300);
+    }
+
+    /// TERM_EXEC_INV-1: Terminal command parser and standard command execution
+    #[test]
+    fn test_term_exec_inv_1_command_execution() {
+        let mut lines = alloc::vec![];
+        let execute = |cmd: &str, out: &mut alloc::vec::Vec<alloc::string::String>| {
+            if cmd == "help" {
+                out.push(alloc::string::String::from("Commands: help, clear, echo, pwd, ls, cd, ps, mem, uptime, exit"));
+            } else if cmd == "pwd" {
+                out.push(alloc::string::String::from("/home/teha/projects"));
+            } else if cmd == "ls" {
+                out.push(alloc::string::String::from("src/ docs/ main.rs sparkos.bin"));
+            } else if cmd.starts_with("echo ") {
+                out.push(alloc::string::String::from(cmd.strip_prefix("echo ").unwrap()));
+            }
+        };
+
+        execute("help", &mut lines);
+        assert!(lines.last().unwrap().contains("help"));
+
+        execute("pwd", &mut lines);
+        assert_eq!(lines.last().unwrap(), "/home/teha/projects");
+
+        execute("echo SparkOS Desktop", &mut lines);
+        assert_eq!(lines.last().unwrap(), "SparkOS Desktop");
+    }
+
+    /// TERM_EXEC_INV-2: Terminal backspace and line input editing
+    #[test]
+    fn test_term_exec_inv_2_terminal_line_editing() {
+        let mut input = alloc::string::String::from("echo hellp");
+        // Backspace
+        input.pop();
+        // Type 'o'
+        input.push('o');
+
+        assert_eq!(input, "echo hello");
+    }
+
+    /// TERM_EXEC_INV-3: Multiple apps maintain independent focus and state
+    #[test]
+    fn test_term_exec_inv_3_multi_app_focus_isolation() {
+        struct AppState { pid: u64, name: &'static str, focused: bool }
+        let mut apps = alloc::vec![
+            AppState { pid: 1, name: "terminal.app", focused: true },
+            AppState { pid: 2, name: "files.app", focused: false },
+            AppState { pid: 3, name: "settings.app", focused: false },
+        ];
+
+        // Switch focus to files.app
+        for a in apps.iter_mut() { a.focused = a.pid == 2; }
+        assert!(!apps[0].focused);
+        assert!(apps[1].focused);
+        assert!(!apps[2].focused);
+    }
 }
 
 

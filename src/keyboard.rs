@@ -186,7 +186,7 @@ const KEYMAP_SHIFT: [u8; 128] = [
     0,    0,    0,    0,    0,    0,    0,    0,
 ];
 
-fn scancode_to_ascii(scancode: u8, shift: bool) -> Option<u8> {
+pub fn scancode_to_ascii(scancode: u8, shift: bool) -> Option<u8> {
     let idx = scancode as usize;
     if idx >= 128 { return None; }
     let c = if shift { KEYMAP_SHIFT[idx] } else { KEYMAP_NORMAL[idx] };

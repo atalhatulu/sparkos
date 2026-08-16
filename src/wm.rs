@@ -26,6 +26,7 @@ pub enum WindowState {
     Normal,
     Minimized,
     Maximized,
+    Fullscreen,
     Closed,
 }
 
@@ -238,7 +239,46 @@ impl WindowManager {
         self.raise_to_top_internal(window_id)
     }
 
-    /// Destroys a window with strict ownership verification.
+    /// Toggles true fullscreen mode for a window covering (0, 0, screen_w, screen_h).
+    pub fn toggle_fullscreen(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
+        let max_w = unsafe { crate::gui::VESA.width as u32 };
+        let max_h = unsafe { crate::gui::VESA.height as u32 };
+
+        let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
+            .ok_or(WmError::NotFound)?;
+
+        if win.owner_pid != caller_pid {
+            return Err(WmError::PermissionDenied);
+        }
+
+        if win.state == WindowState::Fullscreen {
+            if let Some((px, py, pw, ph)) = win.saved_geom.take() {
+                win.x = px.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
+                win.y = py.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + DOCK_HEIGHT as u32 + 20)) as i32);
+                win.width = pw.clamp(MIN_WINDOW_WIDTH, max_w);
+                win.height = ph.clamp(MIN_WINDOW_HEIGHT, max_h);
+            } else {
+                win.x = 40;
+                win.y = 40;
+                win.width = 420;
+                win.height = 240;
+            }
+            win.state = WindowState::Normal;
+        } else {
+            if win.state != WindowState::Maximized {
+                win.saved_geom = Some((win.x, win.y, win.width, win.height));
+            }
+            win.x = 0;
+            win.y = 0;
+            win.width = max_w;
+            win.height = max_h;
+            win.state = WindowState::Fullscreen;
+        }
+
+        self.raise_to_top_internal(window_id)
+    }
+
+    /// Destroys a window with strict ownership verification, surface reclamation, and process cleanup.
     pub fn destroy_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
         let idx = self.windows.iter().position(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
@@ -247,11 +287,12 @@ impl WindowManager {
             return Err(WmError::PermissionDenied);
         }
 
+        let surf_id = self.windows[idx].surface_id;
         self.windows.remove(idx);
 
         if self.focused_window == Some(window_id) {
             // Transfer focus to the next topmost visible window
-            self.focused_window = self.windows.iter().rev().find(|w| w.visible).map(|w| w.window_id);
+            self.focused_window = self.windows.iter().rev().find(|w| w.visible && w.state != WindowState::Minimized).map(|w| w.window_id);
             if let Some(fid) = self.focused_window {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.window_id == fid) {
                     w.focused = true;
@@ -259,7 +300,24 @@ impl WindowManager {
             }
         }
 
-        crate::serial_println!("[WM] Process {} destroyed Window {}", caller_pid, window_id);
+        // Clean up surface registry for this window
+        if surf_id != 0 {
+            let mut reg = crate::surface::SURFACE_REGISTRY.lock();
+            if let Some(pos) = reg.iter().position(|s| s.surface_id == surf_id && s.owner_pid == caller_pid) {
+                reg.remove(pos);
+            }
+        }
+
+        // Clean up input queue for this PID
+        crate::input::cleanup_input_for_pid(caller_pid);
+
+        // Mark process for termination in scheduler
+        let mut killed = crate::task::KILLED_PROCESSES.lock();
+        if !killed.contains(&caller_pid) {
+            killed.push(caller_pid);
+        }
+
+        crate::serial_println!("[WM] Process {} destroyed Window {} (Surface {} cleaned)", caller_pid, window_id, surf_id);
         Ok(())
     }
 
@@ -371,14 +429,40 @@ impl WindowManager {
             let title_fg = if is_focused { active_theme.text_color } else { 0x0094A3B8 };
             let border_col = if is_focused { active_theme.accent_color } else { active_theme.border_color };
 
+            if win.state == WindowState::Fullscreen {
+                // 3-FS. True Fullscreen: Blit surface directly across entire display area
+                if let Some(surface) = surf_reg.iter().find(|s| s.surface_id == win.surface_id) {
+                    let phys_addr = surface.shmem_phys_addr;
+                    let src_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *const u32 };
+                    let copy_w = (surface.width as usize).min(screen_w as usize);
+                    let copy_h = (surface.height as usize).min(screen_h as usize);
+
+                    unsafe {
+                        if !crate::gui::BACKBUFFER.is_null() {
+                            for r in 0..copy_h {
+                                let dst_row = r;
+                                let src_offset = r * (surface.width as usize);
+                                let dst_offset = dst_row * (screen_w as usize);
+                                core::ptr::copy_nonoverlapping(
+                                    src_ptr.add(src_offset),
+                                    crate::gui::BACKBUFFER.add(dst_offset),
+                                    copy_w,
+                                );
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
             
             // Draw App Icon
             let icon_type = match win.owner_pid {
                 1 => crate::app_registry::AppIcon::Terminal,
-                2 => crate::app_registry::AppIcon::Demo,
-                3 => crate::app_registry::AppIcon::Files,
+                2 => crate::app_registry::AppIcon::Files,
+                3 => crate::app_registry::AppIcon::Generic,
                 _ => crate::app_registry::AppIcon::Generic,
             };
             crate::gui::draw_icon_glyph(wx + 6, wy + 6, icon_type, title_fg, title_bg);
@@ -386,10 +470,10 @@ impl WindowManager {
             // Title text (App Name / PID)
             let app_name = match win.owner_pid {
                 1 => "Terminal",
-                2 => "Demo App",
-                3 => "Files",
-                4 => "Settings",
-                5 => "Task Manager",
+                2 => "Files",
+                3 => "Settings",
+                4 => "Task Manager",
+                5 => "Web Browser",
                 _ => "SparkOS Application",
             };
             crate::gui::draw_string(wx + 18, wy + 6, app_name, title_fg, title_bg);
@@ -520,7 +604,8 @@ impl WindowManager {
         if self.launcher_open {
             let px = 4u16;
             let pw = 154u16;
-            let ph = 162u16;
+            let total_apps = crate::app_registry::REGISTERED_APPS.len() as u16;
+            let ph = 34 + total_apps * 28 + 26;
             let py = dock_y.saturating_sub(ph + 4);
 
             // Background & Border
@@ -567,30 +652,22 @@ impl WindowManager {
         if self.launcher_open {
             let px = 4;
             let pw = 154;
-            let ph = 162;
+            let total_apps = crate::app_registry::REGISTERED_APPS.len() as i32;
+            let ph = 34 + total_apps * 28 + 26;
             let py = dock_y.saturating_sub(ph + 4);
 
             if mx >= px && mx < px + pw && my >= py && my < py + ph {
-                // Item 1: Terminal
-                if my >= py + 28 && my < py + 52 {
-                    self.pending_spawn_app = Some(1);
-                    self.launcher_open = false;
-                    return None;
-                }
-                // Item 2: Demo App
-                if my >= py + 56 && my < py + 80 {
-                    self.pending_spawn_app = Some(2);
-                    self.launcher_open = false;
-                    return None;
-                }
-                // Item 3: Files
-                if my >= py + 84 && my < py + 108 {
-                    self.pending_spawn_app = Some(3);
-                    self.launcher_open = false;
-                    return None;
+                let mut cur_y = py + 28;
+                for app in crate::app_registry::REGISTERED_APPS.iter() {
+                    if my >= cur_y && my < cur_y + 24 {
+                        self.pending_spawn_app = Some(app.id);
+                        self.launcher_open = false;
+                        return None;
+                    }
+                    cur_y += 28;
                 }
                 // Close Menu button
-                if my >= py + 112 && my < py + 136 {
+                if my >= cur_y && my < cur_y + 24 {
                     self.launcher_open = false;
                     return None;
                 }
