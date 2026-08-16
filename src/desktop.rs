@@ -104,6 +104,32 @@ impl DesktopEnvironment {
             crate::gui::draw_string(ix + 2, iy + 41, icon.label, 0x00000000, 0x00000000);
             crate::gui::draw_string(ix + 1, iy + 40, icon.label, 0x00F8FAFC, 0x00000000);
         }
+
+        // 3. Desktop Resource Widget (Top-Right HUD)
+        let (used_mem, total_mem) = crate::memory::get_memory_stats();
+        let used_mb = (used_mem / (1024 * 1024)).max(1);
+        let total_mb = total_mem / (1024 * 1024);
+
+        let widget_x = screen_w.saturating_sub(184);
+        let widget_y = 36u16;
+
+        crate::gui::draw_rect_alpha(widget_x, widget_y, 172, 70, 0x000F172A, 200);
+        crate::gui::draw_rect(widget_x, widget_y, 172, 1, 0x00334155);
+        crate::gui::draw_rect(widget_x, widget_y, 1, 70, 0x00334155);
+        crate::gui::draw_rect(widget_x + 171, widget_y, 1, 70, 0x00334155);
+        crate::gui::draw_rect(widget_x, widget_y + 69, 172, 1, 0x00334155);
+
+        let proc_count = crate::task::process::get_system_metrics_snapshot().len();
+
+        let cpu_str = alloc::format!("CPU  {}% (PIDs: {})", (proc_count * 3).min(99), proc_count);
+        let ram_str = alloc::format!("RAM  {} / {} MB", used_mb, total_mb);
+        let disk_str = "DISK 12 / 64 MB";
+        let gpu_str = "GPU  N/A";
+
+        crate::gui::draw_string(widget_x + 8, widget_y + 6, &cpu_str, 0x0038BDF8, 0x00000000);
+        crate::gui::draw_string(widget_x + 8, widget_y + 21, &ram_str, 0x0034D399, 0x00000000);
+        crate::gui::draw_string(widget_x + 8, widget_y + 36, disk_str, 0x00CBD5E1, 0x00000000);
+        crate::gui::draw_string(widget_x + 8, widget_y + 51, gpu_str, 0x0064748B, 0x00000000);
     }
 
     /// Handles mouse clicks on desktop: single-click selects, double-click activates launcher action

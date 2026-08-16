@@ -71,6 +71,14 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
         default_w: 360,
         default_h: 220,
     },
+    AppDescriptor {
+        id: 7,
+        name: "System Monitor",
+        exec_name: "sysmon.app",
+        icon: AppIcon::Generic,
+        default_w: 440,
+        default_h: 260,
+    },
 ];
 
 pub fn find_app_by_id(id: u8) -> Option<&'static AppDescriptor> {
@@ -90,6 +98,7 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
         4 => return crate::settings_app::spawn_settings_app("settings.app"),
         5 => return crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"),
         6 => return crate::browser_app::spawn_browser_app("browser.app"),
+        7 => return crate::sysmon_app::spawn_sysmon_app("sysmon.app"),
         _ => {}
     }
     let app = find_app_by_id(app_id).ok_or("Unknown application ID")?;

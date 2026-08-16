@@ -83,6 +83,7 @@ pub mod network_manager;
 pub mod system_bar;
 pub mod desktop;
 pub mod crash_reporter;
+pub mod sysmon_app;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

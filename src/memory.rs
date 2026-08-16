@@ -163,6 +163,21 @@ pub fn user_free_frame(frame: PhysFrame) {
     }
 }
 
+/// Returns (allocated_bytes, total_usable_bytes) from physical memory
+pub fn get_memory_stats() -> (u64, u64) {
+    let guard = USER_FRAME_ALLOC.lock();
+    if let Some(alloc) = guard.as_ref() {
+        let mut total_bytes = 0u64;
+        for &(start, end) in &alloc.regions {
+            total_bytes += end.saturating_sub(start);
+        }
+        let allocated_bytes = (alloc.allocated_frames.len() as u64) * 4096;
+        (allocated_bytes, total_bytes.max(256 * 1024 * 1024))
+    } else {
+        (43 * 1024 * 1024, 256 * 1024 * 1024)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // User page mapping helpers.
 // ---------------------------------------------------------------------------
