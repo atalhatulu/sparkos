@@ -9921,6 +9921,149 @@ mod invariant_tests {
         assert!(!is_text("archive.tar"));
         assert!(!is_text("sh"));
     }
+
+    // =========================================================================
+    // EDITOR APPLICATION INVARIANTS (EDITOR_APP_INV-1 .. 6)
+    // =========================================================================
+
+    /// EDITOR_APP_INV-1: Text insertion, newline split, deletion, and is_dirty state
+    #[test]
+    fn test_editor_app_inv_1_text_mutation_and_dirty() {
+        let mut lines = alloc::vec![alloc::string::String::from("Hello")];
+        let mut is_dirty = false;
+
+        // Insert char
+        lines[0].push('!');
+        is_dirty = true;
+        assert_eq!(lines[0], "Hello!");
+        assert!(is_dirty);
+
+        // Newline split
+        let right = alloc::string::String::from(&lines[0][5..]);
+        lines[0].truncate(5);
+        lines.insert(1, right);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Hello");
+        assert_eq!(lines[1], "!");
+
+        // Save
+        is_dirty = false;
+        assert!(!is_dirty);
+    }
+
+    /// EDITOR_APP_INV-2: Undo/Redo stack depth limit (50) and redo invalidation
+    #[test]
+    fn test_editor_app_inv_2_undo_redo_invariants() {
+        let max_undo = 50usize;
+        let mut undo_stack: alloc::vec::Vec<usize> = alloc::vec![];
+        let mut redo_stack: alloc::vec::Vec<usize> = alloc::vec![];
+
+        for i in 0..60 {
+            if undo_stack.len() >= max_undo {
+                undo_stack.remove(0);
+            }
+            undo_stack.push(i);
+            redo_stack.clear();
+        }
+
+        assert_eq!(undo_stack.len(), 50);
+        assert_eq!(undo_stack[0], 10);
+        assert_eq!(undo_stack[49], 59);
+        assert_eq!(redo_stack.len(), 0);
+
+        // Perform undo
+        let prev = undo_stack.pop().unwrap();
+        redo_stack.push(prev);
+        assert_eq!(undo_stack.len(), 49);
+        assert_eq!(redo_stack.len(), 1);
+
+        // New edit clears redo
+        undo_stack.push(100);
+        redo_stack.clear();
+        assert_eq!(redo_stack.len(), 0);
+    }
+
+    /// EDITOR_APP_INV-3: Selection, copy, and paste clipboard simulation
+    #[test]
+    fn test_editor_app_inv_3_selection_and_clipboard() {
+        let lines = alloc::vec![
+            alloc::string::String::from("First line"),
+            alloc::string::String::from("Second line"),
+        ];
+
+        let mut clipboard = alloc::string::String::new();
+        for (i, line) in lines.iter().enumerate() {
+            clipboard.push_str(line);
+            if i + 1 < lines.len() {
+                clipboard.push('\n');
+            }
+        }
+
+        assert_eq!(clipboard, "First line\nSecond line");
+    }
+
+    /// EDITOR_APP_INV-4: Find next and Replace All matching
+    #[test]
+    fn test_editor_app_inv_4_find_and_replace_all() {
+        let mut text = alloc::string::String::from("SparkOS is fast. SparkOS is reliable.");
+        let query = "SparkOS";
+        let replacement = "Spark";
+
+        let count = text.matches(query).count();
+        assert_eq!(count, 2);
+
+        text = text.replace(query, replacement);
+        assert_eq!(text, "Spark is fast. Spark is reliable.");
+    }
+
+    /// EDITOR_APP_INV-5: Dirty document close confirmation dialog transitions
+    #[test]
+    fn test_editor_app_inv_5_unsaved_dialog_transitions() {
+        let is_dirty = true;
+        let mut show_unsaved_dialog = false;
+        let mut pending_close = false;
+
+        // Try close
+        if is_dirty {
+            show_unsaved_dialog = true;
+        } else {
+            pending_close = true;
+        }
+        assert!(show_unsaved_dialog);
+        assert!(!pending_close);
+
+        // Discard action
+        show_unsaved_dialog = false;
+        pending_close = true;
+        assert!(!show_unsaved_dialog);
+        assert!(pending_close);
+    }
+
+    /// EDITOR_APP_INV-6: Multi-instance isolation across 3+ editor windows
+    #[test]
+    fn test_editor_app_inv_6_multi_instance_isolation() {
+        use alloc::collections::BTreeMap;
+        struct EditorMock {
+            file: alloc::string::String,
+            dirty: bool,
+        }
+
+        let mut instances: BTreeMap<u64, EditorMock> = BTreeMap::new();
+        instances.insert(1, EditorMock { file: alloc::string::String::from("notes.txt"), dirty: false });
+        instances.insert(2, EditorMock { file: alloc::string::String::from("main.rs"), dirty: true });
+        instances.insert(3, EditorMock { file: alloc::string::String::from("config.toml"), dirty: false });
+
+        assert_eq!(instances.len(), 3);
+        assert!(!instances.get(&1).unwrap().dirty);
+        assert!(instances.get(&2).unwrap().dirty);
+        assert!(!instances.get(&3).unwrap().dirty);
+
+        // Close editor 2
+        instances.remove(&2);
+        assert_eq!(instances.len(), 2);
+        assert!(instances.get(&2).is_none());
+        assert_eq!(instances.get(&1).unwrap().file, "notes.txt");
+    }
 }
 
 

@@ -232,7 +232,27 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
 
     // 2. Check Alt-F4 Window Close Shortcut
     if pressed && key_code == 0x3E && (modifiers & 0x08 != 0 || crate::keyboard::is_alt_pressed()) {
-        let _ = crate::wm::WM.lock().destroy_window(focused_pid, focused_win_id);
+        let is_dirty_editor = {
+            let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+            if let Some(editor_state) = editors.get_mut(&focused_win_id) {
+                if editor_state.is_dirty && !editor_state.show_unsaved_dialog {
+                    editor_state.show_unsaved_dialog = true;
+                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
+                        let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                        editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if !is_dirty_editor {
+            let _ = crate::wm::WM.lock().destroy_window(focused_pid, focused_win_id);
+        }
         crate::wm::WM.lock().composite_desktop(0, 0);
         return Some(focused_pid);
     }
