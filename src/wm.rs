@@ -357,6 +357,7 @@ impl WindowManager {
         // Clean up per-window terminal instance if attached
         crate::terminal_app::cleanup_terminal_for_window(window_id);
         crate::files_app::cleanup_files_for_window(window_id);
+        crate::editor_app::cleanup_editor_for_window(window_id);
 
         // Unregister window from process PCB, decrement window count, and check remaining windows
         let remaining_windows = self.windows.iter().any(|w| w.owner_pid == caller_pid);
@@ -543,10 +544,13 @@ impl WindowManager {
             // Title text (App Name / PID)
             let app_name = match win.owner_pid {
                 1 => "Terminal",
-                2 => "Files",
-                3 => "Settings",
-                4 => "Task Manager",
-                5 => "Web Browser",
+                2 => "Demo App",
+                3 => "Files",
+                4 => "Settings",
+                5 => "Task Manager",
+                6 => "Web Browser",
+                7 => "System Monitor",
+                8 => "Text Editor",
                 _ => "SparkOS Application",
             };
             crate::gui::draw_string(wx + 18, wy + 6, app_name, title_fg, title_bg);
@@ -660,6 +664,7 @@ impl WindowManager {
                     5 => "Task",
                     6 => "Web",
                     7 => "Sys",
+                    8 => "Edit",
                     _ => "Win",
                 };
                 let short_name = alloc::format!("{}-{}", app_prefix, win.window_id);

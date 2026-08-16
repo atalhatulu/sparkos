@@ -162,6 +162,18 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
                         }
                         drop(files);
                         crate::wm::WM.lock().composite_desktop(0, 0);
+                    } else {
+                        drop(files);
+                        let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+                        if let Some(editor_state) = editors.get_mut(&win_id) {
+                            editor_state.handle_mouse_click(local_x as u32, local_y as u32);
+                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner_pid) {
+                                let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                                editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                            }
+                            drop(editors);
+                            crate::wm::WM.lock().composite_desktop(0, 0);
+                        }
                     }
                 }
 
@@ -213,6 +225,18 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
             term_state.handle_key_input(key_code, pressed);
             drop(instances);
             crate::wm::WM.lock().composite_desktop(0, 0);
+        } else {
+            drop(instances);
+            let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+            if let Some(editor_state) = editors.get_mut(&focused_win_id) {
+                editor_state.handle_key_input(key_code, pressed);
+                if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == focused_pid) {
+                    let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                    editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                }
+                drop(editors);
+                crate::wm::WM.lock().composite_desktop(0, 0);
+            }
         }
     }
 

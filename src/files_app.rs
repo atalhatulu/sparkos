@@ -280,8 +280,26 @@ impl FilesAppState {
                             format!("{}/{}", self.current_path.trim_end_matches('/'), item.name)
                         };
                         self.navigate_to(&new_path);
+                    } else if item.item_type == FileItemType::File {
+                        let file_path = if self.current_path == "/" {
+                            format!("/{}", item.name)
+                        } else {
+                            format!("{}/{}", self.current_path.trim_end_matches('/'), item.name)
+                        };
+                        let is_text = item.name.ends_with(".txt")
+                            || item.name.ends_with(".rs")
+                            || item.name.ends_with(".toml")
+                            || item.name.ends_with(".log")
+                            || item.name.ends_with(".md");
+
+                        if is_text {
+                            let _ = crate::editor_app::spawn_editor_app("editor.app", Some(&file_path));
+                            self.status_message = format!("Opened in Editor: '{}'", item.name);
+                        } else {
+                            self.status_message = format!("Cannot open binary: '{}'", item.name);
+                        }
                     } else {
-                        self.status_message = format!("Opened '{}' ({} B)", item.name, item.size_bytes);
+                        self.status_message = format!("Executable binary: '{}'", item.name);
                     }
                 } else {
                     self.selected_idx = Some(row_idx);

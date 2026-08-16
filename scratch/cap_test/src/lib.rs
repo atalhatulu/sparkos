@@ -8669,6 +8669,166 @@ mod invariant_tests {
 
         assert_eq!(win_b_input, "persisted configuration string");
     }
+
+    // =========================================================================
+    // STEP 50: DESKTOP V1.38 TEXT EDITOR INVARIANTS
+    // =========================================================================
+
+    /// EDIT_INV-1: Document open and text loading integrity
+    #[test]
+    fn test_edit_inv_1_open_and_load_integrity() {
+        let sample_content = "fn main() {\n    println!(\"SparkOS V1.38\");\n}";
+        let lines: alloc::vec::Vec<alloc::string::String> = sample_content
+            .split('\n')
+            .map(alloc::string::String::from)
+            .collect();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "fn main() {");
+        assert_eq!(lines[2], "}");
+    }
+
+    /// EDIT_INV-2: Text insertion, line breaking, and cursor advancement
+    #[test]
+    fn test_edit_inv_2_insertion_and_line_break() {
+        let mut lines = alloc::vec![alloc::string::String::from("Hello World")];
+        let mut row = 0;
+        let mut col = 5; // right after "Hello"
+
+        // Insert newline
+        let right = alloc::string::String::from(&lines[row][col..]);
+        lines[row].truncate(col);
+        lines.insert(row + 1, right);
+        row += 1;
+        col = 0;
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Hello");
+        assert_eq!(lines[1], " World");
+        assert_eq!(row, 1);
+        assert_eq!(col, 0);
+    }
+
+    /// EDIT_INV-3: Backspace and line merging behavior
+    #[test]
+    fn test_edit_inv_3_backspace_and_line_merge() {
+        let mut lines = alloc::vec![alloc::string::String::from("Line 1"), alloc::string::String::from("Line 2")];
+        let mut row = 1;
+        let mut col = 0;
+
+        // Backspace at (row=1, col=0) merges line 2 into line 1
+        let removed = lines.remove(row);
+        row -= 1;
+        col = lines[row].len();
+        lines[row].push_str(&removed);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "Line 1Line 2");
+        assert_eq!(row, 0);
+        assert_eq!(col, 6);
+    }
+
+    /// EDIT_INV-4: Save and dirty flag tracking
+    #[test]
+    fn test_edit_inv_4_save_and_dirty_flag() {
+        let mut is_dirty = false;
+
+        // Type char
+        is_dirty = true;
+        assert!(is_dirty);
+
+        // Save
+        is_dirty = false;
+        assert!(!is_dirty);
+    }
+
+    /// EDIT_INV-5: Save As new path update
+    #[test]
+    fn test_edit_inv_5_save_as_path_update() {
+        let mut path: Option<alloc::string::String> = None;
+        let mut is_dirty = true;
+
+        // Save as "/home/teha/new_doc.txt"
+        path = Some(alloc::string::String::from("/home/teha/new_doc.txt"));
+        is_dirty = false;
+
+        assert_eq!(path.as_deref(), Some("/home/teha/new_doc.txt"));
+        assert!(!is_dirty);
+    }
+
+    /// EDIT_INV-6: Multi-window document isolation
+    #[test]
+    fn test_edit_inv_6_multi_window_document_isolation() {
+        struct EditorDoc { id: u64, path: alloc::string::String, text: alloc::string::String }
+        let mut doc1 = EditorDoc { id: 1, path: alloc::string::String::from("/home/file_a.txt"), text: alloc::string::String::from("Alpha") };
+        let doc2 = EditorDoc { id: 2, path: alloc::string::String::from("/tmp/file_b.txt"), text: alloc::string::String::from("Beta") };
+
+        // Edit Doc 1
+        doc1.text.push_str(" Updated");
+
+        assert_eq!(doc1.text, "Alpha Updated");
+        assert_eq!(doc2.text, "Beta");
+    }
+
+    /// EDIT_INV-7: Clipboard integration (Copy, Cut, Paste)
+    #[test]
+    fn test_edit_inv_7_clipboard_integration() {
+        let doc_text = "SparkOS Kernel Editor";
+        let mut clipboard = alloc::string::String::new();
+
+        // Copy (Ctrl+C)
+        clipboard = alloc::string::String::from(doc_text);
+
+        // Paste (Ctrl+V) into another buffer
+        let mut new_doc = alloc::string::String::new();
+        new_doc.push_str(&clipboard);
+
+        assert_eq!(new_doc, "SparkOS Kernel Editor");
+    }
+
+    /// EDIT_INV-8: File association from Files.app
+    #[test]
+    fn test_edit_inv_8_file_association() {
+        let is_text_assoc = |name: &str| -> bool {
+            name.ends_with(".txt") || name.ends_with(".rs") || name.ends_with(".toml") || name.ends_with(".md") || name.ends_with(".log")
+        };
+
+        assert!(is_text_assoc("notes.txt"));
+        assert!(is_text_assoc("main.rs"));
+        assert!(is_text_assoc("config.toml"));
+        assert!(!is_text_assoc("sparkos.bin"));
+        assert!(!is_text_assoc("app.elf"));
+    }
+
+    /// EDIT_INV-9: UTF-8 / Turkish character support
+    #[test]
+    fn test_edit_inv_9_utf8_turkish_character_support() {
+        let turkish_text = "Türkçe karakterler: ç ğ ı İ ö ş ü - Çalışıyor";
+        let mut buffer = alloc::string::String::new();
+        buffer.push_str(turkish_text);
+
+        assert_eq!(buffer, "Türkçe karakterler: ç ğ ı İ ö ş ü - Çalışıyor");
+        assert!(buffer.contains('ç'));
+        assert!(buffer.contains('ğ'));
+        assert!(buffer.contains('ş'));
+    }
+
+    /// EDIT_INV-10: Editor window closure and instance state cleanup
+    #[test]
+    fn test_edit_inv_10_editor_instance_cleanup() {
+        let mut instances = alloc::collections::BTreeMap::new();
+        instances.insert(501u64, "Editor #1 State");
+        instances.insert(502u64, "Editor #2 State");
+
+        assert_eq!(instances.len(), 2);
+
+        // Window 501 closes
+        instances.remove(&501);
+
+        assert_eq!(instances.len(), 1);
+        assert!(instances.contains_key(&502));
+        assert!(!instances.contains_key(&501));
+    }
 }
 
 

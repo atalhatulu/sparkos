@@ -85,6 +85,7 @@ pub mod desktop;
 pub mod crash_reporter;
 pub mod sysmon_app;
 pub mod clipboard;
+pub mod editor_app;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

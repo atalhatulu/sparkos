@@ -79,6 +79,14 @@ pub const REGISTERED_APPS: &[AppDescriptor] = &[
         default_w: 440,
         default_h: 260,
     },
+    AppDescriptor {
+        id: 8,
+        name: "Text Editor",
+        exec_name: "editor.app",
+        icon: AppIcon::Generic,
+        default_w: 420,
+        default_h: 260,
+    },
 ];
 
 pub fn find_app_by_id(id: u8) -> Option<&'static AppDescriptor> {
@@ -99,6 +107,7 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
         5 => return crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"),
         6 => return crate::browser_app::spawn_browser_app("browser.app"),
         7 => return crate::sysmon_app::spawn_sysmon_app("sysmon.app"),
+        8 => return crate::editor_app::spawn_editor_app("editor.app", None),
         _ => {}
     }
     let app = find_app_by_id(app_id).ok_or("Unknown application ID")?;
