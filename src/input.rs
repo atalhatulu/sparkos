@@ -151,6 +151,20 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
 
                 drop(wm);
                 deliver_event_to_pid(owner_pid, ev);
+
+                if pressed && button > 0 {
+                    let mut files = crate::files_app::FILES_INSTANCES.lock();
+                    if let Some(files_state) = files.get_mut(&win_id) {
+                        files_state.handle_mouse_click(local_x as u32, local_y as u32);
+                        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner_pid) {
+                            let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                            files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
+                        }
+                        drop(files);
+                        crate::wm::WM.lock().composite_desktop(0, 0);
+                    }
+                }
+
                 return Some(owner_pid);
             }
         }
