@@ -840,6 +840,12 @@ impl WindowManager {
             let wid = win.window_id;
             let owner = win.owner_pid;
 
+            // 3-FS. Fullscreen Window Click
+            if win.state == WindowState::Fullscreen {
+                let _ = self.raise_to_top_internal(wid);
+                return Some((wid, owner));
+            }
+
             // 3a. Check Resize Borders (4px margin around window edges)
             if win.state != WindowState::Maximized {
                 // Bottom-Right Corner (8x8)
@@ -882,7 +888,7 @@ impl WindowManager {
                     if let Some(editor_state) = editors.get_mut(&wid) {
                         if editor_state.is_dirty {
                             editor_state.show_unsaved_dialog = true;
-                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner) {
+                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == win.surface_id || s.owner_pid == owner) {
                                 let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                                 editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
                             }
@@ -1034,9 +1040,20 @@ impl WindowManager {
             let wid = win.window_id;
 
             // Check if mouse is within window bounding box (including resize borders)
+            if win.state == WindowState::Fullscreen {
+                hovered = Some(HoverTarget {
+                    window_id: wid,
+                    button: ChromeButton::None,
+                    is_titlebar: false,
+                    resize_edge: ResizeEdge::None,
+                });
+                cursor_type = crate::cursor::CursorType::Default;
+                break;
+            }
+
             if mx >= wx - 4 && mx <= wx + ww + 4 && my >= wy && my <= wy + 20 + wh + 4 {
-                // Resize corners & edges (only if not maximized)
-                if win.state != WindowState::Maximized {
+                // Resize corners & edges (only if not maximized or fullscreen)
+                if win.state != WindowState::Maximized && win.state != WindowState::Fullscreen {
                     if (mx >= wx + ww - 8 && mx <= wx + ww + 4 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 4) ||
                        (mx >= wx - 4 && mx <= wx + 8 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 4) {
                         hovered = Some(HoverTarget {

@@ -223,11 +223,11 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         return None;
     }
 
-    let (focused_pid, focused_win_id) = {
+    let (focused_pid, focused_win_id, focused_surf_id) = {
         let wm = crate::wm::WM.lock();
         let fid = wm.focused_window?;
         let win = wm.windows.iter().find(|w| w.window_id == fid)?;
-        (win.owner_pid, fid)
+        (win.owner_pid, fid, win.surface_id)
     };
 
     // 2. Check Alt-F4 Window Close Shortcut
@@ -274,7 +274,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                 let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
                 if let Some(editor_state) = editors.get_mut(&focused_win_id) {
                     editor_state.handle_key_input(key_code, pressed);
-                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == focused_pid) {
+                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
                         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                         editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
                     }
@@ -293,7 +293,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                 let mut files = crate::files_app::FILES_INSTANCES.lock();
                 if let Some(files_state) = files.get_mut(&focused_win_id) {
                     files_state.handle_key_input(key_code, pressed);
-                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == focused_pid) {
+                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
                         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                         files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
                     }

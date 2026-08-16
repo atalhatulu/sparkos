@@ -164,7 +164,7 @@ pub async fn mouse_task() {
                 drop(wm);
 
                 if let Some((wid, owner_pid)) = event_target {
-                    let (local_x, local_y) = {
+                    let (local_x, local_y, target_surf_id) = {
                         let wm = crate::wm::WM.lock();
                         if let Some(w) = wm.windows.iter().find(|w| w.window_id == wid) {
                             let surf_reg = crate::surface::SURFACE_REGISTRY.lock();
@@ -173,11 +173,18 @@ pub async fn mouse_task() {
                             } else {
                                 (w.width as i32, w.height as i32)
                             };
-                            let lx = if w.width > 0 { (((cx as i32) - w.x) * surf_w) / (w.width as i32) } else { (cx as i32) - w.x };
-                            let ly = if w.height > 0 { (((cy as i32) - (w.y + 20)) * surf_h) / (w.height as i32) } else { (cy as i32) - (w.y + 20) };
-                            (lx, ly)
+                            let (lx, ly) = if w.state == crate::wm::WindowState::Fullscreen {
+                                let screen_w = unsafe { crate::gui::VESA.width as i32 };
+                                let screen_h = unsafe { crate::gui::VESA.height as i32 };
+                                let off_x = (screen_w.saturating_sub(surf_w)) / 2;
+                                let off_y = (screen_h.saturating_sub(surf_h)) / 2;
+                                ((cx as i32) - off_x, (cy as i32) - off_y)
+                            } else {
+                                ((cx as i32) - w.x, (cy as i32) - (w.y + 20))
+                            };
+                            (lx, ly, Some(w.surface_id))
                         } else {
-                            ((cx as i32), (cy as i32))
+                            ((cx as i32), (cy as i32), None)
                         }
                     };
 
@@ -199,7 +206,7 @@ pub async fn mouse_task() {
                         let mut files = crate::files_app::FILES_INSTANCES.lock();
                         if let Some(files_state) = files.get_mut(&wid) {
                             files_state.handle_mouse_click(local_x as u32, local_y as u32);
-                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner_pid) {
+                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| Some(s.surface_id) == target_surf_id || s.owner_pid == owner_pid) {
                                 let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                                 files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
                             }
@@ -210,7 +217,7 @@ pub async fn mouse_task() {
                                 let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
                                 if let Some(editor_state) = editors.get_mut(&wid) {
                                     editor_state.handle_mouse_click(local_x as u32, local_y as u32);
-                                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner_pid) {
+                                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| Some(s.surface_id) == target_surf_id || s.owner_pid == owner_pid) {
                                         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                                         editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
                                     }
