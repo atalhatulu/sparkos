@@ -448,6 +448,13 @@ impl Scheduler {
             proc.reaped = true;
         }
     }
+
+    pub fn purge_pid(&mut self, pid: u64) {
+        self.ready.retain(|&p| p != pid);
+        if self.current == Some(pid) {
+            self.current = None;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -925,20 +932,35 @@ pub fn schedule() {
         };
         if let Some(cur) = s.current {
             if let Some(p) = s.table.get_mut(&cur) {
-                if p.state == ProcessState::Running {
+                if p.state == ProcessState::Running && !p.exited && !p.reaped {
                     p.state = ProcessState::Ready;
+                    s.ready.push_back(cur);
                 }
             }
-            s.ready.push_back(cur);
         }
-        let next = match s.ready.pop_front() {
-            Some(n) => n,
-            None => {
-                // Nothing runnable: CPU idles via the idle process (pid 0).
-                let idle_ctx: *const RegisterContext = &s.table[&0].ctx;
-                drop(s);
-                jump_to_initial(idle_ctx);
-                unreachable!();
+        let next = loop {
+            match s.ready.pop_front() {
+                Some(candidate) => {
+                    if let Some(p) = s.table.get(&candidate) {
+                        if !p.exited && !p.reaped && p.state != ProcessState::Terminated && p.state != ProcessState::Exited {
+                            break candidate;
+                        }
+                    }
+                }
+                None => {
+                    // Nothing runnable: CPU idles via the idle process (pid 0).
+                    if let Some(idle_proc) = s.table.get(&0) {
+                        let idle_ctx: *const RegisterContext = &idle_proc.ctx;
+                        drop(s);
+                        jump_to_initial(idle_ctx);
+                        unreachable!();
+                    } else {
+                        drop(s);
+                        loop {
+                            x86_64::instructions::hlt();
+                        }
+                    }
+                }
             }
         };
         s.current = Some(next);
@@ -955,7 +977,13 @@ pub fn schedule() {
         }
 
         arm_quantum();
-        let next_raw = &s.table[&next].ctx as *const RegisterContext;
+        let next_raw = if let Some(p) = s.table.get(&next) {
+            &p.ctx as *const RegisterContext
+        } else if let Some(idle_p) = s.table.get(&0) {
+            &idle_p.ctx as *const RegisterContext
+        } else {
+            core::ptr::null()
+        };
         crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", next));
         (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
     };

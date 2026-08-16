@@ -164,24 +164,65 @@ pub async fn mouse_task() {
                 drop(wm);
 
                 if let Some((wid, owner_pid)) = event_target {
-                    let local_pos = {
+                    let (local_x, local_y) = {
                         let wm = crate::wm::WM.lock();
-                        wm.windows.iter().find(|w| w.window_id == wid).map(|w| ((cx as i32) - w.x, (cy as i32) - (w.y + 20)))
+                        if let Some(w) = wm.windows.iter().find(|w| w.window_id == wid) {
+                            let surf_reg = crate::surface::SURFACE_REGISTRY.lock();
+                            let (surf_w, surf_h) = if let Some(surf) = surf_reg.iter().find(|s| s.surface_id == w.surface_id) {
+                                (surf.width as i32, surf.height as i32)
+                            } else {
+                                (w.width as i32, w.height as i32)
+                            };
+                            let lx = if w.width > 0 { (((cx as i32) - w.x) * surf_w) / (w.width as i32) } else { (cx as i32) - w.x };
+                            let ly = if w.height > 0 { (((cy as i32) - (w.y + 20)) * surf_h) / (w.height as i32) } else { (cy as i32) - (w.y + 20) };
+                            (lx, ly)
+                        } else {
+                            ((cx as i32), (cy as i32))
+                        }
                     };
-                    if let Some((local_x, local_y)) = local_pos {
-                        let ev = crate::input::InputEvent {
-                            event_type: crate::input::EventType::MouseButtonDown as u8,
-                            modifiers: 0,
-                            key_code: 0,
-                            mouse_button: 1,
-                            wheel_delta: 0,
-                            _reserved: [0; 3],
-                            mouse_x: local_x,
-                            mouse_y: local_y,
-                            timestamp: crate::interrupts::get_tick(),
-                            _padding: [0; 8],
-                        };
-                        crate::input::deliver_event_to_pid(owner_pid, ev);
+
+                    let ev = crate::input::InputEvent {
+                        event_type: crate::input::EventType::MouseButtonDown as u8,
+                        modifiers: 0,
+                        key_code: 0,
+                        mouse_button: 1,
+                        wheel_delta: 0,
+                        _reserved: [0; 3],
+                        mouse_x: local_x,
+                        mouse_y: local_y,
+                        timestamp: crate::interrupts::get_tick(),
+                        _padding: [0; 8],
+                    };
+                    crate::input::deliver_event_to_pid(owner_pid, ev);
+
+                    if local_y >= 0 {
+                        let mut files = crate::files_app::FILES_INSTANCES.lock();
+                        if let Some(files_state) = files.get_mut(&wid) {
+                            files_state.handle_mouse_click(local_x as u32, local_y as u32);
+                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner_pid) {
+                                let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                                files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
+                            }
+                            drop(files);
+                        } else {
+                            drop(files);
+                            let (is_editor, should_close) = {
+                                let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+                                if let Some(editor_state) = editors.get_mut(&wid) {
+                                    editor_state.handle_mouse_click(local_x as u32, local_y as u32);
+                                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == owner_pid) {
+                                        let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                                        editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                                    }
+                                    (true, editor_state.pending_close)
+                                } else {
+                                    (false, false)
+                                }
+                            };
+                            if is_editor && should_close {
+                                let _ = crate::wm::WM.lock().destroy_window(owner_pid, wid);
+                            }
+                        }
                     }
                 } else if let Some(app_id) = app_to_spawn {
                     let _ = crate::app_registry::spawn_registered_app(app_id);
@@ -210,6 +251,7 @@ pub async fn mouse_task() {
                 } else if cy < 24 && cx > 1000 {
                     crate::network_manager::NETWORK_MANAGER.lock().toggle_popup();
                 }
+                crate::wm::WM.lock().composite_desktop(cx as i32, cy as i32);
             } else if !click && last_click {
                 let mut wm = crate::wm::WM.lock();
                 if let Some((_wid, owner_pid)) = wm.handle_mouse_up() {
@@ -227,6 +269,8 @@ pub async fn mouse_task() {
                     };
                     crate::input::deliver_event_to_pid(owner_pid, ev);
                 }
+                drop(wm);
+                crate::wm::WM.lock().composite_desktop(cx as i32, cy as i32);
             } else if moved {
                 let mut wm = crate::wm::WM.lock();
                 wm.handle_mouse_move(cx as i32, cy as i32);

@@ -49,6 +49,7 @@ pub struct EditorAppState {
     pub case_sensitive: bool,
     pub word_wrap: bool,
     pub active_input_field: u8, // 0: Editor Canvas, 1: Find Field, 2: Replace Field
+    pub pending_close: bool,
     pub status_message: String,
 }
 
@@ -76,6 +77,7 @@ impl EditorAppState {
             case_sensitive: false,
             word_wrap: false,
             active_input_field: 0,
+            pending_close: false,
             status_message: String::from("Ready"),
         };
 
@@ -688,11 +690,11 @@ impl EditorAppState {
                 0x1F | 0x1C => { // 'S' or Enter -> Save & Close
                     self.save_file();
                     self.show_unsaved_dialog = false;
-                    let _ = crate::wm::WM.lock().destroy_window(self.pid, self.window_id);
+                    self.pending_close = true;
                 }
                 0x20 | 0x0E => { // 'D' or Backspace -> Discard & Close
                     self.show_unsaved_dialog = false;
-                    let _ = crate::wm::WM.lock().destroy_window(self.pid, self.window_id);
+                    self.pending_close = true;
                 }
                 0x01 => { // Escape -> Cancel
                     self.show_unsaved_dialog = false;
@@ -848,12 +850,12 @@ impl EditorAppState {
                 if local_x >= dx + 12 && local_x <= dx + 72 {
                     self.save_file();
                     self.show_unsaved_dialog = false;
-                    let _ = crate::wm::WM.lock().destroy_window(self.pid, self.window_id);
+                    self.pending_close = true;
                     return;
                 }
                 if local_x >= dx + 84 && local_x <= dx + 154 {
                     self.show_unsaved_dialog = false;
-                    let _ = crate::wm::WM.lock().destroy_window(self.pid, self.window_id);
+                    self.pending_close = true;
                     return;
                 }
                 if local_x >= dx + 166 && local_x <= dx + 232 {

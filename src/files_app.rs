@@ -242,18 +242,18 @@ impl FilesAppState {
 
         // 1. Toolbar clicks (y in 6..28)
         if local_y >= 6 && local_y <= 28 {
-            // [<- Back] (x: 8..38)
-            if local_x >= 8 && local_x <= 38 {
+            // [<- Back] (x: 6..38)
+            if local_x >= 6 && local_x <= 38 {
                 self.go_back();
                 return;
             }
-            // [^ Up] (x: 44..70)
-            if local_x >= 44 && local_x <= 70 {
+            // [^ Up] (x: 42..74)
+            if local_x >= 42 && local_x <= 74 {
                 self.go_parent();
                 return;
             }
-            // [Refresh] (x: 360..430)
-            if local_x >= 360 && local_x <= 430 {
+            // [Refresh] (x: 360..436)
+            if local_x >= 360 && local_x <= 436 {
                 self.refresh();
                 return;
             }

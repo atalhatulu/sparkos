@@ -220,21 +220,40 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
     deliver_event_to_pid(focused_pid, ev);
 
     if pressed {
-        let mut instances = crate::terminal_app::TERMINAL_INSTANCES.lock();
-        if let Some(term_state) = instances.get_mut(&focused_win_id) {
-            term_state.handle_key_input(key_code, pressed);
-            drop(instances);
+        let (is_term, should_close) = {
+            let mut instances = crate::terminal_app::TERMINAL_INSTANCES.lock();
+            if let Some(term_state) = instances.get_mut(&focused_win_id) {
+                term_state.handle_key_input(key_code, pressed);
+                (true, term_state.pending_close)
+            } else {
+                (false, false)
+            }
+        };
+
+        if is_term {
+            if should_close {
+                let _ = crate::wm::WM.lock().destroy_window(focused_pid, focused_win_id);
+            }
             crate::wm::WM.lock().composite_desktop(0, 0);
         } else {
-            drop(instances);
-            let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
-            if let Some(editor_state) = editors.get_mut(&focused_win_id) {
-                editor_state.handle_key_input(key_code, pressed);
-                if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == focused_pid) {
-                    let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                    editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+            let (is_editor, should_close) = {
+                let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+                if let Some(editor_state) = editors.get_mut(&focused_win_id) {
+                    editor_state.handle_key_input(key_code, pressed);
+                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == focused_pid) {
+                        let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                        editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                    }
+                    (true, editor_state.pending_close)
+                } else {
+                    (false, false)
                 }
-                drop(editors);
+            };
+
+            if is_editor {
+                if should_close {
+                    let _ = crate::wm::WM.lock().destroy_window(focused_pid, focused_win_id);
+                }
                 crate::wm::WM.lock().composite_desktop(0, 0);
             }
         }

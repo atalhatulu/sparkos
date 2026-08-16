@@ -56,6 +56,7 @@ pub struct TerminalState {
     pub selection_start: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
     pub clipboard: String,
+    pub pending_close: bool,
 }
 
 impl TerminalState {
@@ -76,6 +77,7 @@ impl TerminalState {
             selection_start: None,
             selection_end: None,
             clipboard: String::new(),
+            pending_close: false,
         }
     }
 
@@ -171,7 +173,7 @@ impl TerminalState {
                 self.push_line("Directory changed to '/home/teha'", TermLineKind::Normal);
             } else if input == "exit" {
                 self.push_line("Session terminated.", TermLineKind::Normal);
-                let _ = crate::wm::WM.lock().destroy_window(caller_pid, caller_win);
+                self.pending_close = true;
             } else {
                 let err = format!("error: command not found: '{}'", input);
                 self.push_line(&err, TermLineKind::Error);
