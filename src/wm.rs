@@ -157,6 +157,7 @@ impl WindowManager {
         {
             let mut sched = crate::task::process::SCHEDULER.lock();
             if let Some(proc) = sched.get_process_mut(owner_pid) {
+                let _ = proc.increment_window_count();
                 if !proc.owned_windows.contains(&window_id) {
                     proc.owned_windows.push(window_id);
                 }
@@ -310,22 +311,30 @@ impl WindowManager {
             }
         }
 
-        // Clean up surface registry for this window
+        // Clean up surface registry for this window and uncharge accounting
         if surf_id != 0 {
             let mut reg = crate::surface::SURFACE_REGISTRY.lock();
             if let Some(pos) = reg.iter().position(|s| s.surface_id == surf_id && s.owner_pid == caller_pid) {
-                reg.remove(pos);
+                let surf = reg.remove(pos);
+                drop(reg);
+
+                let mut sched = crate::task::process::SCHEDULER.lock();
+                if let Some(proc) = sched.get_process_mut(caller_pid) {
+                    proc.uncharge_memory(surf.shmem_size as u64);
+                    proc.decrement_surface_count();
+                }
             }
         }
 
         // Clean up per-window terminal instance if attached
         crate::terminal_app::cleanup_terminal_for_window(window_id);
 
-        // Unregister window from process PCB and check remaining windows
+        // Unregister window from process PCB, decrement window count, and check remaining windows
         let remaining_windows = self.windows.iter().any(|w| w.owner_pid == caller_pid);
         {
             let mut sched = crate::task::process::SCHEDULER.lock();
             if let Some(proc) = sched.get_process_mut(caller_pid) {
+                proc.decrement_window_count();
                 proc.owned_windows.retain(|&wid| wid != window_id);
 
                 // If process is UI-bound and has no remaining windows, mark it exited

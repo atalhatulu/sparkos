@@ -147,6 +147,75 @@ pub struct RegisterContext {
     pub cr3: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResourceUsage {
+    pub current_memory_bytes: u64,
+    pub peak_memory_bytes: u64,
+    pub cpu_ticks: u64,
+    pub cpu_time_ms: u64,
+    pub window_count: u32,
+    pub surface_count: u32,
+    pub ipc_channel_count: u32,
+}
+
+impl ProcessResourceUsage {
+    pub const fn new() -> Self {
+        Self {
+            current_memory_bytes: 0,
+            peak_memory_bytes: 0,
+            cpu_ticks: 0,
+            cpu_time_ms: 0,
+            window_count: 0,
+            surface_count: 0,
+            ipc_channel_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResourceLimits {
+    pub max_memory_bytes: u64,
+    pub max_windows: u32,
+    pub max_surfaces: u32,
+    pub max_ipc_channels: u32,
+}
+
+impl ProcessResourceLimits {
+    pub const fn default_ui() -> Self {
+        Self {
+            max_memory_bytes: 32 * 1024 * 1024, // 32 MB for UI Apps
+            max_windows: 8,
+            max_surfaces: 16,
+            max_ipc_channels: 32,
+        }
+    }
+
+    pub const fn default_background() -> Self {
+        Self {
+            max_memory_bytes: 16 * 1024 * 1024, // 16 MB for Background Processes
+            max_windows: 2,
+            max_surfaces: 4,
+            max_ipc_channels: 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessMetricsSnapshot {
+    pub pid: u64,
+    pub name: String,
+    pub state: ProcessState,
+    pub kind: ProcessKind,
+    pub current_memory_bytes: u64,
+    pub peak_memory_bytes: u64,
+    pub memory_limit_bytes: u64,
+    pub cpu_ticks: u64,
+    pub cpu_time_ms: u64,
+    pub window_count: u32,
+    pub surface_count: u32,
+    pub ipc_channel_count: u32,
+}
+
 /// A Process Control Block (PCB). One per process.
 pub struct Process {
     pub pid: u64,
@@ -156,6 +225,8 @@ pub struct Process {
     pub is_user: bool,
     pub is_crashed: bool,
     pub owned_windows: alloc::vec::Vec<u64>,
+    pub resource_usage: ProcessResourceUsage,
+    pub resource_limits: ProcessResourceLimits,
     /// Callee-saved kernel context.
     pub ctx: RegisterContext,
     /// Private kernel stack.
@@ -196,6 +267,8 @@ impl Process {
             is_user: false,
             is_crashed: false,
             owned_windows: alloc::vec::Vec::new(),
+            resource_usage: ProcessResourceUsage::new(),
+            resource_limits: ProcessResourceLimits::default_ui(),
             ctx: RegisterContext::default(),
             kernel_stack: alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice(),
             entry: None,
@@ -214,6 +287,75 @@ impl Process {
             allowed_ports: None,
         }
     }
+
+    pub fn try_charge_memory(&mut self, bytes: u64) -> Result<(), &'static str> {
+        let new_total = self.resource_usage.current_memory_bytes.saturating_add(bytes);
+        if new_total > self.resource_limits.max_memory_bytes {
+            return Err("Memory quota exceeded");
+        }
+        self.resource_usage.current_memory_bytes = new_total;
+        if new_total > self.resource_usage.peak_memory_bytes {
+            self.resource_usage.peak_memory_bytes = new_total;
+        }
+        Ok(())
+    }
+
+    pub fn uncharge_memory(&mut self, bytes: u64) {
+        self.resource_usage.current_memory_bytes = self.resource_usage.current_memory_bytes.saturating_sub(bytes);
+    }
+
+    pub fn charge_cpu_ticks(&mut self, ticks: u64) {
+        self.resource_usage.cpu_ticks = self.resource_usage.cpu_ticks.saturating_add(ticks);
+        self.resource_usage.cpu_time_ms = self.resource_usage.cpu_ticks;
+    }
+
+    pub fn increment_window_count(&mut self) -> Result<(), &'static str> {
+        if self.resource_usage.window_count >= self.resource_limits.max_windows {
+            return Err("Window quota exceeded");
+        }
+        self.resource_usage.window_count += 1;
+        Ok(())
+    }
+
+    pub fn decrement_window_count(&mut self) {
+        self.resource_usage.window_count = self.resource_usage.window_count.saturating_sub(1);
+    }
+
+    pub fn increment_surface_count(&mut self) -> Result<(), &'static str> {
+        if self.resource_usage.surface_count >= self.resource_limits.max_surfaces {
+            return Err("Surface quota exceeded");
+        }
+        self.resource_usage.surface_count += 1;
+        Ok(())
+    }
+
+    pub fn decrement_surface_count(&mut self) {
+        self.resource_usage.surface_count = self.resource_usage.surface_count.saturating_sub(1);
+    }
+}
+
+pub fn get_system_metrics_snapshot() -> alloc::vec::Vec<ProcessMetricsSnapshot> {
+    let sched = SCHEDULER.lock();
+    let mut list = alloc::vec::Vec::new();
+    for (pid, proc) in sched.table.iter() {
+        if !proc.reaped {
+            list.push(ProcessMetricsSnapshot {
+                pid: *pid,
+                name: proc.name.clone(),
+                state: proc.state,
+                kind: proc.kind,
+                current_memory_bytes: proc.resource_usage.current_memory_bytes,
+                peak_memory_bytes: proc.resource_usage.peak_memory_bytes,
+                memory_limit_bytes: proc.resource_limits.max_memory_bytes,
+                cpu_ticks: proc.resource_usage.cpu_ticks,
+                cpu_time_ms: proc.resource_usage.cpu_time_ms,
+                window_count: proc.resource_usage.window_count,
+                surface_count: proc.resource_usage.surface_count,
+                ipc_channel_count: proc.resource_usage.ipc_channel_count,
+            });
+        }
+    }
+    list
 }
 
 // ---------------------------------------------------------------------------

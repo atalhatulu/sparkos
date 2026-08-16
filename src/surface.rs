@@ -48,6 +48,15 @@ pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result
     let stride = width.checked_mul(4).ok_or("Stride calculation overflow")?;
     let total_bytes = (stride as usize).checked_mul(height as usize).ok_or("Buffer size overflow")?;
 
+    // Resource Accounting & Quota Check
+    {
+        let mut sched = crate::task::process::SCHEDULER.lock();
+        if let Some(proc) = sched.get_process_mut(owner_pid) {
+            proc.try_charge_memory(total_bytes as u64)?;
+            proc.increment_surface_count()?;
+        }
+    }
+
     let pages = ((total_bytes + 4095) / 4096) as u64;
     let first_frame = crate::memory::user_alloc_frame().ok_or("Out of memory for surface backing")?;
     let phys_frame = first_frame.start_address().as_u64();
