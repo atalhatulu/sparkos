@@ -237,6 +237,64 @@ impl FilesAppState {
         }
     }
 
+    pub fn handle_key_input(&mut self, key_code: u8, pressed: bool) {
+        if !pressed { return; }
+        match key_code {
+            0x48 => { // Up arrow
+                if !self.entries.is_empty() {
+                    self.selected_idx = match self.selected_idx {
+                        Some(i) => Some(i.saturating_sub(1)),
+                        None => Some(0),
+                    };
+                }
+            }
+            0x50 => { // Down arrow
+                if !self.entries.is_empty() {
+                    let max_idx = self.entries.len().saturating_sub(1);
+                    self.selected_idx = match self.selected_idx {
+                        Some(i) => Some((i + 1).min(max_idx)),
+                        None => Some(0),
+                    };
+                }
+            }
+            0x1C => { // Enter
+                if let Some(idx) = self.selected_idx {
+                    if idx < self.entries.len() {
+                        let item = self.entries[idx].clone();
+                        if item.item_type == FileItemType::Directory {
+                            let new_path = if self.current_path == "/" {
+                                format!("/{}", item.name)
+                            } else {
+                                format!("{}/{}", self.current_path.trim_end_matches('/'), item.name)
+                            };
+                            self.navigate_to(&new_path);
+                        } else if item.item_type == FileItemType::File {
+                            let file_path = if self.current_path == "/" {
+                                format!("/{}", item.name)
+                            } else {
+                                format!("{}/{}", self.current_path.trim_end_matches('/'), item.name)
+                            };
+                            let is_text = item.name.ends_with(".txt")
+                                || item.name.ends_with(".rs")
+                                || item.name.ends_with(".toml")
+                                || item.name.ends_with(".log")
+                                || item.name.ends_with(".md");
+
+                            if is_text {
+                                let _ = crate::editor_app::spawn_editor_app("editor.app", Some(&file_path));
+                                self.status_message = format!("Opened in Editor: '{}'", item.name);
+                            }
+                        }
+                    }
+                }
+            }
+            0x0E => { // Backspace -> parent directory
+                self.go_parent();
+            }
+            _ => {}
+        }
+    }
+
     pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) {
         let now_tick = crate::interrupts::get_tick();
 

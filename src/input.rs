@@ -203,6 +203,13 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         (win.owner_pid, fid)
     };
 
+    // 2. Check Alt-F4 Window Close Shortcut
+    if pressed && key_code == 0x3E && (modifiers & 0x08 != 0 || crate::keyboard::is_alt_pressed()) {
+        let _ = crate::wm::WM.lock().destroy_window(focused_pid, focused_win_id);
+        crate::wm::WM.lock().composite_desktop(0, 0);
+        return Some(focused_pid);
+    }
+
     let ev_type = if pressed { EventType::KeyDown } else { EventType::KeyUp };
     let ev = InputEvent {
         event_type: ev_type as u8,
@@ -255,6 +262,17 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     let _ = crate::wm::WM.lock().destroy_window(focused_pid, focused_win_id);
                 }
                 crate::wm::WM.lock().composite_desktop(0, 0);
+            } else {
+                let mut files = crate::files_app::FILES_INSTANCES.lock();
+                if let Some(files_state) = files.get_mut(&focused_win_id) {
+                    files_state.handle_key_input(key_code, pressed);
+                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == focused_pid) {
+                        let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                        files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
+                    }
+                    drop(files);
+                    crate::wm::WM.lock().composite_desktop(0, 0);
+                }
             }
         }
     }

@@ -49,12 +49,36 @@ pub async fn read_scancode() -> u8 {
 
 /// Dedicated asynchronous keyboard task running in cooperative executor context (Deadlock-Free!)
 pub async fn keyboard_task() {
+    let mut is_ctrl = false;
+    let mut is_shift = false;
+    let mut is_alt = false;
+    let mut is_extended = false;
+
     loop {
         let scancode = read_scancode().await;
+        if scancode == 0xE0 {
+            is_extended = true;
+            continue;
+        }
+
         if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
             let pressed = (scancode & 0x80) == 0;
             let key_code = scancode & 0x7F;
-            crate::input::dispatch_keyboard_event(key_code, pressed, 0);
+
+            match key_code {
+                0x1D => is_ctrl = pressed,
+                0x2A | 0x36 => is_shift = pressed,
+                0x38 => is_alt = pressed,
+                _ => {}
+            }
+
+            let modifiers = (if is_ctrl { 1 } else { 0 })
+                | (if is_shift { 2 } else { 0 })
+                | (if is_alt || crate::keyboard::is_alt_pressed() { 8 } else { 0 });
+
+            crate::input::dispatch_keyboard_event(key_code, pressed, modifiers);
         }
+        let _ = is_extended;
+        is_extended = false;
     }
 }

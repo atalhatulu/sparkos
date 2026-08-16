@@ -225,8 +225,15 @@ pub extern "C" fn syscall_dispatcher(
         }
         SYS_DESTROY_WINDOW => {
             let pid = crate::task::process::current_pid();
-            match crate::wm::WM.lock().destroy_window(pid, arg1) {
-                Ok(_) => 0,
+            let res = crate::wm::WM.lock().destroy_window(pid, arg1);
+            match res {
+                Ok(_) => {
+                    let is_exited = crate::task::process::SCHEDULER.lock().is_exited(pid);
+                    if is_exited {
+                        crate::task::process::exit_current();
+                    }
+                    0
+                }
                 Err(_) => u64::MAX,
             }
         }

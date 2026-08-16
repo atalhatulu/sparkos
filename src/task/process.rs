@@ -455,6 +455,10 @@ impl Scheduler {
             self.current = None;
         }
     }
+
+    pub fn is_exited(&self, pid: u64) -> bool {
+        self.table.get(&pid).map(|p| p.exited || p.reaped || p.state == ProcessState::Exited || p.state == ProcessState::Terminated).unwrap_or(true)
+    }
 }
 
 // ---------------------------------------------------------------------------
