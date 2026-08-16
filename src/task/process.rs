@@ -110,12 +110,20 @@ pub fn shared_kernel_cr3() -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessKind {
+    UIBound,
+    BackgroundCapable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
     New,
     Ready,
     Running,
     Blocked,
+    Crashed,
     Terminated,
+    Exited,
     Reaped,
 }
 
@@ -144,7 +152,10 @@ pub struct Process {
     pub pid: u64,
     pub name: String,
     pub state: ProcessState,
+    pub kind: ProcessKind,
     pub is_user: bool,
+    pub is_crashed: bool,
+    pub owned_windows: alloc::vec::Vec<u64>,
     /// Callee-saved kernel context.
     pub ctx: RegisterContext,
     /// Private kernel stack.
@@ -181,7 +192,10 @@ impl Process {
             pid: 0,
             name: String::from(name),
             state: ProcessState::New,
+            kind: ProcessKind::UIBound,
             is_user: false,
+            is_crashed: false,
+            owned_windows: alloc::vec::Vec::new(),
             ctx: RegisterContext::default(),
             kernel_stack: alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice(),
             entry: None,
@@ -262,6 +276,34 @@ impl Scheduler {
             table: BTreeMap::new(),
             ready: VecDeque::new(),
             current: None,
+        }
+    }
+
+    pub fn get_process(&self, pid: u64) -> Option<&Process> {
+        self.table.get(&pid)
+    }
+
+    pub fn get_process_mut(&mut self, pid: u64) -> Option<&mut Process> {
+        self.table.get_mut(&pid)
+    }
+
+    pub fn exit_process(&mut self, pid: u64, exit_code: u64) {
+        if let Some(proc) = self.table.get_mut(&pid) {
+            if proc.reaped { return; }
+            proc.state = ProcessState::Exited;
+            proc.exit_code = exit_code;
+            proc.exited = true;
+            proc.reaped = true;
+        }
+    }
+
+    pub fn crash_process(&mut self, pid: u64, _reason: &str) {
+        if let Some(proc) = self.table.get_mut(&pid) {
+            if proc.reaped { return; }
+            proc.state = ProcessState::Crashed;
+            proc.is_crashed = true;
+            proc.exited = true;
+            proc.reaped = true;
         }
     }
 }

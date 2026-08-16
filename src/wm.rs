@@ -153,6 +153,16 @@ impl WindowManager {
         self.windows.push(win);
         self.focused_window = Some(window_id);
 
+        // Register window attachment in process PCB
+        {
+            let mut sched = crate::task::process::SCHEDULER.lock();
+            if let Some(proc) = sched.get_process_mut(owner_pid) {
+                if !proc.owned_windows.contains(&window_id) {
+                    proc.owned_windows.push(window_id);
+                }
+            }
+        }
+
         crate::serial_println!("[WM] Process {} created Window {} (surface {}, [{}, {}, {}, {}], FOCUSED)",
             owner_pid, window_id, surface_id, clamped_x, clamped_y, clamped_w, clamped_h);
 
@@ -308,16 +318,41 @@ impl WindowManager {
             }
         }
 
-        // Clean up input queue for this PID
-        crate::input::cleanup_input_for_pid(caller_pid);
+        // Clean up per-window terminal instance if attached
+        crate::terminal_app::cleanup_terminal_for_window(window_id);
 
-        // Mark process for termination in scheduler
-        let mut killed = crate::task::KILLED_PROCESSES.lock();
-        if !killed.contains(&caller_pid) {
-            killed.push(caller_pid);
+        // Unregister window from process PCB and check remaining windows
+        let remaining_windows = self.windows.iter().any(|w| w.owner_pid == caller_pid);
+        {
+            let mut sched = crate::task::process::SCHEDULER.lock();
+            if let Some(proc) = sched.get_process_mut(caller_pid) {
+                proc.owned_windows.retain(|&wid| wid != window_id);
+
+                // If process is UI-bound and has no remaining windows, mark it exited
+                if !remaining_windows && proc.kind == crate::task::process::ProcessKind::UIBound {
+                    proc.state = crate::task::process::ProcessState::Exited;
+                    proc.exited = true;
+                    proc.reaped = true;
+
+                    let mut killed = crate::task::KILLED_PROCESSES.lock();
+                    if !killed.contains(&caller_pid) {
+                        killed.push(caller_pid);
+                    }
+                }
+            } else if !remaining_windows {
+                let mut killed = crate::task::KILLED_PROCESSES.lock();
+                if !killed.contains(&caller_pid) {
+                    killed.push(caller_pid);
+                }
+            }
         }
 
-        crate::serial_println!("[WM] Process {} destroyed Window {} (Surface {} cleaned)", caller_pid, window_id, surf_id);
+        if !remaining_windows {
+            crate::input::cleanup_input_for_pid(caller_pid);
+        }
+
+        crate::serial_println!("[WM] Process {} destroyed Window {} (Surface {} cleaned, Remaining windows: {})",
+            caller_pid, window_id, surf_id, remaining_windows);
         Ok(())
     }
 

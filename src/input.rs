@@ -160,12 +160,11 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
 
 /// Klavye olayını işler: Kesinlikle YALNIZCA o an odaklı pencerenin sahibine iletir (Focus-Gated Routing).
 pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Option<u64> {
-    let (focused_pid, is_terminal) = {
+    let (focused_pid, focused_win_id) = {
         let wm = crate::wm::WM.lock();
-        let focused_id = wm.focused_window?;
-        let win = wm.windows.iter().find(|w| w.window_id == focused_id)?;
-        let is_term = win.owner_pid == 1;
-        (win.owner_pid, is_term)
+        let fid = wm.focused_window?;
+        let win = wm.windows.iter().find(|w| w.window_id == fid)?;
+        (win.owner_pid, fid)
     };
 
     let ev_type = if pressed { EventType::KeyDown } else { EventType::KeyUp };
@@ -184,9 +183,13 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
 
     deliver_event_to_pid(focused_pid, ev);
 
-    if is_terminal && pressed {
-        crate::terminal_app::TERMINAL_STATE.lock().handle_key_input(key_code, pressed, focused_pid);
-        crate::wm::WM.lock().composite_desktop(0, 0);
+    if pressed {
+        let mut instances = crate::terminal_app::TERMINAL_INSTANCES.lock();
+        if let Some(term_state) = instances.get_mut(&focused_win_id) {
+            term_state.handle_key_input(key_code, pressed);
+            drop(instances);
+            crate::wm::WM.lock().composite_desktop(0, 0);
+        }
     }
 
     Some(focused_pid)

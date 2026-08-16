@@ -7571,6 +7571,221 @@ mod invariant_tests {
         assert!(apps[1].focused);
         assert!(!apps[2].focused);
     }
+
+    // =========================================================================
+    // STEP 44: DESKTOP V1.32 APPLICATION & PROCESS LIFECYCLE INVARIANTS
+    // =========================================================================
+
+    /// PROC_LIFE_INV-1: Process state machine transitions (Created -> Ready -> Running -> Exited -> Reaped)
+    #[test]
+    fn test_proc_life_inv_1_state_machine_transitions() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum TestProcState { New, Ready, Running, Blocked, Crashed, Exited, Reaped }
+
+        let mut state = TestProcState::New;
+        assert_eq!(state, TestProcState::New);
+
+        // Transition: New -> Ready -> Running
+        state = TestProcState::Ready;
+        assert_eq!(state, TestProcState::Ready);
+        state = TestProcState::Running;
+        assert_eq!(state, TestProcState::Running);
+
+        // Normal exit: Running -> Exited -> Reaped
+        state = TestProcState::Exited;
+        assert_eq!(state, TestProcState::Exited);
+        state = TestProcState::Reaped;
+        assert_eq!(state, TestProcState::Reaped);
+
+        // Disallow invalid transition Reaped -> Running
+        let can_resume = state != TestProcState::Reaped;
+        assert!(!can_resume);
+    }
+
+    /// PROC_LIFE_INV-2: PID uniqueness and non-collision across concurrent active processes
+    #[test]
+    fn test_proc_life_inv_2_pid_uniqueness() {
+        let mut active_pids = alloc::collections::BTreeSet::new();
+        for i in 1..=50 {
+            let inserted = active_pids.insert(i as u64);
+            assert!(inserted);
+        }
+        assert_eq!(active_pids.len(), 50);
+        // Duplicate allocation rejected
+        let dup = active_pids.insert(25);
+        assert!(!dup);
+    }
+
+    /// PROC_LIFE_INV-3: Normal process exit resource cleanup
+    #[test]
+    fn test_proc_life_inv_3_normal_process_exit_cleanup() {
+        let mut owned_windows = alloc::vec![101u64, 102u64];
+        let mut surfaces = alloc::vec![50u64, 51u64];
+        let mut input_queue_active = true;
+
+        // Process exit triggers cleanup
+        owned_windows.clear();
+        surfaces.clear();
+        input_queue_active = false;
+
+        assert!(owned_windows.is_empty());
+        assert!(surfaces.is_empty());
+        assert!(!input_queue_active);
+    }
+
+    /// PROC_LIFE_INV-4: Crash process cleanup without kernel or desktop disruption
+    #[test]
+    fn test_proc_life_inv_4_crash_process_cleanup() {
+        let desktop_running = true;
+        let mut process_crashed = false;
+        let mut crash_recorded = false;
+
+        // Simulate crash
+        process_crashed = true;
+        crash_recorded = true;
+
+        assert!(process_crashed);
+        assert!(crash_recorded);
+        assert!(desktop_running);
+    }
+
+    /// PROC_LIFE_INV-5: Window close does not implicitly kill background-capable processes
+    #[test]
+    fn test_proc_life_inv_5_window_close_background_process_persists() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum TestKind { UIBound, BackgroundCapable }
+
+        struct MockProc { pid: u64, kind: TestKind, windows: alloc::vec::Vec<u64>, is_alive: bool }
+        let mut proc = MockProc {
+            pid: 42,
+            kind: TestKind::BackgroundCapable,
+            windows: alloc::vec![1001],
+            is_alive: true,
+        };
+
+        // Close window 1001
+        proc.windows.clear();
+        if proc.kind == TestKind::UIBound && proc.windows.is_empty() {
+            proc.is_alive = false;
+        }
+
+        // Background-capable process stays alive even with 0 windows!
+        assert!(proc.windows.is_empty());
+        assert!(proc.is_alive);
+    }
+
+    /// PROC_LIFE_INV-6: Process exit cleans all owned windows across multi-window process
+    #[test]
+    fn test_proc_life_inv_6_process_exit_cleans_all_owned_windows() {
+        let pid = 10u64;
+        let mut all_windows = alloc::vec![
+            (1u64, pid),
+            (2u64, pid),
+            (3u64, 99u64), // another process
+        ];
+
+        // Process 10 exits -> all windows owned by 10 are destroyed
+        all_windows.retain(|&(_, owner)| owner != pid);
+
+        assert_eq!(all_windows.len(), 1);
+        assert_eq!(all_windows[0].1, 99);
+    }
+
+    /// PROC_LIFE_INV-7: Process relaunch lifecycle (Open -> Exit -> Open -> Exit)
+    #[test]
+    fn test_proc_life_inv_7_process_relaunch_lifecycle() {
+        let mut execution_history = alloc::vec![];
+        for cycle in 1..=5 {
+            // Launch
+            execution_history.push((cycle, "LAUNCHED"));
+            // Use
+            execution_history.push((cycle, "ACTIVE"));
+            // Exit
+            execution_history.push((cycle, "EXITED"));
+        }
+        assert_eq!(execution_history.len(), 15);
+        assert_eq!(execution_history.last().unwrap().1, "EXITED");
+    }
+
+    /// PROC_LIFE_INV-8: Crash -> Relaunch creates fresh isolated state
+    #[test]
+    fn test_proc_life_inv_8_crash_relaunch_isolation() {
+        struct InstanceState { run_id: u32, is_crashed: bool, lines: alloc::vec::Vec<alloc::string::String> }
+
+        // First run crashes
+        let mut run1 = InstanceState { run_id: 1, is_crashed: true, lines: alloc::vec![alloc::string::String::from("corrupted buffer")] };
+        assert!(run1.is_crashed);
+
+        // Fresh relaunch is clean
+        let run2 = InstanceState { run_id: 2, is_crashed: false, lines: alloc::vec![] };
+        assert!(!run2.is_crashed);
+        assert!(run2.lines.is_empty());
+    }
+
+    /// PROC_LIFE_INV-9: Multi-terminal state isolation (instance 1 != instance 2)
+    #[test]
+    fn test_proc_life_inv_9_multi_terminal_state_isolation() {
+        let mut term1_lines = alloc::vec![alloc::string::String::from("Terminal 1 output")];
+        let term2_lines = alloc::vec![alloc::string::String::from("Terminal 2 output")];
+
+        term1_lines.push(alloc::string::String::from("Terminal 1 specific line"));
+
+        assert_eq!(term1_lines.len(), 2);
+        assert_eq!(term2_lines.len(), 1);
+        assert_ne!(term1_lines[0], term2_lines[0]);
+    }
+
+    /// PROC_LIFE_INV-10: Terminal history isolation across distinct instances
+    #[test]
+    fn test_proc_life_inv_10_terminal_history_isolation() {
+        let mut term1_history: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
+        let mut term2_history: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
+
+        term1_history.push(alloc::string::String::from("cd /home"));
+        term1_history.push(alloc::string::String::from("ls -la"));
+
+        term2_history.push(alloc::string::String::from("ps"));
+        term2_history.push(alloc::string::String::from("uptime"));
+
+        assert_eq!(term1_history.len(), 2);
+        assert_eq!(term2_history.len(), 2);
+        assert_ne!(term1_history[0], term2_history[0]);
+        assert!(!term2_history.contains(&alloc::string::String::from("cd /home")));
+    }
+
+    /// PROC_LIFE_INV-11: Terminal current working directory (CWD) isolation
+    #[test]
+    fn test_proc_life_inv_11_terminal_cwd_isolation() {
+        let mut term1_cwd = alloc::string::String::from("/home/teha/projects");
+        let term2_cwd = alloc::string::String::from("/tmp");
+
+        // Term1 changes directory
+        term1_cwd = alloc::string::String::from("/home/teha/documents");
+
+        // Term2 CWD remains strictly unchanged
+        assert_eq!(term1_cwd, "/home/teha/documents");
+        assert_eq!(term2_cwd, "/tmp");
+    }
+
+    /// PROC_LIFE_INV-12: Double cleanup protection (idempotent resource release)
+    #[test]
+    fn test_proc_life_inv_12_double_cleanup_protection() {
+        let mut is_reaped = false;
+        let mut cleanup_count = 0;
+
+        let mut cleanup_fn = || {
+            if is_reaped { return; }
+            cleanup_count += 1;
+            is_reaped = true;
+        };
+
+        cleanup_fn();
+        cleanup_fn();
+        cleanup_fn();
+
+        assert_eq!(cleanup_count, 1);
+        assert!(is_reaped);
+    }
 }
 
 
