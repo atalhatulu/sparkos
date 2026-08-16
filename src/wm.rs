@@ -81,6 +81,7 @@ pub struct WindowManager {
     pub hovered_target: Option<HoverTarget>,
     pub launcher_open: bool,
     pub pending_spawn_app: Option<u8>,
+    pub last_titlebar_click: Option<(u64, u64)>, // (window_id, tick)
 }
 
 impl WindowManager {
@@ -94,6 +95,7 @@ impl WindowManager {
             hovered_target: None,
             launcher_open: false,
             pending_spawn_app: None,
+            last_titlebar_click: None,
         }
     }
 
@@ -287,6 +289,32 @@ impl WindowManager {
         }
 
         self.raise_to_top_internal(window_id)
+    }
+
+    /// Cycles through open windows via Alt-Tab, restoring minimized windows and raising target to top
+    pub fn alt_tab_cycle(&mut self) -> Option<u64> {
+        if self.windows.is_empty() { return None; }
+
+        let cur_focus = self.focused_window;
+        let mut cur_idx = self.windows.len().saturating_sub(1);
+        if let Some(fid) = cur_focus {
+            if let Some(pos) = self.windows.iter().position(|w| w.window_id == fid) {
+                cur_idx = pos;
+            }
+        }
+
+        // Cycle to next window (wrapping around)
+        let next_idx = if cur_idx == 0 { self.windows.len() - 1 } else { cur_idx - 1 };
+        let next_wid = self.windows[next_idx].window_id;
+        let owner = self.windows[next_idx].owner_pid;
+
+        if self.windows[next_idx].state == WindowState::Minimized {
+            let _ = self.restore_window(owner, next_wid);
+        } else {
+            let _ = self.raise_to_top_internal(next_wid);
+        }
+
+        self.focused_window
     }
 
     /// Destroys a window with strict ownership verification, surface reclamation, and process cleanup.
@@ -623,13 +651,18 @@ impl WindowManager {
                     _ => crate::app_registry::AppIcon::Generic,
                 };
                 crate::gui::draw_icon_glyph(tab_x + 4, dock_y + 8, tab_icon, tab_fg, tab_bg);
-                let short_name = match win.owner_pid {
+                let app_prefix = match win.owner_pid {
                     1 => "Term",
                     2 => "Demo",
                     3 => "Files",
-                    _ => "App",
+                    4 => "Set",
+                    5 => "Task",
+                    6 => "Web",
+                    7 => "Sys",
+                    _ => "Win",
                 };
-                crate::gui::draw_string(tab_x + 16, dock_y + 7, short_name, tab_fg, tab_bg);
+                let short_name = alloc::format!("{}-{}", app_prefix, win.window_id);
+                crate::gui::draw_string(tab_x + 16, dock_y + 7, &short_name, tab_fg, tab_bg);
 
                 // Active dot indicator
                 if is_focused {
@@ -817,7 +850,23 @@ impl WindowManager {
                     return None;
                 }
 
-                // 4. Titlebar Drag start (Clicking on titlebar itself, not buttons)
+                // 4. Check Titlebar double click (Maximize/Restore shortcut)
+                let now_tick = crate::interrupts::get_tick();
+                let is_double_click = if let Some((last_id, last_tick)) = self.last_titlebar_click {
+                    last_id == wid && now_tick.saturating_sub(last_tick) <= 300
+                } else {
+                    false
+                };
+
+                if is_double_click {
+                    self.last_titlebar_click = None;
+                    let _ = self.toggle_maximize_window(owner, wid);
+                    return Some((wid, owner));
+                } else {
+                    self.last_titlebar_click = Some((wid, now_tick));
+                }
+
+                // 5. Titlebar Drag start (Clicking on titlebar itself, not buttons)
                 self.dragging_window = Some((wid, mx - wx, my - wy));
                 let _ = self.raise_to_top_internal(wid);
                 return Some((wid, owner));

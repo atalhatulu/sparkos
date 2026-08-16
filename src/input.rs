@@ -160,6 +160,16 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
 
 /// Klavye olayını işler: Kesinlikle YALNIZCA o an odaklı pencerenin sahibine iletir (Focus-Gated Routing).
 pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Option<u64> {
+    // 1. Check Alt-Tab Window Switcher Shortcut
+    if pressed && key_code == 0x0F && (modifiers & 0x08 != 0 || crate::keyboard::is_alt_pressed()) {
+        let mut wm = crate::wm::WM.lock();
+        let new_focused = wm.alt_tab_cycle();
+        let owner = new_focused.and_then(|fid| wm.windows.iter().find(|w| w.window_id == fid).map(|w| w.owner_pid));
+        drop(wm);
+        crate::wm::WM.lock().composite_desktop(0, 0);
+        return owner;
+    }
+
     let (focused_pid, focused_win_id) = {
         let wm = crate::wm::WM.lock();
         let fid = wm.focused_window?;

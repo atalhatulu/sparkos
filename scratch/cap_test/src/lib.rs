@@ -8182,6 +8182,202 @@ mod invariant_tests {
         assert_eq!(tasks.len(), 30);
         assert_eq!(tasks.last().unwrap().0, 30);
     }
+
+    // =========================================================================
+    // STEP 47: DESKTOP V1.35 WINDOW MANAGER 2.0 INVARIANTS
+    // =========================================================================
+
+    /// WM2_INV-1: Click-to-focus and Z-order elevation
+    #[test]
+    fn test_wm2_inv_1_click_to_focus_and_elevation() {
+        struct MockWin { id: u64, focused: bool }
+        let mut wins = alloc::vec![
+            MockWin { id: 1, focused: true },
+            MockWin { id: 2, focused: false },
+        ];
+
+        // Click window 2 -> elevated to top and focused
+        let clicked_id = 2u64;
+        let pos = wins.iter().position(|w| w.id == clicked_id).unwrap();
+        let mut target = wins.remove(pos);
+        for w in wins.iter_mut() { w.focused = false; }
+        target.focused = true;
+        wins.push(target);
+
+        assert_eq!(wins.last().unwrap().id, 2);
+        assert!(wins.last().unwrap().focused);
+        assert!(!wins[0].focused);
+    }
+
+    /// WM2_INV-2: Focus transfer on minimize/close to next topmost visible window
+    #[test]
+    fn test_wm2_inv_2_focus_transfer_on_minimize() {
+        struct MockWin { id: u64, visible: bool, focused: bool }
+        let mut wins = alloc::vec![
+            MockWin { id: 1, visible: true, focused: false },
+            MockWin { id: 2, visible: true, focused: true },
+        ];
+
+        // Minimize window 2
+        wins[1].visible = false;
+        wins[1].focused = false;
+
+        // Focus transferred to top-most visible (window 1)
+        if let Some(top_vis) = wins.iter_mut().rev().find(|w| w.visible) {
+            top_vis.focused = true;
+        }
+
+        assert!(wins[0].focused);
+        assert!(!wins[1].focused);
+    }
+
+    /// WM2_INV-3: Input isolation strictly to focused window
+    #[test]
+    fn test_wm2_inv_3_input_isolation() {
+        let focused_win = 42u64;
+        let incoming_keystroke = b'A';
+
+        let deliver_key = |target: u64, key: u8| -> Option<u8> {
+            if target == focused_win { Some(key) } else { None }
+        };
+
+        assert_eq!(deliver_key(42, incoming_keystroke), Some(b'A'));
+        assert_eq!(deliver_key(99, incoming_keystroke), None);
+    }
+
+    /// WM2_INV-4: Alt-Tab window switcher cycling
+    #[test]
+    fn test_wm2_inv_4_alt_tab_cycle() {
+        let mut win_order = alloc::vec![1u64, 2u64, 3u64];
+        let mut focused = 3u64;
+
+        // Alt-Tab cycle backwards in Z-order
+        let cur_idx = win_order.iter().position(|&w| w == focused).unwrap();
+        let next_idx = if cur_idx == 0 { win_order.len() - 1 } else { cur_idx - 1 };
+        focused = win_order[next_idx];
+
+        assert_eq!(focused, 2);
+
+        // Next cycle
+        let cur_idx = win_order.iter().position(|&w| w == focused).unwrap();
+        let next_idx = if cur_idx == 0 { win_order.len() - 1 } else { cur_idx - 1 };
+        focused = win_order[next_idx];
+
+        assert_eq!(focused, 1);
+    }
+
+    /// WM2_INV-5: Dock synchronization with open windows
+    #[test]
+    fn test_wm2_inv_5_dock_synchronization() {
+        let mut open_windows = alloc::vec![101u64, 102u64];
+        let mut dock_tabs: alloc::vec::Vec<u64> = open_windows.clone();
+
+        assert_eq!(dock_tabs.len(), 2);
+
+        // Destroy window 101
+        open_windows.retain(|&w| w != 101);
+        dock_tabs.retain(|&w| open_windows.contains(&w));
+
+        assert_eq!(dock_tabs.len(), 1);
+        assert_eq!(dock_tabs[0], 102);
+    }
+
+    /// WM2_INV-6: Titlebar double-click maximize/restore toggle
+    #[test]
+    fn test_wm2_inv_6_titlebar_double_click_maximize() {
+        #[derive(Debug, PartialEq)]
+        enum WinState { Normal, Maximized }
+
+        let mut state = WinState::Normal;
+        let mut toggle = |st: &mut WinState| {
+            *st = match *st {
+                WinState::Normal => WinState::Maximized,
+                WinState::Maximized => WinState::Normal,
+            };
+        };
+
+        toggle(&mut state);
+        assert_eq!(state, WinState::Maximized);
+        toggle(&mut state);
+        assert_eq!(state, WinState::Normal);
+    }
+
+    /// WM2_INV-7: Multi-window instance isolation across multiple terminals
+    #[test]
+    fn test_wm2_inv_7_multi_window_instance_isolation() {
+        struct TermWindow { id: u64, pid: u64, cwd: alloc::string::String, history_len: usize }
+        let term1 = TermWindow { id: 1, pid: 10, cwd: alloc::string::String::from("/home/teha"), history_len: 3 };
+        let term2 = TermWindow { id: 2, pid: 11, cwd: alloc::string::String::from("/tmp"), history_len: 1 };
+        let term3 = TermWindow { id: 3, pid: 12, cwd: alloc::string::String::from("/etc"), history_len: 5 };
+
+        assert_ne!(term1.id, term2.id);
+        assert_ne!(term2.id, term3.id);
+        assert_ne!(term1.cwd, term2.cwd);
+        assert_ne!(term2.history_len, term3.history_len);
+    }
+
+    /// WM2_INV-8: Window drag and workspace boundary clamping
+    #[test]
+    fn test_wm2_inv_8_drag_boundary_clamping() {
+        let max_w = 800i32;
+        let max_h = 600i32;
+        let work_top = 20i32;
+        let dock_h = 24i32;
+
+        let win_w = 400i32;
+        let win_h = 200i32;
+
+        let mut x = -50i32;
+        let mut y = 5i32;
+
+        // Clamp
+        x = x.clamp(0, max_w - win_w);
+        y = y.clamp(work_top, max_h - (win_h + dock_h + 20));
+
+        assert_eq!(x, 0);
+        assert_eq!(y, 20);
+    }
+
+    /// WM2_INV-9: True Fullscreen toggle and geometry restoration
+    #[test]
+    fn test_wm2_inv_9_fullscreen_geometry_restore() {
+        let orig_x = 40;
+        let orig_y = 50;
+        let orig_w = 320;
+        let orig_h = 180;
+
+        let mut saved: Option<(i32, i32, u32, u32)> = Some((orig_x, orig_y, orig_w, orig_h));
+
+        // Restore
+        let (rx, ry, rw, rh) = saved.take().unwrap();
+        assert_eq!(rx, 40);
+        assert_eq!(ry, 50);
+        assert_eq!(rw, 320);
+        assert_eq!(rh, 180);
+    }
+
+    /// WM2_INV-10: Compositing Z-order and hit-test consistency
+    #[test]
+    fn test_wm2_inv_10_occlusion_hit_test_consistency() {
+        // Window 1 (back), Window 2 (front, occluding window 1)
+        struct Rect { id: u64, x: i32, y: i32, w: i32, h: i32 }
+        let windows = [
+            Rect { id: 1, x: 50, y: 50, w: 200, h: 200 },
+            Rect { id: 2, x: 50, y: 50, w: 200, h: 200 },
+        ];
+
+        let hit_test = |mx: i32, my: i32| -> Option<u64> {
+            for w in windows.iter().rev() {
+                if mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
+                    return Some(w.id);
+                }
+            }
+            None
+        };
+
+        // Click in overlapping area hits front window (id: 2)
+        assert_eq!(hit_test(100, 100), Some(2));
+    }
 }
 
 

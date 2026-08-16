@@ -106,6 +106,9 @@ impl Keyboard {
             if make == 0x1D {
                 self.ctrl = false;
             }
+            if make == 0x38 {
+                ALT_PRESSED.store(false, core::sync::atomic::Ordering::Relaxed);
+            }
             return;
         }
 
@@ -113,6 +116,9 @@ impl Keyboard {
         match scancode {
             0x1D => self.ctrl = true,                    // Ctrl bas
             0x2A | 0x36 => self.shift = true,           // Shift bas
+            0x38 => {
+                ALT_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
             0x1C => self.push(Key::Enter),               // Enter
             0x0E => self.push(Key::Backspace),           // Backspace
             0x01 => self.push(Key::Escape),              // Escape
@@ -133,6 +139,12 @@ impl Keyboard {
             }
         }
     }
+}
+
+pub static ALT_PRESSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn is_alt_pressed() -> bool {
+    ALT_PRESSED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 pub static KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard::new());
