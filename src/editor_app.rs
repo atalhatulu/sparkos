@@ -655,28 +655,71 @@ impl EditorAppState {
     }
 
     pub fn copy_selection(&mut self) {
-        let mut full_text = String::new();
-        for (i, line) in self.lines.iter().enumerate() {
-            full_text.push_str(line);
-            if i + 1 < self.lines.len() {
-                full_text.push('\n');
+        if let (Some(anchor), Some(focus)) = (self.selection_anchor, self.selection_focus) {
+            let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+            let mut extracted = String::new();
+            for r in start.0..=end.0 {
+                if r >= self.lines.len() { break; }
+                let line = &self.lines[r];
+                let c_start = if r == start.0 { start.1.min(line.len()) } else { 0 };
+                let c_end = if r == end.0 { end.1.min(line.len()) } else { line.len() };
+                if c_start <= c_end && c_start <= line.len() {
+                    extracted.push_str(&line[c_start..c_end]);
+                }
+                if r < end.0 {
+                    extracted.push('\n');
+                }
             }
+            crate::clipboard::copy_to_clipboard(&extracted);
+            self.status_message = String::from("Selection copied to clipboard");
+        } else if self.cursor_row < self.lines.len() {
+            crate::clipboard::copy_to_clipboard(&self.lines[self.cursor_row]);
+            self.status_message = String::from("Current line copied to clipboard");
         }
-        crate::clipboard::copy_to_clipboard(&full_text);
-        self.status_message = String::from("Copied to clipboard");
     }
 
     pub fn cut_selection(&mut self) {
         self.push_undo_snapshot();
         self.copy_selection();
-        self.lines = alloc::vec![String::new()];
-        self.cursor_row = 0;
-        self.cursor_col = 0;
-        self.is_dirty = true;
-        self.selection_anchor = None;
-        self.selection_focus = None;
-        self.ensure_cursor_visible();
-        self.status_message = String::from("Cut document to clipboard");
+        if let (Some(anchor), Some(focus)) = (self.selection_anchor, self.selection_focus) {
+            let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+            if start.0 == end.0 && start.0 < self.lines.len() {
+                let line = &mut self.lines[start.0];
+                let c1 = start.1.min(line.len());
+                let c2 = end.1.min(line.len());
+                let mut new_line = String::from(&line[..c1]);
+                new_line.push_str(&line[c2..]);
+                self.lines[start.0] = new_line;
+                self.cursor_row = start.0;
+                self.cursor_col = c1;
+            } else if start.0 < end.0 && end.0 < self.lines.len() {
+                let first_part = String::from(&self.lines[start.0][..start.1.min(self.lines[start.0].len())]);
+                let last_part = &self.lines[end.0][end.1.min(self.lines[end.0].len())..];
+                let merged = format!("{}{}", first_part, last_part);
+                self.lines.drain(start.0..=end.0);
+                self.lines.insert(start.0, merged);
+                self.cursor_row = start.0;
+                self.cursor_col = start.1;
+            }
+            self.selection_anchor = None;
+            self.selection_focus = None;
+            self.is_dirty = true;
+            self.ensure_cursor_visible();
+            self.status_message = String::from("Cut selection to clipboard");
+        } else if self.cursor_row < self.lines.len() {
+            if self.lines.len() > 1 {
+                self.lines.remove(self.cursor_row);
+                if self.cursor_row >= self.lines.len() {
+                    self.cursor_row = self.lines.len().saturating_sub(1);
+                }
+            } else {
+                self.lines[0].clear();
+            }
+            self.cursor_col = 0;
+            self.is_dirty = true;
+            self.ensure_cursor_visible();
+            self.status_message = String::from("Cut current line");
+        }
     }
 
     pub fn paste_clipboard(&mut self) {

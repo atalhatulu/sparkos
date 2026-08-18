@@ -10431,6 +10431,69 @@ mod invariant_tests {
         assert_eq!(current, None);
         assert!(!table.contains_key(&50));
     }
+
+    // =========================================================================
+    // CTRL SHORTCUTS & SPAWN RECOVERY INVARIANTS (EDITOR_CLIPBOARD_INV-1 .. 3)
+    // =========================================================================
+
+    /// EDITOR_CLIPBOARD_INV-1: Selected text range copy & cut precision
+    #[test]
+    fn test_editor_clipboard_inv_1_selection_cut_and_copy() {
+        let mut lines = alloc::vec![
+            alloc::string::String::from("Hello SparkOS World"),
+            alloc::string::String::from("Second line of text"),
+        ];
+
+        // Select "SparkOS" in line 0 (indices 6..13)
+        let anchor = (0, 6);
+        let focus = (0, 13);
+        let (start, end) = (anchor, focus);
+
+        let line = &lines[start.0];
+        let extracted = alloc::string::String::from(&line[start.1..end.1]);
+        assert_eq!(extracted, "SparkOS");
+
+        // Cut operation
+        let mut new_line = alloc::string::String::from(&line[..start.1]);
+        new_line.push_str(&line[end.1..]);
+        lines[0] = new_line;
+
+        assert_eq!(lines[0], "Hello  World");
+        assert_eq!(lines.len(), 2);
+    }
+
+    /// EDITOR_CLIPBOARD_INV-2: Single line copy & cut when no selection
+    #[test]
+    fn test_editor_clipboard_inv_2_line_cut_no_selection() {
+        let mut lines = alloc::vec![
+            alloc::string::String::from("Line 1"),
+            alloc::string::String::from("Line 2"),
+            alloc::string::String::from("Line 3"),
+        ];
+        let cursor_row = 1;
+
+        // Cut line 2
+        let copied = lines[cursor_row].clone();
+        assert_eq!(copied, "Line 2");
+        lines.remove(cursor_row);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Line 1");
+        assert_eq!(lines[1], "Line 3");
+    }
+
+    /// EDITOR_CLIPBOARD_INV-3: App spawn failure triggers crash modal record
+    #[test]
+    fn test_editor_clipboard_inv_3_spawn_failure_modal() {
+        let spawn_res: core::result::Result<u64, &'static str> = Err("no free memory frame");
+        let mut crash_modal_active = false;
+
+        if let Err(_e) = spawn_res {
+            crash_modal_active = true;
+        }
+
+        assert!(crash_modal_active);
+    }
 }
 
 

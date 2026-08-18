@@ -244,28 +244,36 @@ pub async fn mouse_task() {
                         crate::crash_reporter::CRASH_REPORTER.lock().dismiss_active_crash();
                     }
                 } else if let Some(action) = crate::desktop::DESKTOP_ENV.lock().handle_mouse_click(cx, cy, crate::interrupts::get_tick()) {
-                    match action {
+                    let (res, app_name) = match action {
                         crate::desktop::DesktopIconAction::OpenHome => {
-                            let _ = crate::files_app::spawn_files_app("files.app");
+                            (crate::files_app::spawn_files_app("files.app"), "files.app")
                         }
                         crate::desktop::DesktopIconAction::OpenTerminal => {
-                            let _ = crate::terminal_app::spawn_terminal_app("terminal.app");
+                            (crate::terminal_app::spawn_terminal_app("terminal.app"), "terminal.app")
                         }
                         crate::desktop::DesktopIconAction::OpenEditor => {
-                            let _ = crate::editor_app::spawn_editor_app("editor.app", None);
+                            (crate::editor_app::spawn_editor_app("editor.app", None), "editor.app")
                         }
                         crate::desktop::DesktopIconAction::OpenTaskMgr => {
-                            let _ = crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app");
+                            (crate::taskmgr_app::spawn_taskmgr_app("taskmgr.app"), "taskmgr.app")
                         }
                         crate::desktop::DesktopIconAction::OpenSettings => {
-                            let _ = crate::settings_app::spawn_settings_app("settings.app");
+                            (crate::settings_app::spawn_settings_app("settings.app"), "settings.app")
                         }
                         crate::desktop::DesktopIconAction::OpenApplications => {
                             crate::wm::WM.lock().launcher_open = true;
+                            (Ok(0), "launcher")
                         }
                         crate::desktop::DesktopIconAction::OpenBrowser => {
-                            let _ = crate::browser_app::spawn_browser_app("browser.app");
+                            (crate::browser_app::spawn_browser_app("browser.app"), "browser.app")
                         }
+                    };
+                    if let Err(e) = res {
+                        crate::crash_reporter::CRASH_REPORTER.lock().report_process_crash(
+                            0,
+                            app_name,
+                            "Failed to allocate memory/process resources",
+                        );
                     }
                 } else if cy < 24 && cx > 1000 {
                     crate::network_manager::NETWORK_MANAGER.lock().toggle_popup();
