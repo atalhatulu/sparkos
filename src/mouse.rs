@@ -270,7 +270,6 @@ pub async fn mouse_task() {
                 } else if cy < 24 && cx > 1000 {
                     crate::network_manager::NETWORK_MANAGER.lock().toggle_popup();
                 }
-                crate::wm::WM.lock().composite_desktop(cx as i32, cy as i32);
             } else if !click && last_click {
                 let mut wm = crate::wm::WM.lock();
                 if let Some((_wid, owner_pid)) = wm.handle_mouse_up() {
@@ -289,7 +288,6 @@ pub async fn mouse_task() {
                     crate::input::deliver_event_to_pid(owner_pid, ev);
                 }
                 drop(wm);
-                crate::wm::WM.lock().composite_desktop(cx as i32, cy as i32);
             } else if moved {
                 let mut wm = crate::wm::WM.lock();
                 wm.handle_mouse_move(cx as i32, cy as i32);

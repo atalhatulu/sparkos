@@ -454,6 +454,7 @@ impl Scheduler {
         if self.current == Some(pid) {
             self.current = None;
         }
+        self.table.remove(&pid);
     }
 
     pub fn is_exited(&self, pid: u64) -> bool {

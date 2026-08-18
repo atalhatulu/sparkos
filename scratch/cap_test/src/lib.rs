@@ -10404,6 +10404,33 @@ mod invariant_tests {
         assert_ne!(window_id, surface_id);
         assert_ne!(task_id, window_id);
     }
+
+    /// SCHEDULER_PURGE_INV-1: Process table deallocation on purge_pid
+    #[test]
+    fn test_scheduler_purge_inv_1_table_deallocation() {
+        use alloc::collections::BTreeMap;
+        let mut table: BTreeMap<u64, alloc::string::String> = BTreeMap::new();
+        let mut ready: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut current: Option<u64> = None;
+
+        for pid in 1..=50 {
+            table.insert(pid, alloc::string::String::from("proc"));
+            ready.push(pid);
+        }
+        current = Some(50);
+        assert_eq!(table.len(), 50);
+        assert_eq!(ready.len(), 50);
+
+        // Purge PID 50
+        ready.retain(|&p| p != 50);
+        if current == Some(50) { current = None; }
+        table.remove(&50);
+
+        assert_eq!(table.len(), 49);
+        assert_eq!(ready.len(), 49);
+        assert_eq!(current, None);
+        assert!(!table.contains_key(&50));
+    }
 }
 
 

@@ -425,6 +425,12 @@ impl WindowManager {
 
     /// Internal compositor elevation (e.g. on mouse click hit-test).
     pub fn raise_to_top_internal(&mut self, window_id: u64) -> Result<(), WmError> {
+        let len = self.windows.len();
+        if len == 0 { return Err(WmError::NotFound); }
+        if self.windows[len - 1].window_id == window_id && self.focused_window == Some(window_id) {
+            return Ok(());
+        }
+
         let idx = self.windows.iter().position(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
 
@@ -437,8 +443,6 @@ impl WindowManager {
         win.focused = true;
         self.focused_window = Some(window_id);
         self.windows.push(win);
-
-        crate::serial_println!("[WM] Window {} raised to Top & FOCUSED", window_id);
         Ok(())
     }
 
