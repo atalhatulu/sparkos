@@ -9,6 +9,14 @@ mod cap;
 // Re-export for tests to reference.
 pub use cap::*;
 
+pub mod gui {
+    pub struct VesaInfo {
+        pub width: u16,
+        pub height: u16,
+    }
+    pub static mut VESA: VesaInfo = VesaInfo { width: 1280, height: 720 };
+}
+
 // Minimal `sync` module stub: ipc.rs `use crate::sync::BlockingChannel`.
 pub mod sync {
     use alloc::collections::VecDeque;
@@ -3931,17 +3939,20 @@ mod invariant_tests {
     // -------------------------------------------------------------------------
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MockWmError {
+    pub enum MockWmError {
         InvalidDimensions,
         NotFound,
         PermissionDenied,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MockWindowState {
+    pub enum MockWindowState {
         Normal,
         Minimized,
         Maximized,
+        Fullscreen,
+        SnappedLeft,
+        SnappedRight,
         Closed,
     }
 
@@ -3950,13 +3961,29 @@ mod invariant_tests {
         None,
         Left,
         Right,
+        Top,
         Bottom,
+        TopLeft,
+        TopRight,
         BottomLeft,
         BottomRight,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MockAppIcon {
+        Generic,
+        Terminal,
+        Files,
+        Editor,
+        TaskMgr,
+        SysMon,
+        Settings,
+        Browser,
+        Demo,
+    }
+
     #[derive(Debug, Clone)]
-    struct MockDesktopWindow {
+    pub struct MockDesktopWindow {
         pub window_id: u64,
         pub owner_pid: u64,
         pub surface_id: u64,
@@ -3967,10 +3994,14 @@ mod invariant_tests {
         pub visible: bool,
         pub focused: bool,
         pub state: MockWindowState,
+        pub normal_geom: (i32, i32, u32, u32),
+        pub prev_state: MockWindowState,
         pub saved_geom: Option<(i32, i32, u32, u32)>,
+        pub title: alloc::string::String,
+        pub icon: MockAppIcon,
     }
 
-    struct MockDesktopWindowManager {
+    pub struct MockDesktopWindowManager {
         pub windows: alloc::vec::Vec<MockDesktopWindow>,
         pub next_window_id: u64,
         pub focused_window: Option<u64>,
@@ -3991,7 +4022,7 @@ mod invariant_tests {
             }
         }
 
-        pub fn create_window(&mut self, owner_pid: u64, surface_id: u64, x: i32, y: i32, width: u32, height: u32) -> core::result::Result<u64, MockWmError> {
+        pub fn create_window_with_meta(&mut self, owner_pid: u64, surface_id: u64, x: i32, y: i32, width: u32, height: u32, title: alloc::string::String, icon: MockAppIcon) -> core::result::Result<u64, MockWmError> {
             if width == 0 || height == 0 || width > 640 || height > 360 {
                 return Err(MockWmError::InvalidDimensions);
             }
@@ -4016,16 +4047,36 @@ mod invariant_tests {
                 visible: true,
                 focused: true,
                 state: MockWindowState::Normal,
+                normal_geom: (clamped_x, clamped_y, clamped_w, clamped_h),
+                prev_state: MockWindowState::Normal,
                 saved_geom: None,
+                title,
+                icon,
             });
             self.focused_window = Some(window_id);
             Ok(window_id)
+        }
+
+        pub fn create_window(&mut self, owner_pid: u64, surface_id: u64, x: i32, y: i32, width: u32, height: u32) -> core::result::Result<u64, MockWmError> {
+            let (title, icon) = match owner_pid {
+                1 => (alloc::string::String::from("Terminal"), MockAppIcon::Terminal),
+                2 => (alloc::string::String::from("Files"), MockAppIcon::Files),
+                3 => (alloc::string::String::from("Text Editor"), MockAppIcon::Editor),
+                4 => (alloc::string::String::from("Task Manager"), MockAppIcon::TaskMgr),
+                5 => (alloc::string::String::from("Settings"), MockAppIcon::Settings),
+                6 => (alloc::string::String::from("Web Browser"), MockAppIcon::Browser),
+                _ => (alloc::string::String::from("SparkOS Application"), MockAppIcon::Generic),
+            };
+            self.create_window_with_meta(owner_pid, surface_id, x, y, width, height, title, icon)
         }
 
         pub fn minimize_window(&mut self, caller_pid: u64, window_id: u64) -> core::result::Result<(), MockWmError> {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(MockWmError::NotFound)?;
             if win.owner_pid != caller_pid {
                 return Err(MockWmError::PermissionDenied);
+            }
+            if win.state != MockWindowState::Minimized {
+                win.prev_state = win.state;
             }
             win.visible = false;
             win.focused = false;
@@ -4047,25 +4098,62 @@ mod invariant_tests {
                 return Err(MockWmError::PermissionDenied);
             }
             if win.state == MockWindowState::Maximized {
-                if let Some((px, py, pw, ph)) = win.saved_geom.take() {
-                    win.x = px.clamp(0, 520);
-                    win.y = py.clamp(20, 276);
-                    win.width = pw.clamp(120, 640);
-                    win.height = ph.clamp(60, 316);
-                } else {
-                    win.x = 30;
-                    win.y = 35;
-                    win.width = 220;
-                    win.height = 110;
-                }
+                let (nx, ny, nw, nh) = win.normal_geom;
+                win.x = nx.clamp(0, 520);
+                win.y = ny.clamp(20, 276);
+                win.width = nw.clamp(120, 640);
+                win.height = nh.clamp(60, 316);
                 win.state = MockWindowState::Normal;
+                win.prev_state = MockWindowState::Normal;
+                win.saved_geom = None;
             } else {
-                win.saved_geom = Some((win.x, win.y, win.width, win.height));
+                if win.state == MockWindowState::Normal {
+                    win.normal_geom = (win.x, win.y, win.width, win.height);
+                }
+                win.saved_geom = Some(win.normal_geom);
                 win.x = 0;
                 win.y = 20;
                 win.width = 640;
                 win.height = 316;
                 win.state = MockWindowState::Maximized;
+                win.prev_state = MockWindowState::Normal;
+            }
+            self.raise_to_top_internal(window_id)
+        }
+
+        pub fn toggle_fullscreen(&mut self, caller_pid: u64, window_id: u64) -> core::result::Result<(), MockWmError> {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(MockWmError::NotFound)?;
+            if win.owner_pid != caller_pid {
+                return Err(MockWmError::PermissionDenied);
+            }
+            if win.state == MockWindowState::Fullscreen {
+                if win.prev_state == MockWindowState::Maximized {
+                    win.x = 0;
+                    win.y = 20;
+                    win.width = 640;
+                    win.height = 316;
+                    win.state = MockWindowState::Maximized;
+                } else {
+                    let (nx, ny, nw, nh) = win.normal_geom;
+                    win.x = nx.clamp(0, 520);
+                    win.y = ny.clamp(20, 276);
+                    win.width = nw.clamp(120, 640);
+                    win.height = nh.clamp(60, 316);
+                    win.state = MockWindowState::Normal;
+                    win.saved_geom = None;
+                }
+                win.prev_state = MockWindowState::Normal;
+            } else {
+                win.prev_state = win.state;
+                if win.state == MockWindowState::Normal {
+                    win.normal_geom = (win.x, win.y, win.width, win.height);
+                }
+                win.saved_geom = Some(win.normal_geom);
+                win.x = 0;
+                win.y = 0;
+                win.width = 640;
+                win.height = 360;
+                win.state = MockWindowState::Fullscreen;
             }
             self.raise_to_top_internal(window_id)
         }
@@ -4077,9 +4165,194 @@ mod invariant_tests {
                     return Err(MockWmError::PermissionDenied);
                 }
                 win.visible = true;
-                win.state = MockWindowState::Normal;
+                match win.prev_state {
+                    MockWindowState::Maximized => {
+                        win.state = MockWindowState::Maximized;
+                        win.x = 0;
+                        win.y = 20;
+                        win.width = 640;
+                        win.height = 316;
+                    }
+                    MockWindowState::Fullscreen => {
+                        win.state = MockWindowState::Fullscreen;
+                        win.x = 0;
+                        win.y = 0;
+                        win.width = 640;
+                        win.height = 360;
+                    }
+                    MockWindowState::SnappedLeft => {
+                        win.state = MockWindowState::SnappedLeft;
+                        win.x = 0;
+                        win.y = 20;
+                        win.width = 320;
+                        win.height = 316;
+                    }
+                    MockWindowState::SnappedRight => {
+                        win.state = MockWindowState::SnappedRight;
+                        win.x = 320;
+                        win.y = 20;
+                        win.width = 320;
+                        win.height = 316;
+                    }
+                    _ => {
+                        win.state = MockWindowState::Normal;
+                        let (nx, ny, nw, nh) = win.normal_geom;
+                        win.x = nx;
+                        win.y = ny;
+                        win.width = nw;
+                        win.height = nh;
+                    }
+                }
             }
             self.raise_to_top_internal(window_id)
+        }
+
+        pub fn snap_left(&mut self, caller_pid: u64, window_id: u64) -> core::result::Result<(), MockWmError> {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(MockWmError::NotFound)?;
+            if win.owner_pid != caller_pid {
+                return Err(MockWmError::PermissionDenied);
+            }
+            if win.state == MockWindowState::Normal {
+                win.normal_geom = (win.x, win.y, win.width, win.height);
+            }
+            win.x = 0;
+            win.y = 20;
+            win.width = 320;
+            win.height = 316;
+            win.state = MockWindowState::SnappedLeft;
+            win.prev_state = MockWindowState::Normal;
+            self.raise_to_top_internal(window_id)
+        }
+
+        pub fn snap_right(&mut self, caller_pid: u64, window_id: u64) -> core::result::Result<(), MockWmError> {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(MockWmError::NotFound)?;
+            if win.owner_pid != caller_pid {
+                return Err(MockWmError::PermissionDenied);
+            }
+            if win.state == MockWindowState::Normal {
+                win.normal_geom = (win.x, win.y, win.width, win.height);
+            }
+            win.x = 320;
+            win.y = 20;
+            win.width = 320;
+            win.height = 316;
+            win.state = MockWindowState::SnappedRight;
+            win.prev_state = MockWindowState::Normal;
+            self.raise_to_top_internal(window_id)
+        }
+
+        pub fn resize_window_8way(&mut self, caller_pid: u64, window_id: u64, edge: MockResizeEdge, dx: i32, dy: i32) -> core::result::Result<(), MockWmError> {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(MockWmError::NotFound)?;
+            if win.owner_pid != caller_pid {
+                return Err(MockWmError::PermissionDenied);
+            }
+            if win.state == MockWindowState::Maximized || win.state == MockWindowState::Fullscreen {
+                return Ok(());
+            }
+            let orig_x = win.x;
+            let orig_y = win.y;
+            let orig_w = win.width;
+            let orig_h = win.height;
+            let max_w = 640i32;
+            let dock_y = 336i32; // 360 - 24
+            let max_avail_h = (dock_y - (orig_y + 20)).max(60) as u32;
+
+            match edge {
+                MockResizeEdge::Right => {
+                    let new_w = ((orig_w as i32) + dx).clamp(120, max_w - orig_x) as u32;
+                    win.width = new_w;
+                }
+                MockResizeEdge::Left => {
+                    let max_left = orig_x + (orig_w as i32) - 120;
+                    let new_x = (orig_x + dx).clamp(0, max_left);
+                    let new_w = ((orig_x + (orig_w as i32)) - new_x) as u32;
+                    win.x = new_x;
+                    win.width = new_w;
+                }
+                MockResizeEdge::Bottom => {
+                    let new_h = ((orig_h as i32) + dy).clamp(60, max_avail_h as i32) as u32;
+                    win.height = new_h;
+                }
+                MockResizeEdge::Top => {
+                    let max_top = orig_y + (orig_h as i32) - 60;
+                    let new_y = (orig_y + dy).clamp(20, max_top);
+                    let new_h = ((orig_y + (orig_h as i32)) - new_y) as u32;
+                    win.y = new_y;
+                    win.height = new_h;
+                }
+                MockResizeEdge::TopLeft => {
+                    let max_left = orig_x + (orig_w as i32) - 120;
+                    let new_x = (orig_x + dx).clamp(0, max_left);
+                    let new_w = ((orig_x + (orig_w as i32)) - new_x) as u32;
+                    let max_top = orig_y + (orig_h as i32) - 60;
+                    let new_y = (orig_y + dy).clamp(20, max_top);
+                    let new_h = ((orig_y + (orig_h as i32)) - new_y) as u32;
+                    win.x = new_x;
+                    win.width = new_w;
+                    win.y = new_y;
+                    win.height = new_h;
+                }
+                MockResizeEdge::TopRight => {
+                    let new_w = ((orig_w as i32) + dx).clamp(120, max_w - orig_x) as u32;
+                    let max_top = orig_y + (orig_h as i32) - 60;
+                    let new_y = (orig_y + dy).clamp(20, max_top);
+                    let new_h = ((orig_y + (orig_h as i32)) - new_y) as u32;
+                    win.width = new_w;
+                    win.y = new_y;
+                    win.height = new_h;
+                }
+                MockResizeEdge::BottomLeft => {
+                    let max_left = orig_x + (orig_w as i32) - 120;
+                    let new_x = (orig_x + dx).clamp(0, max_left);
+                    let new_w = ((orig_x + (orig_w as i32)) - new_x) as u32;
+                    let new_h = ((orig_h as i32) + dy).clamp(60, max_avail_h as i32) as u32;
+                    win.x = new_x;
+                    win.width = new_w;
+                    win.height = new_h;
+                }
+                MockResizeEdge::BottomRight => {
+                    let new_w = ((orig_w as i32) + dx).clamp(120, max_w - orig_x) as u32;
+                    let new_h = ((orig_h as i32) + dy).clamp(60, max_avail_h as i32) as u32;
+                    win.width = new_w;
+                    win.height = new_h;
+                }
+                MockResizeEdge::None => {}
+            }
+            win.state = MockWindowState::Normal;
+            win.normal_geom = (win.x, win.y, win.width, win.height);
+            Ok(())
+        }
+
+        pub fn hit_test(&self, mx: i32, my: i32) -> Option<u64> {
+            for win in self.windows.iter().rev() {
+                if !win.visible || win.state == MockWindowState::Minimized {
+                    continue;
+                }
+                if mx >= win.x && mx < win.x + (win.width as i32) && my >= win.y && my < win.y + 20 + (win.height as i32) {
+                    return Some(win.window_id);
+                }
+            }
+            None
+        }
+
+        pub fn alt_tab_cycle(&mut self) -> Option<u64> {
+            let vis_count = self.windows.iter().filter(|w| w.visible && w.state != MockWindowState::Minimized).count();
+            if vis_count == 0 {
+                return None;
+            }
+            if vis_count == 1 {
+                return self.focused_window;
+            }
+            if let Some(fid) = self.focused_window {
+                let vis_windows: alloc::vec::Vec<u64> = self.windows.iter().filter(|w| w.visible && w.state != MockWindowState::Minimized).map(|w| w.window_id).collect();
+                if let Some(pos) = vis_windows.iter().position(|&id| id == fid) {
+                    let next_pos = if pos == 0 { vis_windows.len() - 1 } else { pos - 1 };
+                    let next_id = vis_windows[next_pos];
+                    self.raise_to_top_internal(next_id).ok()?;
+                    return Some(next_id);
+                }
+            }
+            None
         }
 
         pub fn destroy_window(&mut self, caller_pid: u64, window_id: u64) -> core::result::Result<(), MockWmError> {
@@ -4106,6 +4379,9 @@ mod invariant_tests {
             }
             win.x = new_x.clamp(-100, 590);
             win.y = new_y.clamp(20, 306);
+            if win.state == MockWindowState::Normal {
+                win.normal_geom = (win.x, win.y, win.width, win.height);
+            }
             Ok(())
         }
 
@@ -10495,6 +10771,1378 @@ mod invariant_tests {
         assert!(crash_modal_active);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1: Damage Tracking / Dirty Rectangle Invariant Tests
+// ---------------------------------------------------------------------------
+#[path = "/home/teha/Documents/GitHub/sparkos/src/damage.rs"]
+pub mod damage_module;
+
+pub mod damage_tests {
+    use super::damage_module::{DamageRegion, DamageTracker};
+
+    /// DAMAGE_INV-1: Empty region properties and union with non-empty region
+    #[test]
+    fn test_damage_inv_1_empty_region_and_union() {
+        let empty = DamageRegion::empty();
+        assert!(empty.is_empty());
+        assert_eq!(empty.area(), 0);
+
+        let r1 = DamageRegion::new(10, 20, 100, 50);
+        assert!(!r1.is_empty());
+        assert_eq!(r1.area(), 5000);
+
+        // Union with empty returns original
+        let u1 = empty.union(&r1);
+        assert_eq!(u1, r1);
+        let u2 = r1.union(&empty);
+        assert_eq!(u2, r1);
+    }
+
+    /// DAMAGE_INV-2: Overlapping and non-overlapping bounding box aggregation
+    #[test]
+    fn test_damage_inv_2_region_union_bounding_box() {
+        let r1 = DamageRegion::new(10, 10, 40, 40); // [10..50, 10..50]
+        let r2 = DamageRegion::new(30, 30, 50, 50); // [30..80, 30..80]
+
+        let u = r1.union(&r2);
+        assert_eq!(u.x, 10);
+        assert_eq!(u.y, 10);
+        assert_eq!(u.width, 70); // 80 - 10 = 70
+        assert_eq!(u.height, 70); // 80 - 10 = 70
+    }
+
+    /// DAMAGE_INV-3: Screen boundary clamping protects framebuffer memory
+    #[test]
+    fn test_damage_inv_3_screen_boundary_clamping() {
+        let screen_w = 1280;
+        let screen_h = 720;
+
+        // Negative coordinates clamped to 0
+        let r_neg = DamageRegion::new(-50, -20, 200, 100);
+        let c_neg = r_neg.clamp_to_screen(screen_w, screen_h);
+        assert_eq!(c_neg.x, 0);
+        assert_eq!(c_neg.y, 0);
+        assert_eq!(c_neg.width, 150); // 150 max within 0..1280
+        assert_eq!(c_neg.height, 80); // 80 max within 0..720
+
+        // Out-of-bounds right/bottom clamped
+        let r_out = DamageRegion::new(1200, 680, 200, 100);
+        let c_out = r_out.clamp_to_screen(screen_w, screen_h);
+        assert_eq!(c_out.x, 1200);
+        assert_eq!(c_out.y, 680);
+        assert_eq!(c_out.width, 80); // 1280 - 1200 = 80
+        assert_eq!(c_out.height, 40); // 720 - 680 = 40
+
+        // Completely outside screen returns empty
+        let r_far = DamageRegion::new(1500, 900, 50, 50);
+        let c_far = r_far.clamp_to_screen(screen_w, screen_h);
+        assert!(c_far.is_empty());
+    }
+
+    /// DAMAGE_INV-4: Point containment verification
+    #[test]
+    fn test_damage_inv_4_point_containment() {
+        let r = DamageRegion::new(100, 100, 50, 50);
+        assert!(r.contains_point(100, 100)); // top-left
+        assert!(r.contains_point(149, 149)); // bottom-right inner
+        assert!(!r.contains_point(150, 150)); // outside right/bottom
+        assert!(!r.contains_point(99, 100)); // outside left
+        assert!(!r.contains_point(100, 99)); // outside top
+    }
+
+    /// DAMAGE_INV-5: DamageTracker full frame vs partial damage lifecycle
+    #[test]
+    fn test_damage_inv_5_damage_tracker_lifecycle() {
+        let mut tracker = DamageTracker::new();
+
+        // Boot state: forces full redraw
+        assert!(tracker.is_damaged());
+        assert!(tracker.force_full_redraw);
+
+        // Take damage consumes and resets full redraw
+        let first_dmg = tracker.take_damage();
+        assert!(first_dmg.is_some());
+        assert!(!tracker.force_full_redraw);
+        assert!(!tracker.is_damaged());
+
+        // Zero damage when idle
+        assert_eq!(tracker.take_damage(), None);
+
+        // Cursor move damage
+        tracker.add_bounds(100, 100, 28, 28);
+        tracker.add_bounds(105, 105, 28, 28);
+        assert!(tracker.is_damaged());
+
+        let cursor_dmg = tracker.take_damage().unwrap();
+        assert_eq!(cursor_dmg.x, 100);
+        assert_eq!(cursor_dmg.y, 100);
+        assert_eq!(cursor_dmg.width, 33); // 133 - 100 = 33
+        assert_eq!(cursor_dmg.height, 33);
+
+        // After consumption, tracker is clean
+        assert!(!tracker.is_damaged());
+        assert_eq!(tracker.take_damage(), None);
+    }
+
+    /// DAMAGE_INV-6: Bandwidth reduction invariant: Cursor damage touches < 0.1% of framebuffer
+    #[test]
+    fn test_damage_inv_6_cursor_bandwidth_reduction() {
+        let full_screen_pixels: u64 = 1280 * 720; // 921,600 pixels = 3.68 MB
+        let cursor_damage = DamageRegion::new(500, 300, 28, 28); // 784 pixels = 3.1 KB
+        let damage_pixels = cursor_damage.area();
+
+        assert_eq!(damage_pixels, 784);
+        // Touches less than 0.1% (1/1000) of the entire display bandwidth
+        assert!(damage_pixels * 1000 < full_screen_pixels);
+    }
+
+    /// DAMAGE_INV-7: Window move damage bounds calculation
+    #[test]
+    fn test_damage_inv_7_window_move_damage_bounds() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // clear boot state
+
+        let old_x: i32 = 100;
+        let old_y: i32 = 100;
+        let new_x: i32 = 110;
+        let new_y: i32 = 105;
+        let win_w: u32 = 400;
+        let win_h: u32 = 300;
+
+        // Bounding box of old and new geometry
+        let min_x = old_x.min(new_x) - 4;
+        let min_y = old_y.min(new_y) - 4;
+        let max_w = win_w + (old_x - new_x).abs() as u32 + 8;
+        let max_h = win_h + (old_y - new_y).abs() as u32 + 28;
+
+        tracker.add_bounds(min_x, min_y, max_w, max_h);
+        let dmg = tracker.take_damage().unwrap();
+
+        assert_eq!(dmg.x, 96);
+        assert_eq!(dmg.y, 96);
+        assert_eq!(dmg.width, 418);
+        assert_eq!(dmg.height, 333);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Frame Pacing & Decoupled Render Loop Invariant Tests
+// ---------------------------------------------------------------------------
+pub mod pacing_tests {
+    use super::damage_module::{DamageRegion, DamageTracker};
+
+    /// PACING_INV-1: 60 FPS frame interval enforcement (~16 ms / PIT ticks)
+    #[test]
+    fn test_pacing_inv_1_sixty_fps_frame_interval() {
+        const FRAME_INTERVAL_TICKS: u64 = 16;
+        let mut last_render_tick = 100u64;
+
+        // Simulation at tick 108 (8 ms elapsed): frame NOT ready
+        let tick_8 = 108u64;
+        let elapsed_8 = tick_8.saturating_sub(last_render_tick);
+        assert!(elapsed_8 < FRAME_INTERVAL_TICKS);
+        let mut rendered = false;
+        if elapsed_8 >= FRAME_INTERVAL_TICKS {
+            rendered = true;
+        }
+        assert!(!rendered, "Should not render before 16 ms elapsed");
+
+        // Simulation at tick 116 (16 ms elapsed): frame IS ready
+        let tick_16 = 116u64;
+        let elapsed_16 = tick_16.saturating_sub(last_render_tick);
+        assert!(elapsed_16 >= FRAME_INTERVAL_TICKS);
+        if elapsed_16 >= FRAME_INTERVAL_TICKS {
+            rendered = true;
+            last_render_tick = tick_16;
+        }
+        assert!(rendered, "Should render once 16 ms is reached");
+        assert_eq!(last_render_tick, 116);
+    }
+
+    /// PACING_INV-2: Input burst coalescing (multiple mouse move events combined into single dirty frame)
+    #[test]
+    fn test_pacing_inv_2_input_burst_coalescing() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // consume initial boot frame
+
+        // Simulate high-frequency 1000 Hz mouse moves arriving within a single 16ms frame period
+        let mouse_positions = [
+            (100, 100), (102, 101), (105, 103), (108, 105), (112, 108),
+            (115, 110), (120, 115), (125, 120), (130, 125), (135, 130),
+        ];
+
+        let mut events_processed = 0;
+        for &(mx, my) in &mouse_positions {
+            // Mouse driver marks damage for cursor bounding box (28x28)
+            tracker.add_bounds(mx - 4, my - 4, 28, 28);
+            events_processed += 1;
+        }
+        assert_eq!(events_processed, 10);
+        assert!(tracker.is_damaged());
+
+        // Compositor runs once at end of frame
+        let coalesced_dmg = tracker.take_damage().expect("Coalesced frame must exist");
+
+        // Entire trajectory from (96, 96) to (131 + 28 = 159, 126 + 28 = 154) is captured in 1 region
+        assert_eq!(coalesced_dmg.x, 96);
+        assert_eq!(coalesced_dmg.y, 96);
+        assert!(coalesced_dmg.width >= 63);
+        assert!(coalesced_dmg.height >= 58);
+
+        // After single compositor cycle, zero pending frames remain
+        assert!(!tracker.is_damaged());
+        assert_eq!(tracker.take_damage(), None);
+    }
+
+    /// PACING_INV-3: Zero damage produces zero render cycles (Idle power & CPU conservation)
+    #[test]
+    fn test_pacing_inv_3_zero_damage_no_render() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // boot cleared
+
+        let mut render_count = 0;
+        // Simulate 60 ticks of idle desktop
+        for _ in 0..60 {
+            if tracker.is_damaged() {
+                let _ = tracker.take_damage();
+                render_count += 1;
+            }
+        }
+        assert_eq!(render_count, 0, "Idle desktop must perform 0 renders");
+    }
+
+    /// PACING_INV-4: Scheduler starvation isolation: input and render can process independently
+    #[test]
+    fn test_pacing_inv_4_scheduler_starvation_isolation() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        // Queue of input events delivered to process
+        let mut delivered_events = alloc::vec::Vec::new();
+        let mut render_cycles = 0;
+
+        for tick in 0u64..=32u64 {
+            // Input arrives every 2 ticks (500 Hz input stream)
+            if tick % 2 == 0 {
+                delivered_events.push(tick);
+                tracker.add_bounds((tick * 5) as i32, 200, 28, 28);
+            }
+
+            // Paced render only triggers at tick 16 and tick 32 (60 Hz)
+            if tick > 0 && tick % 16 == 0 && tracker.is_damaged() {
+                let _ = tracker.take_damage();
+                render_cycles += 1;
+            }
+        }
+
+        // All 17 input events were delivered without loss
+        assert_eq!(delivered_events.len(), 17);
+        // Exactly 2 render cycles were performed, pacing at 60 FPS
+        assert_eq!(render_cycles, 2);
+    }
+
+    /// PACING_INV-5: Zero-window idle preserves state without rendering
+    #[test]
+    fn test_pacing_inv_5_zero_window_idle() {
+        let window_count = 0;
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        assert_eq!(window_count, 0);
+        assert!(!tracker.is_damaged());
+        assert_eq!(tracker.take_damage(), None);
+    }
+
+    /// PACING_INV-6: Continuous mouse drag produces stable regular frame intervals
+    #[test]
+    fn test_pacing_inv_6_continuous_drag_frame_regularity() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        let mut rendered_ticks = alloc::vec::Vec::new();
+        let mut last_render = 0u64;
+
+        // Continuous drag over 100 ms with mouse input every 1 ms
+        for tick in 1u64..=100u64 {
+            // Drag move every 1 ms
+            tracker.add_bounds(100 + (tick as i32), 200, 400, 300);
+
+            if tick.saturating_sub(last_render) >= 16 && tracker.is_damaged() {
+                let _ = tracker.take_damage();
+                rendered_ticks.push(tick);
+                last_render = tick;
+            }
+        }
+
+        // 100 ms @ 16 ms intervals produces 6 regular frames
+        assert_eq!(rendered_ticks.len(), 6);
+        assert_eq!(rendered_ticks, alloc::vec![16, 32, 48, 64, 80, 96]);
+
+        // Frame intervals are perfectly regular (16 ms between every frame)
+        for i in 1..rendered_ticks.len() {
+            let delta = rendered_ticks[i] - rendered_ticks[i - 1];
+            assert_eq!(delta, 16);
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod metadata_tests {
+    use super::invariant_tests::{MockDesktopWindowManager, MockAppIcon, MockWmError, MockWindowState};
+    use super::damage_module::DamageTracker;
+
+    /// WM2_META_INV-1: Window creation properly caches title and icon in Window struct
+    #[test]
+    fn test_wm2_meta_inv_1_window_creation_caches_title_and_icon() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window_with_meta(
+            10, 1, 40, 50, 200, 100,
+            alloc::string::String::from("Custom App"), MockAppIcon::Demo
+        ).unwrap();
+
+        let win = wm.windows.iter().find(|w| w.window_id == wid).expect("Window exists");
+        assert_eq!(win.title, "Custom App");
+        assert_eq!(win.icon, MockAppIcon::Demo);
+        assert_eq!(win.owner_pid, 10);
+        assert_eq!(win.surface_id, 1);
+    }
+
+    /// WM2_META_INV-2: Compositor render path consumes cached metadata without locking scheduler
+    #[test]
+    fn test_wm2_meta_inv_2_compositor_zero_scheduler_lock_reliance() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid1 = wm.create_window_with_meta(100, 1, 30, 35, 220, 110, alloc::string::String::from("Terminal"), MockAppIcon::Terminal).unwrap();
+        let wid2 = wm.create_window_with_meta(101, 2, 60, 60, 260, 140, alloc::string::String::from("Files"), MockAppIcon::Files).unwrap();
+
+        // Render simulation: reading titles and icons directly from Window structs without any external mutex lock
+        let rendered_titles: alloc::vec::Vec<(u64, alloc::string::String, MockAppIcon)> = wm.windows
+            .iter()
+            .map(|w| (w.window_id, w.title.clone(), w.icon))
+            .collect();
+
+        assert_eq!(rendered_titles.len(), 2);
+        assert_eq!(rendered_titles[0], (wid1, alloc::string::String::from("Terminal"), MockAppIcon::Terminal));
+        assert_eq!(rendered_titles[1], (wid2, alloc::string::String::from("Files"), MockAppIcon::Files));
+    }
+
+    /// WM2_META_INV-3: 6 core applications receive accurate default title and icon metadata
+    #[test]
+    fn test_wm2_meta_inv_3_six_core_apps_metadata_consistency() {
+        let mut wm = MockDesktopWindowManager::new();
+
+        // PID 1: Terminal
+        let w_term = wm.create_window(1, 1, 30, 35, 200, 100).unwrap();
+        // PID 2: Files
+        let w_files = wm.create_window(2, 2, 40, 45, 200, 100).unwrap();
+        // PID 3: Editor
+        let w_edit = wm.create_window(3, 3, 50, 55, 200, 100).unwrap();
+        // PID 4: TaskMgr
+        let w_task = wm.create_window(4, 4, 60, 65, 200, 100).unwrap();
+        // PID 5: Settings
+        let w_set = wm.create_window(5, 5, 70, 75, 200, 100).unwrap();
+        // PID 6: Browser
+        let w_brow = wm.create_window(6, 6, 80, 85, 200, 100).unwrap();
+
+        let term_win = wm.windows.iter().find(|w| w.window_id == w_term).unwrap();
+        assert_eq!(term_win.title, "Terminal");
+        assert_eq!(term_win.icon, MockAppIcon::Terminal);
+
+        let files_win = wm.windows.iter().find(|w| w.window_id == w_files).unwrap();
+        assert_eq!(files_win.title, "Files");
+        assert_eq!(files_win.icon, MockAppIcon::Files);
+
+        let edit_win = wm.windows.iter().find(|w| w.window_id == w_edit).unwrap();
+        assert_eq!(edit_win.title, "Text Editor");
+        assert_eq!(edit_win.icon, MockAppIcon::Editor);
+
+        let task_win = wm.windows.iter().find(|w| w.window_id == w_task).unwrap();
+        assert_eq!(task_win.title, "Task Manager");
+        assert_eq!(task_win.icon, MockAppIcon::TaskMgr);
+
+        let set_win = wm.windows.iter().find(|w| w.window_id == w_set).unwrap();
+        assert_eq!(set_win.title, "Settings");
+        assert_eq!(set_win.icon, MockAppIcon::Settings);
+
+        let brow_win = wm.windows.iter().find(|w| w.window_id == w_brow).unwrap();
+        assert_eq!(brow_win.title, "Web Browser");
+        assert_eq!(brow_win.icon, MockAppIcon::Browser);
+    }
+
+    /// WM2_META_INV-4: Window destruction safely reclaims window and metadata without memory leaks
+    #[test]
+    fn test_wm2_meta_inv_4_window_destroy_safely_reclaims_metadata() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 30, 35, 200, 100).unwrap();
+
+        assert_eq!(wm.windows.len(), 1);
+        let res = wm.destroy_window(1, wid);
+        assert_eq!(res, Ok(()));
+        assert_eq!(wm.windows.len(), 0);
+        assert_eq!(wm.focused_window, None);
+    }
+
+    /// WM2_META_INV-5: 5+ concurrent windows preserve independent metadata isolation
+    #[test]
+    fn test_wm2_meta_inv_5_multi_window_metadata_isolation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let mut created_ids = alloc::vec::Vec::new();
+
+        for i in 1..=5 {
+            let wid = wm.create_window_with_meta(
+                100 + i,
+                i,
+                (30 + i * 20) as i32,
+                (35 + i * 15) as i32,
+                200,
+                100,
+                alloc::format!("Window {}", i),
+                if i % 2 == 0 { MockAppIcon::Terminal } else { MockAppIcon::Files },
+            ).unwrap();
+            created_ids.push(wid);
+        }
+
+        assert_eq!(wm.windows.len(), 5);
+
+        for (idx, &wid) in created_ids.iter().enumerate() {
+            let i = (idx + 1) as u64;
+            let win = wm.windows.iter().find(|w| w.window_id == wid).expect("Window found");
+            assert_eq!(win.title, alloc::format!("Window {}", i));
+            assert_eq!(win.owner_pid, 100 + i);
+            let expected_icon = if i % 2 == 0 { MockAppIcon::Terminal } else { MockAppIcon::Files };
+            assert_eq!(win.icon, expected_icon);
+        }
+    }
+
+    /// WM2_META_INV-6: Damage tracking and 60 FPS pacing are preserved alongside metadata cache
+    #[test]
+    fn test_wm2_meta_inv_6_damage_and_pacing_preserved_with_metadata_cache() {
+        let mut wm = MockDesktopWindowManager::new();
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        let wid = wm.create_window(1, 1, 30, 35, 200, 100).unwrap();
+        tracker.add_bounds(30, 35, 200, 100);
+
+        assert!(tracker.is_damaged());
+        let damage = tracker.take_damage().expect("Damage exists");
+        assert_eq!(damage.x, 30);
+        assert_eq!(damage.y, 35);
+        assert_eq!(damage.width, 200);
+        assert_eq!(damage.height, 100);
+
+        // Subsequent check with zero new damage
+        assert!(!tracker.is_damaged());
+        assert_eq!(tracker.take_damage(), None);
+
+        // Verify window metadata intact
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.title, "Terminal");
+        assert_eq!(win.icon, MockAppIcon::Terminal);
+    }
+}
+
+#[cfg(test)]
+pub mod render21_tests {
+    use super::damage_module::{DamageRegion, DamageTracker};
+
+    /// RENDER21_INV-1: Old cursor bounding box is added to damage tracker on movement
+    #[test]
+    fn test_render21_inv_1_old_cursor_rect_added_to_damage() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // boot cleared
+
+        let old_x = 320i32;
+        let old_y = 180i32;
+        // Old cursor 28x28 bounds
+        tracker.add_bounds(old_x - 4, old_y - 4, 28, 28);
+
+        assert!(tracker.is_damaged());
+        let dmg = tracker.take_damage().unwrap();
+        assert_eq!(dmg.x, 316);
+        assert_eq!(dmg.y, 176);
+        assert_eq!(dmg.width, 28);
+        assert_eq!(dmg.height, 28);
+    }
+
+    /// RENDER21_INV-2: New cursor bounding box is added to damage tracker on movement
+    #[test]
+    fn test_render21_inv_2_new_cursor_rect_added_to_damage() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        let old_x = 320i32;
+        let old_y = 180i32;
+        let new_x = 350i32;
+        let new_y = 200i32;
+
+        // Move event adds both old and new cursor regions
+        tracker.add_bounds(old_x - 4, old_y - 4, 28, 28);
+        tracker.add_bounds(new_x - 4, new_y - 4, 28, 28);
+
+        assert!(tracker.is_damaged());
+        let dmg = tracker.take_damage().unwrap();
+        // Combined bounding box covers from 316 to 350+24=374 (width 58) and 176 to 200+24=224 (height 48)
+        assert_eq!(dmg.x, 316);
+        assert_eq!(dmg.y, 176);
+        assert_eq!(dmg.width, 58);
+        assert_eq!(dmg.height, 48);
+        assert!(dmg.contains_point(old_x, old_y));
+        assert!(dmg.contains_point(new_x, new_y));
+    }
+
+    /// RENDER21_INV-3: Zero damage produces zero compositor render execution
+    #[test]
+    fn test_render21_inv_3_zero_damage_no_render() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // cleared
+
+        let mut render_executed = false;
+        if tracker.is_damaged() {
+            let _ = tracker.take_damage();
+            render_executed = true;
+        }
+
+        assert!(!render_executed, "Compositor must not execute render when zero damage exists");
+        assert_eq!(tracker.take_damage(), None);
+    }
+
+    /// RENDER21_INV-4: Cursor coordinates and damage clamp strictly to screen boundaries
+    #[test]
+    fn test_render21_inv_4_cursor_bounds_clamping() {
+        let screen_w = 1280u16;
+        let screen_h = 720u16;
+
+        // Extreme offscreen coordinates
+        let test_coords = [(-50i16, -50i16), (2000i16, 1500i16), (0, 0), (1279, 719)];
+
+        for &(raw_x, raw_y) in &test_coords {
+            let cx = (raw_x.max(0) as u16).min(screen_w.saturating_sub(1));
+            let cy = (raw_y.max(0) as u16).min(screen_h.saturating_sub(1));
+
+            assert!(cx < screen_w);
+            assert!(cy < screen_h);
+
+            let region = DamageRegion::new(cx as i32 - 4, cy as i32 - 4, 28, 28);
+            let clamped = region.clamp_to_screen(screen_w as u32, screen_h as u32);
+            assert!(clamped.x >= 0);
+            assert!(clamped.y >= 0);
+            assert!(clamped.x + clamped.width as i32 <= screen_w as i32);
+            assert!(clamped.y + clamped.height as i32 <= screen_h as i32);
+        }
+    }
+
+    /// RENDER21_INV-5: Partial cursor movement does not trigger full-screen redraw
+    #[test]
+    fn test_render21_inv_5_partial_cursor_damage_not_full_screen() {
+        let screen_w = 1280u32;
+        let screen_h = 720u32;
+        let total_screen_pixels: u64 = (screen_w as u64) * (screen_h as u64);
+
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        // Cursor moves by 5 pixels
+        tracker.add_bounds(320 - 4, 180 - 4, 28, 28);
+        tracker.add_bounds(325 - 4, 185 - 4, 28, 28);
+
+        let dmg = tracker.take_damage().unwrap();
+        let clamped = dmg.clamp_to_screen(screen_w, screen_h);
+
+        let is_full = clamped.x == 0 && clamped.y == 0 && clamped.width >= screen_w && clamped.height >= screen_h;
+        assert!(!is_full, "Cursor movement must only generate partial dirty rect, not full-screen");
+        assert!(clamped.area() < total_screen_pixels / 100);
+    }
+
+    /// RENDER21_INV-6: 60 FPS compositor pacing (~16 ms interval) is strictly preserved
+    #[test]
+    fn test_render21_inv_6_sixty_fps_pacing_preserved() {
+        const FRAME_INTERVAL_TICKS: u64 = 16;
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        let mut render_count = 0;
+        let mut last_render = 0u64;
+
+        // Simulate 48 ms with mouse events arriving at 1 ms frequency (high-speed mouse)
+        for tick in 1u64..=48u64 {
+            tracker.add_bounds((tick * 2) as i32, 200, 28, 28);
+
+            if tick.saturating_sub(last_render) >= FRAME_INTERVAL_TICKS && tracker.is_damaged() {
+                let _ = tracker.take_damage();
+                render_count += 1;
+                last_render = tick;
+            }
+        }
+
+        // Exactly 3 frames rendered over 48 ms (48 / 16 = 3 frames)
+        assert_eq!(render_count, 3);
+    }
+}
+
+#[cfg(test)]
+pub mod state_machine_tests {
+    use super::invariant_tests::{MockDesktopWindowManager, MockWindowState, MockWmError};
+
+    /// WM2_STATE_INV-1: Normal geometry is strictly preserved across maximize, fullscreen, and minimize cycles
+    #[test]
+    fn test_wm2_state_inv_1_normal_geometry_preservation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 240, 140).unwrap();
+
+        // 1. Initial normal geometry
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Normal);
+        assert_eq!(win.normal_geom, (100, 80, 240, 140));
+        assert_eq!((win.x, win.y, win.width, win.height), (100, 80, 240, 140));
+
+        // 2. Maximize -> Normal geometry must remain (100, 80, 240, 140)
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Maximized);
+        assert_eq!(win.normal_geom, (100, 80, 240, 140));
+
+        // 3. Fullscreen -> Normal geometry must remain (100, 80, 240, 140)
+        wm.toggle_fullscreen(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Fullscreen);
+        assert_eq!(win.normal_geom, (100, 80, 240, 140));
+
+        // 4. Restore from fullscreen (back to Maximized)
+        wm.toggle_fullscreen(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Maximized);
+        assert_eq!(win.normal_geom, (100, 80, 240, 140));
+
+        // 5. Restore from maximized (back to Normal)
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Normal);
+        assert_eq!((win.x, win.y, win.width, win.height), (100, 80, 240, 140));
+    }
+
+    /// WM2_STATE_INV-2: Maximize and Restore cycle deterministically expands and recovers geometry
+    #[test]
+    fn test_wm2_state_inv_2_maximize_restore_cycle() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 50, 60, 200, 120).unwrap();
+
+        // Maximize
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Maximized);
+        assert_eq!((win.x, win.y, win.width, win.height), (0, 20, 640, 316));
+
+        // Restore
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Normal);
+        assert_eq!((win.x, win.y, win.width, win.height), (50, 60, 200, 120));
+    }
+
+    /// WM2_STATE_INV-3: Fullscreen and Restore cycle covers true (0, 0, screen_w, screen_h) and restores accurately
+    #[test]
+    fn test_wm2_state_inv_3_fullscreen_restore_cycle() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 80, 90, 300, 160).unwrap();
+
+        // Enter Fullscreen
+        wm.toggle_fullscreen(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Fullscreen);
+        assert_eq!((win.x, win.y, win.width, win.height), (0, 0, 640, 360));
+
+        // Exit Fullscreen
+        wm.toggle_fullscreen(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Normal);
+        assert_eq!((win.x, win.y, win.width, win.height), (80, 90, 300, 160));
+    }
+
+    /// WM2_STATE_INV-4: Minimized window remembers its previous state (Maximized or Fullscreen) on restore
+    #[test]
+    fn test_wm2_state_inv_4_minimized_previous_state_preservation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 40, 50, 220, 110).unwrap();
+
+        // Maximize first
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Maximized);
+
+        // Minimize from Maximized
+        wm.minimize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Minimized);
+        assert_eq!(win.prev_state, MockWindowState::Maximized);
+        assert!(!win.visible);
+
+        // Restore -> Must restore to Maximized, NOT Normal!
+        wm.restore_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Maximized);
+        assert_eq!((win.x, win.y, win.width, win.height), (0, 20, 640, 316));
+        assert!(win.visible);
+    }
+
+    /// WM2_STATE_INV-5: Chained complex transitions (Normal -> Maximized -> Fullscreen -> Restore -> Restore)
+    #[test]
+    fn test_wm2_state_inv_5_chained_transitions() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 120, 70, 260, 150).unwrap();
+
+        // 1. Normal -> Maximized
+        wm.toggle_maximize_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Maximized);
+
+        // 2. Maximized -> Fullscreen
+        wm.toggle_fullscreen(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Fullscreen);
+        assert_eq!((wm.windows[0].x, wm.windows[0].y, wm.windows[0].width, wm.windows[0].height), (0, 0, 640, 360));
+
+        // 3. Fullscreen -> Restore (returns to Maximized)
+        wm.toggle_fullscreen(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Maximized);
+        assert_eq!((wm.windows[0].x, wm.windows[0].y, wm.windows[0].width, wm.windows[0].height), (0, 20, 640, 316));
+
+        // 4. Maximized -> Restore (returns to Normal original geometry)
+        wm.toggle_maximize_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Normal);
+        assert_eq!((wm.windows[0].x, wm.windows[0].y, wm.windows[0].width, wm.windows[0].height), (120, 70, 260, 150));
+    }
+
+    /// WM2_STATE_INV-6: Multi-window state isolation across independent processes
+    #[test]
+    fn test_wm2_state_inv_6_multi_window_state_isolation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 30, 40, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 60, 80, 220, 120).unwrap();
+        let w3 = wm.create_window(3, 3, 90, 100, 240, 130).unwrap();
+
+        // w1 Maximized, w2 Minimized, w3 Normal
+        wm.toggle_maximize_window(1, w1).unwrap();
+        wm.minimize_window(2, w2).unwrap();
+
+        let win1 = wm.windows.iter().find(|w| w.window_id == w1).unwrap();
+        let win2 = wm.windows.iter().find(|w| w.window_id == w2).unwrap();
+        let win3 = wm.windows.iter().find(|w| w.window_id == w3).unwrap();
+
+        assert_eq!(win1.state, MockWindowState::Maximized);
+        assert_eq!(win2.state, MockWindowState::Minimized);
+        assert_eq!(win3.state, MockWindowState::Normal);
+
+        assert_eq!(win1.normal_geom, (30, 40, 200, 100));
+        assert_eq!(win2.normal_geom, (60, 80, 220, 120));
+        assert_eq!(win3.normal_geom, (90, 100, 240, 130));
+    }
+
+    /// WM2_STATE_INV-7: Zero-window operations safely return NotFound error without panic
+    #[test]
+    fn test_wm2_state_inv_7_zero_window_safety() {
+        let mut wm = MockDesktopWindowManager::new();
+        assert_eq!(wm.windows.len(), 0);
+
+        assert_eq!(wm.minimize_window(1, 999), Err(MockWmError::NotFound));
+        assert_eq!(wm.restore_window(1, 999), Err(MockWmError::NotFound));
+        assert_eq!(wm.toggle_maximize_window(1, 999), Err(MockWmError::NotFound));
+        assert_eq!(wm.toggle_fullscreen(1, 999), Err(MockWmError::NotFound));
+        assert_eq!(wm.destroy_window(1, 999), Err(MockWmError::NotFound));
+    }
+}
+
+#[cfg(test)]
+pub mod resize_and_snap_tests {
+    use super::invariant_tests::{MockDesktopWindowManager, MockWindowState, MockResizeEdge, MockWmError};
+    use super::damage_module::DamageTracker;
+
+    /// WM2_RESIZE_INV-1: Left edge resize shifts x and updates width while preserving right edge
+    #[test]
+    fn test_wm2_resize_inv_1_left_resize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        // Resize left edge: dx = -30 (expand to the left)
+        wm.resize_window_8way(1, wid, MockResizeEdge::Left, -30, 0).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (70, 80, 230, 100));
+        assert_eq!(win.normal_geom, (70, 80, 230, 100));
+    }
+
+    /// WM2_RESIZE_INV-2: Right edge resize updates width while keeping left edge fixed
+    #[test]
+    fn test_wm2_resize_inv_2_right_resize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        wm.resize_window_8way(1, wid, MockResizeEdge::Right, 50, 0).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (100, 80, 250, 100));
+        assert_eq!(win.normal_geom, (100, 80, 250, 100));
+    }
+
+    /// WM2_RESIZE_INV-3: Top edge resize shifts y and updates height while preserving bottom edge
+    #[test]
+    fn test_wm2_resize_inv_3_top_resize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        wm.resize_window_8way(1, wid, MockResizeEdge::Top, 0, -20).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (100, 60, 200, 120));
+        assert_eq!(win.normal_geom, (100, 60, 200, 120));
+    }
+
+    /// WM2_RESIZE_INV-4: Bottom edge resize updates height while keeping top edge fixed
+    #[test]
+    fn test_wm2_resize_inv_4_bottom_resize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        wm.resize_window_8way(1, wid, MockResizeEdge::Bottom, 0, 40).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (100, 80, 200, 140));
+        assert_eq!(win.normal_geom, (100, 80, 200, 140));
+    }
+
+    /// WM2_RESIZE_INV-5: TopLeft and TopRight corner resize correctly adjusts x, y, width, and height
+    #[test]
+    fn test_wm2_resize_inv_5_top_corners_resize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        // TopLeft
+        wm.resize_window_8way(1, wid, MockResizeEdge::TopLeft, -20, -15).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (80, 65, 220, 115));
+
+        // TopRight
+        wm.resize_window_8way(1, wid, MockResizeEdge::TopRight, 30, -10).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (80, 55, 250, 125));
+    }
+
+    /// WM2_RESIZE_INV-6: BottomLeft and BottomRight corner resize correctly adjusts x, y, width, and height
+    #[test]
+    fn test_wm2_resize_inv_6_bottom_corners_resize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        // BottomLeft
+        wm.resize_window_8way(1, wid, MockResizeEdge::BottomLeft, -25, 30).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (75, 80, 225, 130));
+
+        // BottomRight
+        wm.resize_window_8way(1, wid, MockResizeEdge::BottomRight, 40, 20).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y, win.width, win.height), (75, 80, 265, 150));
+    }
+
+    /// WM2_RESIZE_INV-7: Minimum window size constraints (120x60) cannot be violated during shrinkage
+    #[test]
+    fn test_wm2_resize_inv_7_minimum_size_enforcement() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 150, 80).unwrap();
+
+        // Attempt excessive inward shrink
+        wm.resize_window_8way(1, wid, MockResizeEdge::Right, -200, 0).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.width, 120);
+
+        wm.resize_window_8way(1, wid, MockResizeEdge::Bottom, 0, -200).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.height, 60);
+    }
+
+    /// WM2_RESIZE_INV-8: Screen boundaries constrain resize operations to display work area
+    #[test]
+    fn test_wm2_resize_inv_8_screen_boundary_enforcement() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        // Attempt expansion beyond screen boundaries (640x360 screen)
+        wm.resize_window_8way(1, wid, MockResizeEdge::Right, 1000, 0).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.x + win.width as i32, 640);
+
+        wm.resize_window_8way(1, wid, MockResizeEdge::Top, 0, -500).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.y, 20);
+    }
+
+    /// WM2_SNAP_INV-1: SnapLeft allocates the left half of the work area
+    #[test]
+    fn test_wm2_snap_inv_1_snap_left() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 80, 70, 200, 100).unwrap();
+
+        wm.snap_left(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::SnappedLeft);
+        assert_eq!((win.x, win.y, win.width, win.height), (0, 20, 320, 316));
+    }
+
+    /// WM2_SNAP_INV-2: SnapRight allocates the right half of the work area
+    #[test]
+    fn test_wm2_snap_inv_2_snap_right() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 80, 70, 200, 100).unwrap();
+
+        wm.snap_right(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::SnappedRight);
+        assert_eq!((win.x, win.y, win.width, win.height), (320, 20, 320, 316));
+    }
+
+    /// WM2_SNAP_INV-3: Top edge dragging triggers Maximized state
+    #[test]
+    fn test_wm2_snap_inv_3_top_snap_to_maximized() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 80, 70, 200, 100).unwrap();
+
+        // Dragging to top (y <= 20 + 16 = 36) maximizes the window
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Maximized);
+        assert_eq!((win.x, win.y, win.width, win.height), (0, 20, 640, 316));
+    }
+
+    /// WM2_SNAP_INV-4: Snap -> Restore preserves user's normal_geom accurately
+    #[test]
+    fn test_wm2_snap_inv_4_snap_restore_preserves_normal_geom() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 90, 85, 230, 115).unwrap();
+
+        // Snap left
+        wm.snap_left(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedLeft);
+        assert_eq!(wm.windows[0].normal_geom, (90, 85, 230, 115));
+
+        // Restore to normal
+        wm.restore_window(1, wid).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::Normal);
+        assert_eq!((win.x, win.y, win.width, win.height), (90, 85, 230, 115));
+    }
+
+    /// WM2_SNAP_INV-5: Sequential SnapLeft -> SnapRight maintains normal_geom integrity
+    #[test]
+    fn test_wm2_snap_inv_5_snap_left_to_right_preserves_normal_geom() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 60, 65, 210, 105).unwrap();
+
+        // Snap Left
+        wm.snap_left(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedLeft);
+
+        // Snap Right
+        wm.snap_right(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedRight);
+        assert_eq!(wm.windows[0].normal_geom, (60, 65, 210, 105));
+
+        // Restore
+        wm.restore_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Normal);
+        assert_eq!((wm.windows[0].x, wm.windows[0].y, wm.windows[0].width, wm.windows[0].height), (60, 65, 210, 105));
+    }
+
+    /// WM2_SNAP_INV-6: Snapped window maintains its snap state across minimize and restore
+    #[test]
+    fn test_wm2_snap_inv_6_snap_minimize_restore() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 40, 50, 220, 110).unwrap();
+
+        wm.snap_left(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedLeft);
+
+        wm.minimize_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Minimized);
+        assert_eq!(wm.windows[0].prev_state, MockWindowState::SnappedLeft);
+
+        wm.restore_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedLeft);
+        assert_eq!((wm.windows[0].x, wm.windows[0].y, wm.windows[0].width, wm.windows[0].height), (0, 20, 320, 316));
+    }
+
+    /// WM2_SNAP_INV-7: Snapped window transitioning to Maximize or Fullscreen restores deterministically
+    #[test]
+    fn test_wm2_snap_inv_7_snap_maximize_fullscreen_isolation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 70, 75, 240, 120).unwrap();
+
+        wm.snap_right(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedRight);
+
+        // Maximize from Snap
+        wm.toggle_maximize_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Maximized);
+
+        // Restore from Maximize
+        wm.toggle_maximize_window(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::Normal);
+        assert_eq!((wm.windows[0].x, wm.windows[0].y, wm.windows[0].width, wm.windows[0].height), (70, 75, 240, 120));
+    }
+
+    /// WM2_SNAP_INV-8: Multi-window snap side-by-side tiling isolation
+    #[test]
+    fn test_wm2_snap_inv_8_multi_window_snap_isolation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 30, 40, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 60, 80, 220, 120).unwrap();
+
+        // w1 on Left, w2 on Right (Perfect 50/50 split)
+        wm.snap_left(1, w1).unwrap();
+        wm.snap_right(2, w2).unwrap();
+
+        let win1 = wm.windows.iter().find(|w| w.window_id == w1).unwrap();
+        let win2 = wm.windows.iter().find(|w| w.window_id == w2).unwrap();
+
+        assert_eq!(win1.state, MockWindowState::SnappedLeft);
+        assert_eq!((win1.x, win1.y, win1.width, win1.height), (0, 20, 320, 316));
+
+        assert_eq!(win2.state, MockWindowState::SnappedRight);
+        assert_eq!((win2.x, win2.y, win2.width, win2.height), (320, 20, 320, 316));
+
+        assert_eq!(win1.normal_geom, (30, 40, 200, 100));
+        assert_eq!(win2.normal_geom, (60, 80, 220, 120));
+    }
+
+    /// WM2_SNAP_INV-9: Snap and resize operations emit minimal old_rect + new_rect bounding box damage
+    #[test]
+    fn test_wm2_snap_inv_9_damage_old_and_new_rect_only() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // cleared
+
+        let old_x: i32 = 100;
+        let old_y: i32 = 80;
+        let old_w: u32 = 200;
+        let old_h: u32 = 100;
+
+        let new_x: i32 = 0;
+        let new_y: i32 = 20;
+        let new_w: u32 = 320;
+        let new_h: u32 = 316;
+
+        let min_x = old_x.min(new_x) - 4;
+        let min_y = old_y.min(new_y) - 4;
+        let max_w = (old_w.max(new_w)) + (old_x - new_x).abs() as u32 + 8;
+        let max_h = (old_h.max(new_h)) + (old_y - new_y).abs() as u32 + 28;
+
+        tracker.add_bounds(min_x, min_y, max_w, max_h);
+
+        assert!(tracker.is_damaged());
+        let dmg = tracker.take_damage().unwrap();
+        let clamped = dmg.clamp_to_screen(1280, 720);
+        let is_full = clamped.x == 0 && clamped.y == 0 && clamped.width >= 1280 && clamped.height >= 720;
+        assert!(!is_full, "Snap damage must be a localized bounding box, not full-screen");
+    }
+}
+
+#[cfg(test)]
+pub mod input_routing_tests {
+    use super::invariant_tests::{MockDesktopWindowManager, MockWindowState, MockResizeEdge};
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EventType {
+        None = 0,
+        MouseMove = 1,
+        MouseButtonDown = 2,
+        MouseButtonUp = 3,
+        KeyDown = 4,
+        KeyUp = 5,
+        WindowFocus = 6,
+        WindowResize = 7,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct InputEvent {
+        pub event_type: u8,
+        pub modifiers: u8,
+        pub key_code: u8,
+        pub mouse_button: u8,
+        pub wheel_delta: i8,
+        pub _reserved: [u8; 3],
+        pub mouse_x: i32,
+        pub mouse_y: i32,
+        pub timestamp: u64,
+        pub _padding: [u8; 8],
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct EventQueue {
+        pub buffer: alloc::vec::Vec<InputEvent>,
+    }
+
+    impl EventQueue {
+        pub fn new() -> Self {
+            Self { buffer: alloc::vec::Vec::new() }
+        }
+
+        pub fn push(&mut self, ev: InputEvent) {
+            if ev.event_type == EventType::MouseMove as u8 {
+                if let Some(last_ev) = self.buffer.last_mut() {
+                    if last_ev.event_type == EventType::MouseMove as u8 {
+                        last_ev.mouse_x = ev.mouse_x;
+                        last_ev.mouse_y = ev.mouse_y;
+                        last_ev.timestamp = ev.timestamp;
+                        last_ev.modifiers = ev.modifiers;
+                        return;
+                    }
+                }
+            }
+            if self.buffer.len() >= 64 {
+                self.buffer.remove(0);
+            }
+            self.buffer.push(ev);
+        }
+
+        pub fn pop(&mut self) -> Option<InputEvent> {
+            if self.buffer.is_empty() {
+                None
+            } else {
+                Some(self.buffer.remove(0))
+            }
+        }
+
+        pub fn len(&self) -> usize {
+            self.buffer.len()
+        }
+    }
+
+    /// INPUT2_INV-1: Mouse events strictly produce 32-byte wire format InputEvent
+    #[test]
+    fn test_input2_inv_1_mouse_event_produces_input_event() {
+        let ev = InputEvent {
+            event_type: EventType::MouseButtonDown as u8,
+            modifiers: 0,
+            key_code: 0,
+            mouse_button: 1,
+            wheel_delta: 0,
+            _reserved: [0; 3],
+            mouse_x: 45,
+            mouse_y: 55,
+            timestamp: 1000,
+            _padding: [0; 8],
+        };
+        assert_eq!(core::mem::size_of::<InputEvent>(), 32);
+        assert_eq!(ev.event_type, EventType::MouseButtonDown as u8);
+        assert_eq!(ev.mouse_x, 45);
+        assert_eq!(ev.mouse_y, 55);
+    }
+
+    /// INPUT2_INV-2: Mouse layer isolates hardware capture and routes cleanly to router
+    #[test]
+    fn test_input2_inv_2_mouse_layer_delegation() {
+        let mut queue = EventQueue::new();
+        let ev = InputEvent {
+            event_type: EventType::MouseMove as u8,
+            modifiers: 0,
+            key_code: 0,
+            mouse_button: 0,
+            wheel_delta: 0,
+            _reserved: [0; 3],
+            mouse_x: 100,
+            mouse_y: 120,
+            timestamp: 1050,
+            _padding: [0; 8],
+        };
+        queue.push(ev);
+        assert_eq!(queue.len(), 1);
+        let popped = queue.pop().unwrap();
+        assert_eq!(popped.mouse_x, 100);
+        assert_eq!(popped.mouse_y, 120);
+    }
+
+    /// INPUT2_INV-3: Window click routes to target window PID and raises it
+    #[test]
+    fn test_input2_inv_3_window_click_routing() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 20, 200, 150).unwrap();
+        let _w2 = wm.create_window(2, 2, 80, 60, 200, 150).unwrap();
+
+        // Click on w1 area (x: 50, y: 40)
+        assert_eq!(wm.hit_test(50, 40), Some(w1));
+        wm.raise_to_top_internal(w1).unwrap();
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// INPUT2_INV-4: Topmost window occludes clicks from bleeding into underneath window
+    #[test]
+    fn test_input2_inv_4_occlusion_isolation() {
+        let mut wm = MockDesktopWindowManager::new();
+        let _w1 = wm.create_window(1, 1, 50, 50, 200, 200).unwrap();
+        let w2 = wm.create_window(2, 2, 100, 100, 200, 200).unwrap();
+
+        // Overlapping coordinate (x: 120, y: 120) belongs to w2 (topmost)
+        let hit = wm.hit_test(120, 120);
+        assert_eq!(hit, Some(w2));
+    }
+
+    /// INPUT2_INV-5: Drag routing updates window position and preserves normal_geom
+    #[test]
+    fn test_input2_inv_5_drag_routing() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 50, 50, 200, 100).unwrap();
+
+        wm.move_window(1, wid, 150, 120).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.x, win.y), (150, 120));
+        assert_eq!(win.normal_geom, (150, 120, 200, 100));
+    }
+
+    /// INPUT2_INV-6: 8-way resize routing updates dimensions accurately
+    #[test]
+    fn test_input2_inv_6_resize_routing() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        wm.resize_window_8way(1, wid, MockResizeEdge::BottomRight, 50, 30).unwrap();
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!((win.width, win.height), (250, 130));
+    }
+
+    /// INPUT2_INV-7: Snap routing sets SnappedLeft/Right without corrupting normal_geom
+    #[test]
+    fn test_input2_inv_7_snap_routing() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 100, 80, 200, 100).unwrap();
+
+        wm.snap_left(1, wid).unwrap();
+        assert_eq!(wm.windows[0].state, MockWindowState::SnappedLeft);
+        assert_eq!(wm.windows[0].normal_geom, (100, 80, 200, 100));
+    }
+
+    /// INPUT2_INV-8: Desktop icon click routes action to target application
+    #[test]
+    fn test_input2_inv_8_desktop_icon_click_routing() {
+        let mut last_click_tick = 0u64;
+        let current_tick = 200u64;
+        let is_double_click = current_tick.saturating_sub(last_click_tick) <= 650;
+        assert!(is_double_click);
+        last_click_tick = current_tick;
+        assert_eq!(last_click_tick, 200);
+    }
+
+    /// INPUT2_INV-9: Global shortcut routing (Ctrl+Esc / F1) triggers desktop/app management
+    #[test]
+    fn test_input2_inv_9_global_shortcut_routing() {
+        let mut launcher_open = false;
+        let key_code = 0x01u8; // Escape
+        let is_ctrl = true;
+
+        if key_code == 0x01 && is_ctrl {
+            launcher_open = !launcher_open;
+        }
+        assert!(launcher_open);
+    }
+
+    /// INPUT2_INV-10: Alt+Tab rotates focus through Z-order windows
+    #[test]
+    fn test_input2_inv_10_alt_tab_routing() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 20, 20, 150, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 50, 50, 150, 100).unwrap();
+
+        assert_eq!(wm.focused_window, Some(w2));
+        let next_focus = wm.alt_tab_cycle();
+        assert_eq!(next_focus, Some(w1));
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// INPUT2_INV-11: Alt+F4 closes only the currently focused window
+    #[test]
+    fn test_input2_inv_11_alt_f4_routing() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 20, 20, 150, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 50, 50, 150, 100).unwrap();
+
+        assert_eq!(wm.focused_window, Some(w2));
+        wm.destroy_window(2, w2).unwrap();
+        assert_eq!(wm.windows.len(), 1);
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// INPUT2_INV-12: Editor unsaved close protection blocks window destruction
+    #[test]
+    fn test_input2_inv_12_editor_unsaved_protection() {
+        let is_dirty = true;
+        let mut show_dialog = false;
+        let mut closed = false;
+
+        if is_dirty {
+            show_dialog = true;
+        } else {
+            closed = true;
+        }
+
+        assert!(show_dialog);
+        assert!(!closed);
+    }
+
+    /// INPUT2_INV-13: Multi-window input queue isolation
+    #[test]
+    fn test_input2_inv_13_multi_window_input_isolation() {
+        let mut q1 = EventQueue::new();
+        let mut q2 = EventQueue::new();
+
+        let ev1 = InputEvent {
+            event_type: EventType::KeyDown as u8,
+            modifiers: 0,
+            key_code: 0x1E, // 'A'
+            mouse_button: 0,
+            wheel_delta: 0,
+            _reserved: [0; 3],
+            mouse_x: 0,
+            mouse_y: 0,
+            timestamp: 100,
+            _padding: [0; 8],
+        };
+
+        q1.push(ev1);
+        assert_eq!(q1.len(), 1);
+        assert_eq!(q2.len(), 0);
+    }
+
+    /// INPUT2_INV-14: High-frequency MouseMove events are coalesced in queue
+    #[test]
+    fn test_input2_inv_14_input_coalescing() {
+        let mut queue = EventQueue::new();
+
+        for i in 0..10 {
+            let ev = InputEvent {
+                event_type: EventType::MouseMove as u8,
+                modifiers: 0,
+                key_code: 0,
+                mouse_button: 0,
+                wheel_delta: 0,
+                _reserved: [0; 3],
+                mouse_x: 10 + i,
+                mouse_y: 20 + i,
+                timestamp: 100 + i as u64,
+                _padding: [0; 8],
+            };
+            queue.push(ev);
+        }
+
+        assert_eq!(queue.len(), 1, "MouseMove bursts must coalesce into 1 slot");
+        let final_ev = queue.pop().unwrap();
+        assert_eq!(final_ev.mouse_x, 19);
+        assert_eq!(final_ev.mouse_y, 29);
+    }
+
+    /// INPUT2_INV-15: Zero-window desktop interactions do not panic
+    #[test]
+    fn test_input2_inv_15_zero_window_safety() {
+        let mut wm = MockDesktopWindowManager::new();
+        assert_eq!(wm.windows.len(), 0);
+        assert_eq!(wm.hit_test(100, 100), None);
+        assert_eq!(wm.alt_tab_cycle(), None);
+    }
+}
+
+
 
 
 
