@@ -81,11 +81,30 @@ pub struct Window {
     pub icon: crate::app_registry::AppIcon,
 }
 
+#[derive(Debug, Clone)]
+pub struct AltTabSwitcher {
+    pub active: bool,
+    pub selected_index: usize,
+    pub candidates: Vec<u64>,
+}
+
+impl AltTabSwitcher {
+    pub const fn new() -> Self {
+        Self {
+            active: false,
+            selected_index: 0,
+            candidates: Vec::new(),
+        }
+    }
+}
+
 pub struct WindowManager {
     /// Windows ordered from Back (index 0) to Front (index len - 1).
     pub windows: Vec<Window>,
     pub next_window_id: u64,
     pub focused_window: Option<u64>,
+    pub mru_list: Vec<u64>,
+    pub alt_tab: AltTabSwitcher,
     pub dragging_window: Option<(u64, i32, i32)>,
     pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
     pub hovered_target: Option<HoverTarget>,
@@ -101,6 +120,8 @@ impl WindowManager {
             windows: Vec::new(),
             next_window_id: 1,
             focused_window: None,
+            mru_list: Vec::new(),
+            alt_tab: AltTabSwitcher::new(),
             dragging_window: None,
             resizing_window: None,
             hovered_target: None,
@@ -189,6 +210,7 @@ impl WindowManager {
         // Appended at the end (top-most in Z-order)
         self.windows.push(win);
         self.focused_window = Some(window_id);
+        self.touch_mru(window_id);
 
         self.mark_window_damage(clamped_x, clamped_y, clamped_w, clamped_h);
         self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
@@ -522,27 +544,141 @@ impl WindowManager {
         self.raise_to_top_internal(window_id)
     }
 
-    /// Cycles through open windows via Alt-Tab, restoring minimized windows and raising target to top
-    pub fn alt_tab_cycle(&mut self) -> Option<u64> {
-        if self.windows.is_empty() { return None; }
+    /// Updates the MRU list bringing the specified window to the front.
+    pub fn touch_mru(&mut self, window_id: u64) {
+        self.mru_list.retain(|&id| id != window_id);
+        self.mru_list.insert(0, window_id);
+        self.clean_mru();
+    }
 
-        let cur_focus = self.focused_window;
-        let mut cur_idx = self.windows.len().saturating_sub(1);
-        if let Some(fid) = cur_focus {
-            if let Some(pos) = self.windows.iter().position(|w| w.window_id == fid) {
-                cur_idx = pos;
+    /// Cleans up nonexistent or closed window IDs from MRU list.
+    pub fn clean_mru(&mut self) {
+        let existing: Vec<u64> = self.windows.iter().filter(|w| w.state != WindowState::Closed).map(|w| w.window_id).collect();
+        self.mru_list.retain(|id| existing.contains(id));
+    }
+
+    /// Handles Alt+Tab keypress: activates switcher HUD or advances selection.
+    pub fn alt_tab_press(&mut self, is_shift: bool) {
+        self.clean_mru();
+        if self.windows.is_empty() {
+            return;
+        }
+
+        let candidates: Vec<u64> = self.mru_list.iter()
+            .copied()
+            .filter(|&id| self.windows.iter().any(|w| w.window_id == id && w.state != WindowState::Closed))
+            .collect();
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let sw = unsafe { crate::gui::VESA.width as i32 };
+        let sh = unsafe { crate::gui::VESA.height as i32 };
+        let hud_w = 400.min(sw - 40) as u32;
+        let hud_h = 100 as u32;
+        let hud_x = (sw - hud_w as i32) / 2;
+        let hud_y = (sh - hud_h as i32) / 2;
+
+        if !self.alt_tab.active {
+            self.alt_tab.active = true;
+            self.alt_tab.candidates = candidates;
+            if self.alt_tab.candidates.len() >= 2 {
+                self.alt_tab.selected_index = if is_shift { self.alt_tab.candidates.len() - 1 } else { 1 };
+            } else {
+                self.alt_tab.selected_index = 0;
+            }
+        } else {
+            self.alt_tab.candidates = candidates;
+            let count = self.alt_tab.candidates.len();
+            if count > 0 {
+                if is_shift {
+                    self.alt_tab.selected_index = if self.alt_tab.selected_index == 0 { count - 1 } else { self.alt_tab.selected_index - 1 };
+                } else {
+                    self.alt_tab.selected_index = (self.alt_tab.selected_index + 1) % count;
+                }
             }
         }
 
-        // Cycle to next window (wrapping around)
-        let next_idx = if cur_idx == 0 { self.windows.len() - 1 } else { cur_idx - 1 };
-        let next_wid = self.windows[next_idx].window_id;
-        let owner = self.windows[next_idx].owner_pid;
+        self.mark_damage(hud_x - 4, hud_y - 4, hud_w + 8, hud_h + 8);
+    }
 
-        if self.windows[next_idx].state == WindowState::Minimized {
-            let _ = self.restore_window(owner, next_wid);
+    /// Commits the Alt+Tab selection when Alt key is released.
+    pub fn alt_tab_commit(&mut self) -> Option<u64> {
+        if !self.alt_tab.active {
+            return None;
+        }
+
+        let sw = unsafe { crate::gui::VESA.width as i32 };
+        let sh = unsafe { crate::gui::VESA.height as i32 };
+        let hud_w = 400.min(sw - 40) as u32;
+        let hud_h = 100 as u32;
+        let hud_x = (sw - hud_w as i32) / 2;
+        let hud_y = (sh - hud_h as i32) / 2;
+        self.mark_damage(hud_x - 4, hud_y - 4, hud_w + 8, hud_h + 8);
+
+        self.alt_tab.active = false;
+        if self.alt_tab.candidates.is_empty() {
+            return None;
+        }
+
+        let target_idx = self.alt_tab.selected_index.min(self.alt_tab.candidates.len() - 1);
+        let target_id = self.alt_tab.candidates[target_idx];
+
+        if let Some(win) = self.windows.iter().find(|w| w.window_id == target_id) {
+            let owner = win.owner_pid;
+            let is_minimized = win.state == WindowState::Minimized;
+            if is_minimized {
+                let _ = self.restore_window(owner, target_id);
+            } else {
+                let _ = self.raise_to_top_internal(target_id);
+            }
+            self.touch_mru(target_id);
+            Some(target_id)
         } else {
-            let _ = self.raise_to_top_internal(next_wid);
+            None
+        }
+    }
+
+    /// Cancels Alt+Tab selection without switching window.
+    pub fn alt_tab_cancel(&mut self) {
+        if !self.alt_tab.active {
+            return;
+        }
+        let sw = unsafe { crate::gui::VESA.width as i32 };
+        let sh = unsafe { crate::gui::VESA.height as i32 };
+        let hud_w = 400.min(sw - 40) as u32;
+        let hud_h = 100 as u32;
+        let hud_x = (sw - hud_w as i32) / 2;
+        let hud_y = (sh - hud_h as i32) / 2;
+        self.mark_damage(hud_x - 4, hud_y - 4, hud_w + 8, hud_h + 8);
+
+        self.alt_tab.active = false;
+    }
+
+    /// Cycles through open windows via Alt-Tab, restoring minimized windows and raising target to top
+    pub fn alt_tab_cycle(&mut self) -> Option<u64> {
+        self.clean_mru();
+        if self.windows.is_empty() { return None; }
+
+        let candidates: Vec<u64> = self.mru_list.iter()
+            .copied()
+            .filter(|&id| self.windows.iter().any(|w| w.window_id == id && w.state != WindowState::Closed))
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let target_id = if candidates.len() >= 2 { candidates[1] } else { candidates[0] };
+        if let Some(win) = self.windows.iter().find(|w| w.window_id == target_id) {
+            let owner = win.owner_pid;
+            if win.state == WindowState::Minimized {
+                let _ = self.restore_window(owner, target_id);
+            } else {
+                let _ = self.raise_to_top_internal(target_id);
+            }
+            self.touch_mru(target_id);
         }
 
         self.focused_window
@@ -566,6 +702,9 @@ impl WindowManager {
         let old_h = self.windows[idx].height;
         let surf_id = self.windows[idx].surface_id;
         self.windows.remove(idx);
+        self.mru_list.retain(|&id| id != window_id);
+        self.alt_tab.candidates.retain(|&id| id != window_id);
+        self.clean_mru();
 
         self.mark_window_damage(old_x, old_y, old_w, old_h);
         self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
@@ -707,6 +846,7 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
         self.windows.push(win);
+        self.touch_mru(window_id);
         Ok(())
     }
 
@@ -1040,6 +1180,51 @@ impl WindowManager {
 
         // 6. Global Freeze Protection / Crash Modal & Diagnostic Overlay
         crate::crash_reporter::CRASH_REPORTER.lock().render_crash_modal(screen_w, screen_h);
+
+        // 6b. Alt+Tab Window Switcher HUD Overlay
+        if self.alt_tab.active && !self.alt_tab.candidates.is_empty() {
+            let total_items = self.alt_tab.candidates.len().min(8) as u16;
+            let card_w = 90u16;
+            let card_h = 70u16;
+            let hud_w = (total_items * (card_w + 8) + 12).min(screen_w - 40);
+            let hud_h = 90u16;
+            let hud_x = (screen_w - hud_w) / 2;
+            let hud_y = (screen_h - hud_h) / 2;
+
+            // HUD Outer Box & Border
+            crate::gui::draw_rect(hud_x, hud_y, hud_w, hud_h, 0x000F172A);
+            crate::gui::draw_rect(hud_x, hud_y, hud_w, 1, 0x003B82F6);
+            crate::gui::draw_rect(hud_x, hud_y, 1, hud_h, 0x003B82F6);
+            crate::gui::draw_rect(hud_x + hud_w - 1, hud_y, 1, hud_h, 0x003B82F6);
+            crate::gui::draw_rect(hud_x, hud_y + hud_h - 1, hud_w, 1, 0x003B82F6);
+
+            let mut card_x = hud_x + 8;
+            let card_y = hud_y + 10;
+
+            for (idx, &wid) in self.alt_tab.candidates.iter().take(8).enumerate() {
+                let is_selected = idx == self.alt_tab.selected_index;
+                let bg_color = if is_selected { 0x002563EB } else { 0x001E293B };
+                let border_color = if is_selected { 0x0060A5FA } else { 0x00334155 };
+                let text_color = if is_selected { 0x00FFFFFF } else { 0x0094A3B8 };
+
+                // Card background & selection border
+                crate::gui::draw_rect(card_x, card_y, card_w, card_h, bg_color);
+                crate::gui::draw_rect(card_x, card_y, card_w, 1, border_color);
+                crate::gui::draw_rect(card_x, card_y, 1, card_h, border_color);
+                crate::gui::draw_rect(card_x + card_w - 1, card_y, 1, card_h, border_color);
+                crate::gui::draw_rect(card_x, card_y + card_h - 1, card_w, 1, border_color);
+
+                if let Some(win) = self.windows.iter().find(|w| w.window_id == wid) {
+                    // Icon
+                    crate::gui::draw_icon_glyph(card_x + (card_w / 2) - 8, card_y + 12, win.icon, text_color, bg_color);
+                    // Title
+                    let title_text = if win.title.len() > 9 { &win.title[..9] } else { &win.title };
+                    crate::gui::draw_string(card_x + 6, card_y + 44, title_text, text_color, bg_color);
+                }
+
+                card_x += card_w + 8;
+            }
+        }
 
         // 7. Draw topmost mouse cursor layer
         crate::cursor::draw_cursor_layer();

@@ -306,18 +306,37 @@ pub fn dispatch_mouse_event(global_x: i32, global_y: i32, button: u8, pressed: b
 
 /// Klavye olayını işler: Kesinlikle YALNIZCA o an odaklı pencerenin sahibine iletir (Focus-Gated Routing).
 pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Option<u64> {
-    // 1. Check Alt-Tab Window Switcher Shortcut
-    if pressed && key_code == 0x0F && (modifiers & 0x08 != 0 || crate::keyboard::is_alt_pressed()) {
-        let mut wm = crate::wm::WM.lock();
-        let new_focused = wm.alt_tab_cycle();
-        let owner = new_focused.and_then(|fid| wm.windows.iter().find(|w| w.window_id == fid).map(|w| w.owner_pid));
-        return owner;
-    }
-
     let is_ctrl = (modifiers & 0x01 != 0) || crate::keyboard::is_ctrl_pressed();
     let is_alt = (modifiers & 0x08 != 0) || crate::keyboard::is_alt_pressed();
+    let is_shift = (modifiers & 0x04 != 0) || crate::keyboard::is_shift_pressed();
 
-    // 2. Global Shortcut: Ctrl+Alt+T or F1 -> Open/Spawn Terminal
+    // 1. Alt Release commit for Alt+Tab Switcher
+    if !is_alt || (!pressed && key_code == 0x38) {
+        let mut wm = crate::wm::WM.lock();
+        if wm.alt_tab.active {
+            let res = wm.alt_tab_commit();
+            let owner = res.and_then(|fid| wm.windows.iter().find(|w| w.window_id == fid).map(|w| w.owner_pid));
+            return owner;
+        }
+    }
+
+    // 2. Escape: cancel Alt+Tab Switcher if active
+    if pressed && key_code == 0x01 {
+        let mut wm = crate::wm::WM.lock();
+        if wm.alt_tab.active {
+            wm.alt_tab_cancel();
+            return None;
+        }
+    }
+
+    // 3. Alt-Tab / Alt-Shift-Tab Window Switcher Shortcut
+    if pressed && key_code == 0x0F && is_alt {
+        let mut wm = crate::wm::WM.lock();
+        wm.alt_tab_press(is_shift);
+        return None;
+    }
+
+    // 4. Global Shortcut: Ctrl+Alt+T or F1 -> Open/Spawn Terminal
     if pressed && ((key_code == 0x14 && is_ctrl && is_alt) || key_code == 0x3B) {
         let res = crate::terminal_app::spawn_terminal_app("terminal.app");
         match res {
@@ -336,7 +355,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         return res.ok();
     }
 
-    // 3. Global Shortcut: Ctrl+Escape -> Toggle Application Launcher Menu
+    // 5. Global Shortcut: Ctrl+Escape -> Toggle Application Launcher Menu
     if pressed && key_code == 0x01 && is_ctrl {
         let mut wm = crate::wm::WM.lock();
         wm.launcher_open = !wm.launcher_open;
