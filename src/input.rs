@@ -320,12 +320,45 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         }
     }
 
-    // 2. Escape: cancel Alt+Tab Switcher if active
+    // 2. Escape: cancel Alt+Tab Switcher or close Launcher if active
     if pressed && key_code == 0x01 {
         let mut wm = crate::wm::WM.lock();
         if wm.alt_tab.active {
             wm.alt_tab_cancel();
             return None;
+        }
+        if wm.launcher_open {
+            wm.launcher_open = false;
+            let screen_h = unsafe { crate::gui::VESA.height as i32 };
+            let dock_y = screen_h.saturating_sub(crate::wm::DOCK_HEIGHT as i32);
+            wm.mark_damage(4, (dock_y - 250).max(0), 164, 260);
+            return None;
+        }
+    }
+
+    // 2b. Launcher Keyboard Navigation (Up/Down/Enter)
+    if pressed {
+        let mut wm = crate::wm::WM.lock();
+        if wm.launcher_open {
+            if key_code == 0x48 { // Up Arrow
+                wm.launcher_nav_up();
+                return None;
+            } else if key_code == 0x50 { // Down Arrow
+                wm.launcher_nav_down();
+                return None;
+            } else if key_code == 0x1C { // Enter
+                let selected_app = wm.launcher_get_selected_app();
+                wm.launcher_open = false;
+                let screen_h = unsafe { crate::gui::VESA.height as i32 };
+                let dock_y = screen_h.saturating_sub(crate::wm::DOCK_HEIGHT as i32);
+                wm.mark_damage(4, (dock_y - 250).max(0), 164, 260);
+                drop(wm);
+
+                if let Some(app_id) = selected_app {
+                    let _ = crate::app_registry::spawn_registered_app(app_id);
+                }
+                return None;
+            }
         }
     }
 

@@ -86,6 +86,8 @@ pub mod crash_reporter;
 pub mod sysmon_app;
 pub mod clipboard;
 pub mod editor_app;
+pub mod launcher;
+pub mod dock;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -383,6 +385,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     allocator::init_heap(boot_info.physical_memory_offset, &boot_info.memory_map);
     // Dedicated user-space frame pool (syscall/user izolasyonu için)
     memory::init_user_memory(&boot_info.memory_map);
+    // GUI Backbuffer ve VESA ilklendirmesi
+    gui::init(None);
 
     // VGA çıktı
     vga_buffer::WRITE_LOCK.lock().clear();
@@ -513,6 +517,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     executor.spawn(task::Task::new("clock", clock_task()));
     executor.spawn(task::Task::new("mouse", mouse::mouse_task()));
     executor.spawn(task::Task::new("keyboard", task::keyboard::keyboard_task()));
+    executor.spawn(task::Task::new("compositor", wm::compositor_task()));
 
     // Boot dizisini tamamlayıp ardından interaktif shell'i açık tutan ana görev
     executor.spawn(task::Task::new("boot_orchestrator", boot_orchestrator()));

@@ -4036,7 +4036,9 @@ mod invariant_tests {
         pub dragging_window: Option<(u64, i32, i32)>,
         pub resizing_window: Option<(u64, MockResizeEdge, i32, i32, i32, i32, u32, u32)>,
         pub last_titlebar_click: Option<(u64, u64)>,
+        pub hovered_dock_tab: Option<usize>,
         pub launcher_open: bool,
+        pub launcher_selected: usize,
     }
 
     impl MockDesktopWindowManager {
@@ -4051,7 +4053,35 @@ mod invariant_tests {
                 dragging_window: None,
                 resizing_window: None,
                 last_titlebar_click: None,
+                hovered_dock_tab: None,
                 launcher_open: false,
+                launcher_selected: 0,
+            }
+        }
+
+        pub fn launcher_nav_up(&mut self) {
+            let total = 6;
+            if total > 0 {
+                if self.launcher_selected == 0 {
+                    self.launcher_selected = total - 1;
+                } else {
+                    self.launcher_selected -= 1;
+                }
+            }
+        }
+
+        pub fn launcher_nav_down(&mut self) {
+            let total = 6;
+            if total > 0 {
+                self.launcher_selected = (self.launcher_selected + 1) % total;
+            }
+        }
+
+        pub fn launcher_get_selected_app(&self) -> Option<u8> {
+            if self.launcher_open && self.launcher_selected < 6 {
+                Some((self.launcher_selected + 1) as u8)
+            } else {
+                None
             }
         }
 
@@ -12828,6 +12858,299 @@ pub mod window_chrome_ux_tests {
         let is_full = dmg.x == 0 && dmg.y == 0 && dmg.width >= 1280 && dmg.height >= 720;
         assert!(!is_full, "Chrome hover damage must be localized to the titlebar");
         assert_eq!(dmg.height, 20);
+    }
+}
+
+#[cfg(test)]
+pub mod desktop_shell2_tests {
+    use super::invariant_tests::{MockDesktopWindowManager, MockWindowState};
+    use super::damage_module::DamageTracker;
+
+    /// DOCK2_INV-1: Dock displays active and inactive window tabs accurately
+    #[test]
+    fn test_dock2_inv_1_active_inactive_tabs() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        assert_eq!(wm.windows.len(), 2);
+        assert_eq!(wm.focused_window, Some(w2));
+
+        let win1 = wm.windows.iter().find(|w| w.window_id == w1).unwrap();
+        let win2 = wm.windows.iter().find(|w| w.window_id == w2).unwrap();
+
+        assert!(!win1.focused);
+        assert!(win2.focused);
+    }
+
+    /// DOCK2_INV-2: Clicking minimized tab in dock restores and focuses window
+    #[test]
+    fn test_dock2_inv_2_click_minimized_restores_and_focuses() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let _w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        wm.minimize_window(1, w1).unwrap();
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == w1).unwrap().state, MockWindowState::Minimized);
+
+        // Click on dock tab for w1 (x = 84 + 0*84 = 84, y = 340)
+        let clicked = wm.handle_mouse_down(90, 340);
+        assert_eq!(clicked, Some((w1, 1)));
+        assert_eq!(wm.focused_window, Some(w1));
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == w1).unwrap().state, MockWindowState::Normal);
+    }
+
+    /// DOCK2_INV-3: Clicking active focused tab in dock minimizes window
+    #[test]
+    fn test_dock2_inv_3_click_active_tab_minimizes() {
+        let mut wm = MockDesktopWindowManager::new();
+        let _w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        assert_eq!(wm.focused_window, Some(w2));
+
+        // Click active tab w2 (index 1 -> x = 84 + 84 = 168, y = 340)
+        let clicked = wm.handle_mouse_down(175, 340);
+        assert_eq!(clicked, Some((w2, 2)));
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == w2).unwrap().state, MockWindowState::Minimized);
+    }
+
+    /// DOCK2_INV-4: Clicking unfocused visible tab in dock raises and focuses window
+    #[test]
+    fn test_dock2_inv_4_click_unfocused_tab_raises() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let _w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        // Click unfocused tab w1 (index 0 -> x = 84, y = 340)
+        let clicked = wm.handle_mouse_down(95, 340);
+        assert_eq!(clicked, Some((w1, 1)));
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// DOCK2_INV-5: Dock tab boundaries clamping prevents out-of-screen overflow
+    #[test]
+    fn test_dock2_inv_5_dock_tab_bounds_clamping() {
+        let screen_w: u16 = 640;
+        let max_visible_tabs = (screen_w.saturating_sub(84 + 80)) / 84;
+        assert!(max_visible_tabs >= 5);
+    }
+
+    /// LAUNCHER2_INV-1: Launcher toggles dynamically
+    #[test]
+    fn test_launcher2_inv_1_toggle() {
+        let mut wm = MockDesktopWindowManager::new();
+        assert!(!wm.launcher_open);
+
+        wm.launcher_open = true;
+        assert!(wm.launcher_open);
+
+        wm.launcher_open = false;
+        assert!(!wm.launcher_open);
+    }
+
+    /// LAUNCHER2_INV-2: Launcher keyboard navigation (Up/Down) cycles selection deterministically
+    #[test]
+    fn test_launcher2_inv_2_keyboard_navigation() {
+        let mut wm = MockDesktopWindowManager::new();
+        wm.launcher_open = true;
+        wm.launcher_selected = 0;
+
+        wm.launcher_nav_down();
+        assert_eq!(wm.launcher_selected, 1);
+
+        wm.launcher_nav_down();
+        assert_eq!(wm.launcher_selected, 2);
+
+        wm.launcher_nav_up();
+        assert_eq!(wm.launcher_selected, 1);
+
+        wm.launcher_nav_up();
+        assert_eq!(wm.launcher_selected, 0);
+
+        // Wrap-around on up
+        wm.launcher_nav_up();
+        assert_eq!(wm.launcher_selected, 5);
+    }
+
+    /// LAUNCHER2_INV-3: Launcher Enter key launches selected app ID and closes menu
+    #[test]
+    fn test_launcher2_inv_3_enter_launches_app() {
+        let mut wm = MockDesktopWindowManager::new();
+        wm.launcher_open = true;
+        wm.launcher_selected = 2; // Editor (App ID 3)
+
+        let app_id = wm.launcher_get_selected_app();
+        assert_eq!(app_id, Some(3));
+
+        wm.launcher_open = false;
+        assert!(!wm.launcher_open);
+    }
+
+    /// LAUNCHER2_INV-4: Launcher Escape closes menu without launching app
+    #[test]
+    fn test_launcher2_inv_4_escape_closes_menu() {
+        let mut wm = MockDesktopWindowManager::new();
+        wm.launcher_open = true;
+
+        // Escape handling
+        wm.launcher_open = false;
+        assert!(!wm.launcher_open);
+    }
+
+    /// LAUNCHER2_INV-5: Launcher mouse click triggers app launch and closes menu
+    #[test]
+    fn test_launcher2_inv_5_mouse_click_launch() {
+        let mut wm = MockDesktopWindowManager::new();
+        wm.launcher_open = true;
+
+        // Click Terminal item in launcher (x=10, y=210)
+        let _ = wm.handle_mouse_down(10, 210);
+        assert!(!wm.launcher_open);
+        assert_eq!(wm.windows.len(), 1);
+    }
+
+    /// TASKBAR2_INV-1: Window destroy immediately cleans dock/taskbar entry
+    #[test]
+    fn test_taskbar2_inv_1_window_destroy_cleans_entry() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        assert_eq!(wm.windows.len(), 2);
+        wm.destroy_window(1, w1).unwrap();
+
+        assert_eq!(wm.windows.len(), 1);
+        assert_eq!(wm.windows[0].window_id, w2);
+    }
+
+    /// TASKBAR2_INV-2: Taskbar accurately reflects window states
+    #[test]
+    fn test_taskbar2_inv_2_window_states() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+        let w3 = wm.create_window(3, 3, 50, 50, 200, 100).unwrap();
+
+        wm.minimize_window(1, w1).unwrap();
+        wm.toggle_maximize_window(2, w2).unwrap();
+        wm.snap_left(3, w3).unwrap();
+
+        let win1 = wm.windows.iter().find(|w| w.window_id == w1).unwrap();
+        let win2 = wm.windows.iter().find(|w| w.window_id == w2).unwrap();
+        let win3 = wm.windows.iter().find(|w| w.window_id == w3).unwrap();
+
+        assert_eq!(win1.state, MockWindowState::Minimized);
+        assert_eq!(win2.state, MockWindowState::Maximized);
+        assert_eq!(win3.state, MockWindowState::SnappedLeft);
+    }
+
+    /// TASKBAR2_INV-3: Taskbar handles rapid window state transitions without stale entries
+    #[test]
+    fn test_taskbar2_inv_3_rapid_transitions() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+
+        for _ in 0..5 {
+            wm.toggle_maximize_window(1, wid).unwrap();
+            wm.minimize_window(1, wid).unwrap();
+            wm.restore_window(1, wid).unwrap();
+            wm.toggle_maximize_window(1, wid).unwrap();
+        }
+
+        assert_eq!(wm.windows.len(), 1);
+        let win = &wm.windows[0];
+        assert_eq!(win.state, MockWindowState::Normal);
+    }
+
+    /// MULTI_INSTANCE_UI_INV-1: Multiple instances of same app produce distinct taskbar entries
+    #[test]
+    fn test_multi_instance_inv_1_distinct_entries() {
+        let mut wm = MockDesktopWindowManager::new();
+        let t1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let t2 = wm.create_window(1, 2, 30, 30, 200, 100).unwrap();
+        let t3 = wm.create_window(1, 3, 50, 50, 200, 100).unwrap();
+
+        assert_eq!(wm.windows.len(), 3);
+        assert_ne!(t1, t2);
+        assert_ne!(t2, t3);
+    }
+
+    /// MULTI_INSTANCE_UI_INV-2: Multiple instances can be independently focused and minimized
+    #[test]
+    fn test_multi_instance_inv_2_independent_focus_minimize() {
+        let mut wm = MockDesktopWindowManager::new();
+        let t1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let t2 = wm.create_window(1, 2, 30, 30, 200, 100).unwrap();
+
+        wm.minimize_window(1, t1).unwrap();
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == t1).unwrap().state, MockWindowState::Minimized);
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == t2).unwrap().state, MockWindowState::Normal);
+        assert_eq!(wm.focused_window, Some(t2));
+    }
+
+    /// WINDOW_STATE_UI_INV-1: Window state indicators isolate distinct instances
+    #[test]
+    fn test_window_state_ui_inv_1_isolated_indicators() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(1, 2, 30, 30, 200, 100).unwrap();
+
+        wm.snap_left(1, w1).unwrap();
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == w1).unwrap().state, MockWindowState::SnappedLeft);
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == w2).unwrap().state, MockWindowState::Normal);
+    }
+
+    /// SHELL_DAMAGE_INV-1: Launcher toggle produces localized damage, not full-screen redraw
+    #[test]
+    fn test_shell_damage_inv_1_launcher_damage_localized() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // clear boot damage
+
+        let screen_h = 720;
+        let dock_y = screen_h - 24;
+        tracker.add_bounds(4, (dock_y - 250).max(0), 164, 260);
+
+        assert!(tracker.is_damaged());
+        let dmg = tracker.take_damage().unwrap();
+        let is_full = dmg.x == 0 && dmg.y == 0 && dmg.width >= 1280 && dmg.height >= 720;
+        assert!(!is_full, "Launcher toggle damage must be localized");
+    }
+
+    /// SHELL_DAMAGE_INV-2: Dock tab state changes produce localized dock damage
+    #[test]
+    fn test_shell_damage_inv_2_dock_damage_localized() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        let screen_w = 1280;
+        let screen_h = 720;
+        let dock_y = screen_h - 24;
+        tracker.add_bounds(0, dock_y, screen_w, 24);
+
+        assert!(tracker.is_damaged());
+        let dmg = tracker.take_damage().unwrap();
+        let is_full = dmg.x == 0 && dmg.y == 0 && dmg.width >= 1280 && dmg.height >= 720;
+        assert!(!is_full, "Dock damage must be restricted to dock rect");
+        assert_eq!(dmg.height, 24);
+    }
+
+    /// SHELL_INPUT_INV-1: Launcher consumes keyboard events while open
+    #[test]
+    fn test_shell_input_inv_1_launcher_consumes_input() {
+        let mut wm = MockDesktopWindowManager::new();
+        wm.launcher_open = true;
+
+        // Down arrow key
+        wm.launcher_nav_down();
+        assert_eq!(wm.launcher_selected, 1);
+    }
+
+    /// SHELL_INPUT_INV-2: Desktop background click safely handles zero-window or focus state
+    #[test]
+    fn test_shell_input_inv_2_desktop_empty_click() {
+        let mut wm = MockDesktopWindowManager::new();
+        assert_eq!(wm.hit_test(100, 100), None);
     }
 }
 

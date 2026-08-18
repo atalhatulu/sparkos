@@ -117,7 +117,9 @@ pub struct WindowManager {
     pub dragging_window: Option<(u64, i32, i32)>,
     pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
     pub hovered_target: Option<HoverTarget>,
+    pub hovered_dock_tab: Option<usize>,
     pub launcher_open: bool,
+    pub launcher_selected: usize,
     pub pending_spawn_app: Option<u8>,
     pub last_titlebar_click: Option<(u64, u64)>, // (window_id, tick)
     pub damage_tracker: crate::damage::DamageTracker,
@@ -135,10 +137,45 @@ impl WindowManager {
             dragging_window: None,
             resizing_window: None,
             hovered_target: None,
+            hovered_dock_tab: None,
             launcher_open: false,
+            launcher_selected: 0,
             pending_spawn_app: None,
             last_titlebar_click: None,
             damage_tracker: crate::damage::DamageTracker::new(),
+        }
+    }
+
+    pub fn launcher_nav_up(&mut self) {
+        let total = crate::app_registry::REGISTERED_APPS.len();
+        if total > 0 {
+            if self.launcher_selected == 0 {
+                self.launcher_selected = total - 1;
+            } else {
+                self.launcher_selected -= 1;
+            }
+            let screen_h = unsafe { crate::gui::VESA.height as i32 };
+            let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
+            self.mark_damage(4, (dock_y - 250).max(0), 164, 260);
+        }
+    }
+
+    pub fn launcher_nav_down(&mut self) {
+        let total = crate::app_registry::REGISTERED_APPS.len();
+        if total > 0 {
+            self.launcher_selected = (self.launcher_selected + 1) % total;
+            let screen_h = unsafe { crate::gui::VESA.height as i32 };
+            let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
+            self.mark_damage(4, (dock_y - 250).max(0), 164, 260);
+        }
+    }
+
+    pub fn launcher_get_selected_app(&self) -> Option<u8> {
+        let total = crate::app_registry::REGISTERED_APPS.len();
+        if self.launcher_open && self.launcher_selected < total {
+            Some(crate::app_registry::REGISTERED_APPS[self.launcher_selected].id)
+        } else {
+            None
         }
     }
 
@@ -1116,109 +1153,26 @@ impl WindowManager {
             SnapPreview::None => {}
         }
 
-        // 4. Bottom Bar / Dock (y = dock_y, h = 24)
-        crate::gui::draw_rect(0, dock_y, screen_w, DOCK_HEIGHT, active_theme.dock_background);
-        crate::gui::draw_rect(0, dock_y, screen_w, 1, active_theme.border_color); // Top border
-
-        // 4a. SparkOS Launcher Button on Dock
-        let l_bg = if self.launcher_open { 0x002563EB } else { 0x001E293B };
-        crate::gui::draw_rect(4, dock_y + 2, 74, 20, l_bg);
-        crate::gui::draw_icon_glyph(8, dock_y + 8, crate::app_registry::AppIcon::Logo, 0x0038BDF8, l_bg);
-        crate::gui::draw_string(20, dock_y + 7, "SparkOS", 0x00FFFFFF, l_bg);
-
-        // 4b. Window Tabs on Dock
-        let mut tab_x = 84u16;
-        for win in self.windows.iter() {
-            let is_focused = self.focused_window == Some(win.window_id);
-            let tab_bg = if is_focused {
-                0x002563EB // Focused Blue
-            } else if win.state == WindowState::Minimized {
-                0x0009090B // Minimized dark
-            } else {
-                0x001E293B // Unfocused normal
-            };
-            let tab_fg = if is_focused { 0x00FFFFFF } else if win.state == WindowState::Minimized { 0x0064748B } else { 0x00E2E8F0 };
-
-            if tab_x + 84 <= screen_w.saturating_sub(80) {
-                crate::gui::draw_rect(tab_x, dock_y + 2, 80, 20, tab_bg);
-                let (app_prefix, tab_icon) = {
-                    let sched = crate::task::process::SCHEDULER.lock();
-                    if let Some(p) = sched.get_process(win.owner_pid) {
-                        let icon = match p.name.as_str() {
-                            "terminal.app" => crate::app_registry::AppIcon::Terminal,
-                            "files.app" => crate::app_registry::AppIcon::Files,
-                            "editor.app" => crate::app_registry::AppIcon::Editor,
-                            "taskmgr.app" => crate::app_registry::AppIcon::TaskMgr,
-                            "sysmon.app" => crate::app_registry::AppIcon::SysMon,
-                            "settings.app" => crate::app_registry::AppIcon::Settings,
-                            "browser.app" => crate::app_registry::AppIcon::Browser,
-                            "live_demo_app" => crate::app_registry::AppIcon::Demo,
-                            _ => crate::app_registry::AppIcon::Generic,
-                        };
-                        let prefix = match p.name.as_str() {
-                            "terminal.app" => "Term",
-                            "files.app" => "Files",
-                            "editor.app" => "Edit",
-                            "taskmgr.app" => "Task",
-                            "sysmon.app" => "Sys",
-                            "settings.app" => "Set",
-                            "browser.app" => "Web",
-                            "live_demo_app" => "Demo",
-                            _ => "Win",
-                        };
-                        (prefix, icon)
-                    } else {
-                        ("Win", crate::app_registry::AppIcon::Generic)
-                    }
-                };
-                crate::gui::draw_icon_glyph(tab_x + 4, dock_y + 8, tab_icon, tab_fg, tab_bg);
-                let short_name = alloc::format!("{}-{}", app_prefix, win.window_id);
-                crate::gui::draw_string(tab_x + 16, dock_y + 7, &short_name, tab_fg, tab_bg);
-
-                // Active dot indicator
-                if is_focused {
-                    crate::gui::draw_rect(tab_x + 36, dock_y + 19, 8, 2, 0x0060A5FA);
-                }
-                tab_x += 84;
-            }
-        }
-
-        // 4c. Dock Background Completed
+        // 4. Bottom Bar / Dock 2.0
+        crate::dock::Dock::render(
+            screen_w,
+            screen_h,
+            &self.windows,
+            self.focused_window,
+            self.launcher_open,
+            self.hovered_dock_tab,
+        );
 
         // 5. System Top Bar (Top layer above windows and dock, below cursor)
         crate::system_bar::SYSTEM_BAR.lock().render(screen_w, screen_h);
 
-        // 6. Application Launcher Popup (if open)
+        // 6. Application Launcher 2.0 Popup (if open)
         if self.launcher_open {
-            let px = 4u16;
-            let pw = 154u16;
-            let total_apps = crate::app_registry::REGISTERED_APPS.len() as u16;
-            let ph = 34 + total_apps * 28 + 26;
-            let py = dock_y.saturating_sub(ph + 4);
-
-            // Background & Border
-            crate::gui::draw_rect(px, py, pw, ph, 0x000F172A);
-            crate::gui::draw_rect(px, py, pw, 1, 0x003B82F6);
-            crate::gui::draw_rect(px, py, 1, ph, 0x003B82F6);
-            crate::gui::draw_rect(px + pw - 1, py, 1, ph, 0x003B82F6);
-            crate::gui::draw_rect(px, py + ph - 1, pw, 1, 0x003B82F6);
-
-            // Header
-            crate::gui::draw_rect(px + 2, py + 2, pw - 4, 22, 0x001E293B);
-            crate::gui::draw_string(px + 8, py + 8, "SparkOS Launcher", 0x00FFFFFF, 0x001E293B);
-
-            // Registered App Items
-            let mut item_y = py + 28;
-            for app in crate::app_registry::REGISTERED_APPS.iter() {
-                crate::gui::draw_rect(px + 4, item_y, pw - 8, 24, 0x001E293B);
-                crate::gui::draw_icon_glyph(px + 8, item_y + 8, app.icon, 0x00FFFFFF, 0x001E293B);
-                crate::gui::draw_string(px + 22, item_y + 7, app.name, 0x00E2E8F0, 0x001E293B);
-                item_y += 28;
-            }
-
-            // Close launcher button
-            crate::gui::draw_rect(px + 4, item_y, pw - 8, 20, 0x00334155);
-            crate::gui::draw_string(px + 36, item_y + 5, "Close Menu", 0x0094A3B8, 0x00334155);
+            let launcher_state = crate::launcher::LauncherState {
+                open: self.launcher_open,
+                selected_index: self.launcher_selected,
+            };
+            launcher_state.render(screen_w, screen_h);
         }
 
         // 6. Global Freeze Protection / Crash Modal & Diagnostic Overlay
