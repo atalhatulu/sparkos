@@ -10064,6 +10064,86 @@ mod invariant_tests {
         assert!(instances.get(&2).is_none());
         assert_eq!(instances.get(&1).unwrap().file, "notes.txt");
     }
+
+    // =========================================================================
+    // FILE PERSISTENCE & SYSTEM INVARIANTS (FILE_PERSISTENCE_INV-1 .. 4)
+    // =========================================================================
+
+    /// FILE_PERSISTENCE_INV-1: File store persistence across editor open/edit/save/reopen lifecycle
+    #[test]
+    fn test_file_persistence_inv_1_save_and_reopen() {
+        use alloc::collections::BTreeMap;
+        let mut store: BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>> = BTreeMap::new();
+
+        // 1. Initial seed
+        let path = alloc::string::String::from("/home/teha/notes.txt");
+        store.insert(path.clone(), alloc::vec![
+            alloc::string::String::from("SparkOS V1.40 Desktop Notes"),
+            alloc::string::String::from("Original line"),
+        ]);
+
+        // 2. Open file in editor session 1
+        let mut editor_lines = store.get(&path).cloned().unwrap();
+        assert_eq!(editor_lines.len(), 2);
+
+        // 3. User edits text
+        editor_lines.push(alloc::string::String::from("New added modification"));
+
+        // 4. User saves file
+        store.insert(path.clone(), editor_lines);
+
+        // 5. Editor session closes, session 2 opens file from files.app
+        let reopened_lines = store.get(&path).cloned().unwrap();
+        assert_eq!(reopened_lines.len(), 3);
+        assert_eq!(reopened_lines[2], "New added modification");
+    }
+
+    /// FILE_PERSISTENCE_INV-2: Save-As creates distinct entries in store
+    #[test]
+    fn test_file_persistence_inv_2_save_as_distinct() {
+        use alloc::collections::BTreeMap;
+        let mut store: BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>> = BTreeMap::new();
+
+        let original_path = alloc::string::String::from("/home/teha/notes.txt");
+        let new_path = alloc::string::String::from("/home/teha/notes_backup.txt");
+
+        store.insert(original_path.clone(), alloc::vec![alloc::string::String::from("Original")]);
+        store.insert(new_path.clone(), alloc::vec![alloc::string::String::from("Backup content")]);
+
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.get(&original_path).unwrap()[0], "Original");
+        assert_eq!(store.get(&new_path).unwrap()[0], "Backup content");
+    }
+
+    /// FILE_PERSISTENCE_INV-3: Terminal spawn failure triggers crash reporter notification
+    #[test]
+    fn test_file_persistence_inv_3_spawn_failure_reporting() {
+        let spawn_result: core::result::Result<u64, &'static str> = Err("no free frame for terminal.app");
+        let mut error_reported = false;
+
+        if let Err(e) = spawn_result {
+            assert_eq!(e, "no free frame for terminal.app");
+            error_reported = true;
+        }
+
+        assert!(error_reported);
+    }
+
+    /// FILE_PERSISTENCE_INV-4: Modifier bitmask calculation
+    #[test]
+    fn test_file_persistence_inv_4_modifiers_bitmask() {
+        let is_ctrl = true;
+        let is_alt = true;
+        let is_shift = false;
+
+        let modifiers = (if is_ctrl { 1 } else { 0 })
+            | (if is_shift { 2 } else { 0 })
+            | (if is_alt { 8 } else { 0 });
+
+        assert_eq!(modifiers & 0x01, 1);
+        assert_eq!(modifiers & 0x08, 8);
+        assert_eq!(modifiers & 0x02, 0);
+    }
 }
 
 

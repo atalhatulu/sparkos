@@ -207,8 +207,17 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
     if pressed && key_code == 0x14 && is_ctrl && is_alt {
         let res = crate::terminal_app::spawn_terminal_app("terminal.app");
         match res {
-            Ok(pid) => crate::serial_println!("[INPUT] Successfully spawned Terminal PID {}", pid),
-            Err(e) => crate::serial_println!("[INPUT] Failed to spawn Terminal: {:?}", e),
+            Ok(pid) => {
+                crate::serial_println!("[INPUT] Successfully spawned Terminal PID {}", pid);
+            }
+            Err(e) => {
+                crate::serial_println!("[INPUT] Failed to spawn Terminal: {:?}", e);
+                crate::crash_reporter::CRASH_REPORTER.lock().report_process_crash(
+                    0,
+                    "terminal.app",
+                    "Spawning Failed (Memory/Process Limit)",
+                );
+            }
         }
         crate::wm::WM.lock().composite_desktop(0, 0);
         return res.ok();

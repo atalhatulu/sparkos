@@ -84,8 +84,20 @@ impl Keyboard {
                 0x47 => self.push(Key::Home),      // Home
                 0x4F => self.push(Key::End),       // End
                 0x52 => self.push(Key::Delete),    // Insert
-                0x1D => self.ctrl = true,          // Right Ctrl make
-                0x9D => self.ctrl = false,         // Right Ctrl break
+                0x1D => {
+                    self.ctrl = true;
+                    CTRL_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
+                }
+                0x9D => {
+                    self.ctrl = false;
+                    CTRL_PRESSED.store(false, core::sync::atomic::Ordering::Relaxed);
+                }
+                0x38 => {
+                    ALT_PRESSED.store(true, core::sync::atomic::Ordering::Relaxed);
+                }
+                0xB8 => {
+                    ALT_PRESSED.store(false, core::sync::atomic::Ordering::Relaxed);
+                }
                 _ => {}
             }
             return;

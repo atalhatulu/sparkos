@@ -165,24 +165,34 @@ impl EditorAppState {
         self.undo_stack.clear();
         self.redo_stack.clear();
 
-        if path.ends_with("notes.txt") {
-            self.lines.push(String::from("SparkOS V1.40 Desktop Notes"));
-            self.lines.push(String::from("- Full Window Manager 2.0 active"));
-            self.lines.push(String::from("- Real File Manager & Clipboard active"));
-            self.lines.push(String::from("- Editor 3.0: Search, Replace & Word Wrap"));
-            self.lines.push(String::from("- Türkçe karakter desteği: ç ğ ı İ ö ş ü"));
-        } else if path.ends_with("main.rs") {
-            self.lines.push(String::from("fn main() {"));
-            self.lines.push(String::from("    println!(\"Hello SparkOS 3.0!\");"));
-            self.lines.push(String::from("}"));
-        } else if path.ends_with("config.toml") {
-            self.lines.push(String::from("[desktop]"));
-            self.lines.push(String::from("theme = \"dark\""));
-            self.lines.push(String::from("font_size = 14"));
-            self.lines.push(String::from("word_wrap = true"));
+        let stored = {
+            let store = GLOBAL_FILE_STORE.lock();
+            store.get(path).cloned()
+        };
+
+        if let Some(lines) = stored {
+            self.lines = lines;
         } else {
-            self.lines.push(format!("// File: {}", path));
-            self.lines.push(String::from(""));
+            if path.ends_with("notes.txt") {
+                self.lines.push(String::from("SparkOS V1.40 Desktop Notes"));
+                self.lines.push(String::from("- Full Window Manager 2.0 active"));
+                self.lines.push(String::from("- Real File Manager & Clipboard active"));
+                self.lines.push(String::from("- Editor 3.0: Search, Replace & Word Wrap"));
+                self.lines.push(String::from("- Türkçe karakter desteği: ç ğ ı İ ö ş ü"));
+            } else if path.ends_with("main.rs") {
+                self.lines.push(String::from("fn main() {"));
+                self.lines.push(String::from("    println!(\"Hello SparkOS 3.0!\");"));
+                self.lines.push(String::from("}"));
+            } else if path.ends_with("config.toml") {
+                self.lines.push(String::from("[desktop]"));
+                self.lines.push(String::from("theme = \"dark\""));
+                self.lines.push(String::from("font_size = 14"));
+                self.lines.push(String::from("word_wrap = true"));
+            } else {
+                self.lines.push(format!("// File: {}", path));
+                self.lines.push(String::from(""));
+            }
+            GLOBAL_FILE_STORE.lock().insert(String::from(path), self.lines.clone());
         }
 
         self.cursor_row = 0;
@@ -194,18 +204,22 @@ impl EditorAppState {
     }
 
     pub fn save_file(&mut self) {
-        if let Some(ref path) = self.file_path {
-            self.is_dirty = false;
-            self.status_message = format!("Saved '{}' ({} lines)", path, self.lines.len());
+        let path = if let Some(ref p) = self.file_path {
+            p.clone()
         } else {
-            self.file_path = Some(String::from("/home/teha/untitled.txt"));
-            self.is_dirty = false;
-            self.status_message = String::from("Saved as '/home/teha/untitled.txt'");
-        }
+            let p = String::from("/home/teha/untitled.txt");
+            self.file_path = Some(p.clone());
+            p
+        };
+
+        GLOBAL_FILE_STORE.lock().insert(path.clone(), self.lines.clone());
+        self.is_dirty = false;
+        self.status_message = format!("Saved '{}' ({} lines)", path, self.lines.len());
     }
 
     pub fn save_as(&mut self, new_path: &str) {
         self.file_path = Some(String::from(new_path));
+        GLOBAL_FILE_STORE.lock().insert(String::from(new_path), self.lines.clone());
         self.is_dirty = false;
         self.status_message = format!("Saved as '{}'", new_path);
     }
@@ -1108,6 +1122,7 @@ impl EditorAppState {
 }
 
 pub static EDITOR_INSTANCES: Mutex<BTreeMap<u64, EditorAppState>> = Mutex::new(BTreeMap::new());
+pub static GLOBAL_FILE_STORE: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
 
 pub fn cleanup_editor_for_window(window_id: u64) {
     let mut instances = EDITOR_INSTANCES.lock();
