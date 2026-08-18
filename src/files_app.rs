@@ -36,6 +36,8 @@ pub struct FilesAppState {
     pub history_idx: usize,
     pub entries: Vec<FileEntry>,
     pub selected_idx: Option<usize>,
+    pub selected_indices: Vec<usize>,
+    pub clipboard_item: Option<(String, bool)>, // (full_path, is_cut)
     pub status_message: String,
     pub last_click_item: Option<(usize, u64)>, // (index, tick) for double click
 }
@@ -51,6 +53,8 @@ impl FilesAppState {
             history_idx: 0,
             entries: Vec::new(),
             selected_idx: None,
+            selected_indices: Vec::new(),
+            clipboard_item: None,
             status_message: String::from("Ready"),
             last_click_item: None,
         };
@@ -64,6 +68,7 @@ impl FilesAppState {
         self.current_path = String::from(clean_path);
         self.entries.clear();
         self.selected_idx = None;
+        self.selected_indices.clear();
 
         // Populate directory entries based on path
         if clean_path == "/" {
@@ -268,11 +273,103 @@ impl FilesAppState {
         self.status_message = format!("Created folder '{}'", name);
     }
 
+    pub fn select_single(&mut self, idx: usize) {
+        if idx < self.entries.len() {
+            self.selected_indices.clear();
+            self.selected_indices.push(idx);
+            self.selected_idx = Some(idx);
+            self.status_message = format!("Selected: {}", self.entries[idx].name);
+        }
+    }
+
+    pub fn toggle_select(&mut self, idx: usize) {
+        if idx < self.entries.len() {
+            if let Some(pos) = self.selected_indices.iter().position(|&i| i == idx) {
+                self.selected_indices.remove(pos);
+            } else {
+                self.selected_indices.push(idx);
+            }
+            self.selected_idx = self.selected_indices.first().copied();
+            self.status_message = format!("{} item(s) selected", self.selected_indices.len());
+        }
+    }
+
+    pub fn select_range(&mut self, from: usize, to: usize) {
+        let start = from.min(to);
+        let end = from.max(to);
+        self.selected_indices.clear();
+        for i in start..=end {
+            if i < self.entries.len() {
+                self.selected_indices.push(i);
+            }
+        }
+        self.selected_idx = self.selected_indices.first().copied();
+        self.status_message = format!("{} item(s) selected", self.selected_indices.len());
+    }
+
+    pub fn select_all(&mut self) {
+        self.selected_indices.clear();
+        for i in 0..self.entries.len() {
+            self.selected_indices.push(i);
+        }
+        self.selected_idx = self.selected_indices.first().copied();
+        self.status_message = format!("All {} item(s) selected", self.entries.len());
+    }
+
+    pub fn cut_selected(&mut self) {
+        if let Some(idx) = self.selected_idx {
+            if let Some(entry) = self.entries.get(idx) {
+                let full_path = if self.current_path == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{}/{}", self.current_path.trim_end_matches('/'), entry.name)
+                };
+                self.clipboard_item = Some((full_path.clone(), true));
+                crate::clipboard::copy_to_clipboard(&full_path);
+                self.status_message = format!("Cut '{}'", entry.name);
+            }
+        }
+    }
+
+    pub fn copy_selected(&mut self) {
+        if let Some(idx) = self.selected_idx {
+            if let Some(entry) = self.entries.get(idx) {
+                let full_path = if self.current_path == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{}/{}", self.current_path.trim_end_matches('/'), entry.name)
+                };
+                self.clipboard_item = Some((full_path.clone(), false));
+                crate::clipboard::copy_to_clipboard(&full_path);
+                self.status_message = format!("Copied '{}'", entry.name);
+            }
+        }
+    }
+
+    pub fn paste(&mut self) {
+        if let Some((ref path, is_cut)) = self.clipboard_item.take() {
+            let file_name = path.rsplit('/').next().unwrap_or("pasted_file");
+            self.entries.push(FileEntry {
+                name: String::from(file_name),
+                size_bytes: 1024,
+                item_type: FileItemType::File,
+            });
+            if is_cut {
+                self.status_message = format!("Moved '{}' to {}", file_name, self.current_path);
+            } else {
+                self.status_message = format!("Pasted '{}' into {}", file_name, self.current_path);
+            }
+        } else {
+            self.status_message = String::from("Clipboard empty");
+        }
+    }
+
     pub fn delete_selected(&mut self) {
         if let Some(idx) = self.selected_idx {
             if idx < self.entries.len() {
                 let removed = self.entries.remove(idx);
                 self.selected_idx = None;
+                self.selected_indices.clear();
                 self.status_message = format!("Deleted '{}'", removed.name);
             }
         }
@@ -463,7 +560,7 @@ impl FilesAppState {
         for (i, entry) in self.entries.iter().enumerate() {
             if y + 20 >= h.saturating_sub(20) { break; }
 
-            let is_selected = self.selected_idx == Some(i);
+            let is_selected = self.selected_indices.contains(&i) || self.selected_idx == Some(i);
             let row_bg = if is_selected { 0x001D4ED8 } else if i % 2 == 0 { panel_bg } else { bg_color };
 
             draw_surf_rect(surface_ptr, w, h, 6, y, w.saturating_sub(12), 18, row_bg);
@@ -545,7 +642,7 @@ pub fn spawn_files_app(name: &str) -> Result<u64, &'static str> {
 
     {
         let state = FilesAppState::new(win_id, pid);
-        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
             let phys_addr = surface.shmem_phys_addr;
             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
             state.render_to_surface(surf_ptr, FILES_WIDTH, FILES_HEIGHT);

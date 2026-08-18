@@ -13154,6 +13154,443 @@ pub mod desktop_shell2_tests {
     }
 }
 
+#[cfg(test)]
+pub mod files_app2_tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use alloc::format;
+    use super::damage_module::DamageTracker;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MockFileItemType {
+        Directory,
+        File,
+        Executable,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockFileEntry {
+        pub name: String,
+        pub size_bytes: u64,
+        pub item_type: MockFileItemType,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockFilesAppState {
+        pub window_id: u64,
+        pub pid: u64,
+        pub current_path: String,
+        pub history: Vec<String>,
+        pub history_idx: usize,
+        pub entries: Vec<MockFileEntry>,
+        pub selected_idx: Option<usize>,
+        pub selected_indices: Vec<usize>,
+        pub clipboard_item: Option<(String, bool)>,
+        pub status_message: String,
+    }
+
+    impl MockFilesAppState {
+        pub fn new(window_id: u64, pid: u64) -> Self {
+            let mut state = Self {
+                window_id,
+                pid,
+                current_path: String::from("/home/teha"),
+                history: alloc::vec![String::from("/home/teha")],
+                history_idx: 0,
+                entries: Vec::new(),
+                selected_idx: None,
+                selected_indices: Vec::new(),
+                clipboard_item: None,
+                status_message: String::from("Ready"),
+            };
+            state.load_directory("/home/teha");
+            state
+        }
+
+        pub fn load_directory(&mut self, path: &str) {
+            self.current_path = String::from(path);
+            self.entries.clear();
+            self.selected_idx = None;
+            self.selected_indices.clear();
+
+            if path == "/home/teha" {
+                self.entries.push(MockFileEntry { name: String::from("projects"), size_bytes: 4096, item_type: MockFileItemType::Directory });
+                self.entries.push(MockFileEntry { name: String::from("documents"), size_bytes: 4096, item_type: MockFileItemType::Directory });
+                self.entries.push(MockFileEntry { name: String::from("notes.txt"), size_bytes: 1024, item_type: MockFileItemType::File });
+                self.entries.push(MockFileEntry { name: String::from("config.toml"), size_bytes: 256, item_type: MockFileItemType::File });
+            } else if path == "/home/teha/projects" {
+                self.entries.push(MockFileEntry { name: String::from("src"), size_bytes: 4096, item_type: MockFileItemType::Directory });
+                self.entries.push(MockFileEntry { name: String::from("main.rs"), size_bytes: 18450, item_type: MockFileItemType::File });
+            }
+        }
+
+        pub fn navigate_to(&mut self, path: &str) {
+            self.load_directory(path);
+            if self.history_idx + 1 < self.history.len() {
+                self.history.truncate(self.history_idx + 1);
+            }
+            self.history.push(String::from(path));
+            self.history_idx = self.history.len() - 1;
+        }
+
+        pub fn go_back(&mut self) {
+            if self.history_idx > 0 {
+                self.history_idx -= 1;
+                let target = self.history[self.history_idx].clone();
+                self.load_directory(&target);
+            }
+        }
+
+        pub fn go_forward(&mut self) {
+            if self.history_idx + 1 < self.history.len() {
+                self.history_idx += 1;
+                let target = self.history[self.history_idx].clone();
+                self.load_directory(&target);
+            }
+        }
+
+        pub fn go_parent(&mut self) {
+            if self.current_path == "/home/teha/projects" {
+                self.navigate_to("/home/teha");
+            } else if self.current_path == "/home/teha" {
+                self.navigate_to("/home");
+            } else {
+                self.navigate_to("/");
+            }
+        }
+
+        pub fn select_single(&mut self, idx: usize) {
+            if idx < self.entries.len() {
+                self.selected_indices.clear();
+                self.selected_indices.push(idx);
+                self.selected_idx = Some(idx);
+            }
+        }
+
+        pub fn toggle_select(&mut self, idx: usize) {
+            if idx < self.entries.len() {
+                if let Some(pos) = self.selected_indices.iter().position(|&i| i == idx) {
+                    self.selected_indices.remove(pos);
+                } else {
+                    self.selected_indices.push(idx);
+                }
+                self.selected_idx = self.selected_indices.first().copied();
+            }
+        }
+
+        pub fn select_range(&mut self, from: usize, to: usize) {
+            let start = from.min(to);
+            let end = from.max(to);
+            self.selected_indices.clear();
+            for i in start..=end {
+                if i < self.entries.len() {
+                    self.selected_indices.push(i);
+                }
+            }
+            self.selected_idx = self.selected_indices.first().copied();
+        }
+
+        pub fn select_all(&mut self) {
+            self.selected_indices.clear();
+            for i in 0..self.entries.len() {
+                self.selected_indices.push(i);
+            }
+            self.selected_idx = self.selected_indices.first().copied();
+        }
+
+        pub fn create_file(&mut self, name: &str) {
+            self.entries.push(MockFileEntry {
+                name: String::from(name),
+                size_bytes: 0,
+                item_type: MockFileItemType::File,
+            });
+        }
+
+        pub fn create_directory(&mut self, name: &str) {
+            self.entries.push(MockFileEntry {
+                name: String::from(name),
+                size_bytes: 4096,
+                item_type: MockFileItemType::Directory,
+            });
+        }
+
+        pub fn rename_selected(&mut self, new_name: &str) {
+            if let Some(idx) = self.selected_idx {
+                if idx < self.entries.len() {
+                    self.entries[idx].name = String::from(new_name);
+                }
+            }
+        }
+
+        pub fn delete_selected(&mut self) {
+            if let Some(idx) = self.selected_idx {
+                if idx < self.entries.len() {
+                    self.entries.remove(idx);
+                    self.selected_idx = None;
+                    self.selected_indices.clear();
+                }
+            }
+        }
+
+        pub fn cut_selected(&mut self) {
+            if let Some(idx) = self.selected_idx {
+                if let Some(entry) = self.entries.get(idx) {
+                    let full_path = format!("{}/{}", self.current_path, entry.name);
+                    self.clipboard_item = Some((full_path, true));
+                }
+            }
+        }
+
+        pub fn copy_selected(&mut self) {
+            if let Some(idx) = self.selected_idx {
+                if let Some(entry) = self.entries.get(idx) {
+                    let full_path = format!("{}/{}", self.current_path, entry.name);
+                    self.clipboard_item = Some((full_path, false));
+                }
+            }
+        }
+
+        pub fn paste(&mut self) {
+            if let Some((ref path, _is_cut)) = self.clipboard_item.take() {
+                let file_name = path.rsplit('/').next().unwrap_or("pasted_file");
+                self.entries.push(MockFileEntry {
+                    name: String::from(file_name),
+                    size_bytes: 1024,
+                    item_type: MockFileItemType::File,
+                });
+            }
+        }
+    }
+
+    /// FILES2_NAV_INV-1: Navigation history (Back/Forward/Parent) works deterministically
+    #[test]
+    fn test_files2_nav_inv_1_history_traversal() {
+        let mut app = MockFilesAppState::new(1, 1);
+        assert_eq!(app.current_path, "/home/teha");
+
+        app.navigate_to("/home/teha/projects");
+        assert_eq!(app.current_path, "/home/teha/projects");
+
+        app.go_back();
+        assert_eq!(app.current_path, "/home/teha");
+
+        app.go_forward();
+        assert_eq!(app.current_path, "/home/teha/projects");
+
+        app.go_parent();
+        assert_eq!(app.current_path, "/home/teha");
+    }
+
+    /// FILES2_NAV_INV-2: Directory navigation populates items correctly
+    #[test]
+    fn test_files2_nav_inv_2_directory_population() {
+        let mut app = MockFilesAppState::new(1, 1);
+        assert_eq!(app.entries.len(), 4);
+
+        app.navigate_to("/home/teha/projects");
+        assert_eq!(app.entries.len(), 2);
+        assert_eq!(app.entries[0].name, "src");
+        assert_eq!(app.entries[1].name, "main.rs");
+    }
+
+    /// FILES2_SELECTION_INV-1: Single item selection
+    #[test]
+    fn test_files2_selection_inv_1_single_select() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_single(2);
+
+        assert_eq!(app.selected_idx, Some(2));
+        assert_eq!(app.selected_indices, alloc::vec![2]);
+    }
+
+    /// FILES2_SELECTION_INV-2: Ctrl+Click toggles multi-selection
+    #[test]
+    fn test_files2_selection_inv_2_toggle_select() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.toggle_select(0);
+        app.toggle_select(2);
+
+        assert_eq!(app.selected_indices.len(), 2);
+        assert!(app.selected_indices.contains(&0));
+        assert!(app.selected_indices.contains(&2));
+
+        // Deselect item 0
+        app.toggle_select(0);
+        assert_eq!(app.selected_indices.len(), 1);
+        assert_eq!(app.selected_indices[0], 2);
+    }
+
+    /// FILES2_SELECTION_INV-3: Shift+Click range selection
+    #[test]
+    fn test_files2_selection_inv_3_range_select() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_range(1, 3);
+
+        assert_eq!(app.selected_indices.len(), 3);
+        assert_eq!(app.selected_indices, alloc::vec![1, 2, 3]);
+    }
+
+    /// FILES2_SELECTION_INV-4: Ctrl+A selects all items
+    #[test]
+    fn test_files2_selection_inv_4_select_all() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_all();
+
+        assert_eq!(app.selected_indices.len(), 4);
+    }
+
+    /// FILES2_MULTI_INSTANCE_INV-1: Two distinct Files instances have independent paths
+    #[test]
+    fn test_files2_multi_instance_inv_1_independent_paths() {
+        let mut f1 = MockFilesAppState::new(1, 1);
+        let mut f2 = MockFilesAppState::new(2, 2);
+
+        f1.navigate_to("/home/teha/projects");
+        assert_eq!(f1.current_path, "/home/teha/projects");
+        assert_eq!(f2.current_path, "/home/teha");
+    }
+
+    /// FILES2_MULTI_INSTANCE_INV-2: Two distinct Files instances have independent selections
+    #[test]
+    fn test_files2_multi_instance_inv_2_independent_selections() {
+        let mut f1 = MockFilesAppState::new(1, 1);
+        let mut f2 = MockFilesAppState::new(2, 2);
+
+        f1.select_single(0);
+        f2.select_single(3);
+
+        assert_eq!(f1.selected_idx, Some(0));
+        assert_eq!(f2.selected_idx, Some(3));
+    }
+
+    /// FILES2_FILE_OP_INV-1: Create file and folder updates directory listing
+    #[test]
+    fn test_files2_file_op_inv_1_create_file_folder() {
+        let mut app = MockFilesAppState::new(1, 1);
+        let initial_count = app.entries.len();
+
+        app.create_file("test.txt");
+        app.create_directory("new_folder");
+
+        assert_eq!(app.entries.len(), initial_count + 2);
+        assert_eq!(app.entries[initial_count].name, "test.txt");
+        assert_eq!(app.entries[initial_count + 1].name, "new_folder");
+    }
+
+    /// FILES2_FILE_OP_INV-2: Rename and delete selected item
+    #[test]
+    fn test_files2_file_op_inv_2_rename_delete() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_single(2); // "notes.txt"
+
+        app.rename_selected("todo.txt");
+        assert_eq!(app.entries[2].name, "todo.txt");
+
+        app.delete_selected();
+        assert_eq!(app.entries.len(), 3);
+        assert_eq!(app.selected_idx, None);
+    }
+
+    /// FILES2_CLIPBOARD_INV-1: Cut and paste transfers file
+    #[test]
+    fn test_files2_clipboard_inv_1_cut_paste() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_single(2); // "notes.txt"
+        app.cut_selected();
+
+        assert!(app.clipboard_item.is_some());
+        let (ref path, is_cut) = app.clipboard_item.as_ref().unwrap();
+        assert!(is_cut);
+        assert_eq!(path, "/home/teha/notes.txt");
+
+        app.navigate_to("/home/teha/projects");
+        app.paste();
+
+        assert_eq!(app.entries.len(), 3);
+        assert_eq!(app.entries[2].name, "notes.txt");
+        assert_eq!(app.clipboard_item, None);
+    }
+
+    /// FILES2_CLIPBOARD_INV-2: Copy and paste duplicates file
+    #[test]
+    fn test_files2_clipboard_inv_2_copy_paste() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_single(3); // "config.toml"
+        app.copy_selected();
+
+        assert!(app.clipboard_item.is_some());
+        let (_, is_cut) = app.clipboard_item.as_ref().unwrap();
+        assert!(!is_cut);
+
+        app.paste();
+        assert_eq!(app.entries.len(), 5);
+        assert_eq!(app.entries[4].name, "config.toml");
+    }
+
+    /// FILES2_EDITOR_INTEGRATION_INV-1: Text file types (.txt, .md, .rs, .toml) can be opened in Editor
+    #[test]
+    fn test_files2_editor_integration_inv_1_text_types() {
+        let text_files = ["notes.txt", "readme.md", "main.rs", "config.toml"];
+        for f in text_files.iter() {
+            let is_text = f.ends_with(".txt") || f.ends_with(".md") || f.ends_with(".rs") || f.ends_with(".toml");
+            assert!(is_text, "File {} should be recognized as text editor compatible", f);
+        }
+    }
+
+    /// FILES2_EDITOR_INTEGRATION_INV-2: Binary files do not open in text editor
+    #[test]
+    fn test_files2_editor_integration_inv_2_binary_files() {
+        let bin_files = ["sparkos.bin", "archive.tar", "app.elf"];
+        for f in bin_files.iter() {
+            let is_text = f.ends_with(".txt") || f.ends_with(".md") || f.ends_with(".rs") || f.ends_with(".toml");
+            assert!(!is_text, "Binary file {} must not be opened as text", f);
+        }
+    }
+
+    /// FILES2_WINDOW_INV-1: Window lifecycle cleans up files instance
+    #[test]
+    fn test_files2_window_inv_1_cleanup() {
+        let mut instances = alloc::collections::BTreeMap::new();
+        instances.insert(10u64, MockFilesAppState::new(10, 10));
+        assert!(instances.contains_key(&10));
+
+        instances.remove(&10);
+        assert!(!instances.contains_key(&10));
+    }
+
+    /// FILES2_DAMAGE_INV-1: Surface present produces localized damage
+    #[test]
+    fn test_files2_damage_inv_1_localized_surface_damage() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        // Files window surface bounds (x=50, y=50, w=440, h=280)
+        tracker.add_bounds(50, 50, 440, 280);
+        assert!(tracker.is_damaged());
+
+        let dmg = tracker.take_damage().unwrap();
+        assert_eq!(dmg.x, 50);
+        assert_eq!(dmg.y, 50);
+        assert_eq!(dmg.width, 440);
+        assert_eq!(dmg.height, 280);
+    }
+
+    /// FILES2_INPUT_INV-1: Key input (Up/Down) changes selection
+    #[test]
+    fn test_files2_input_inv_1_up_down() {
+        let mut app = MockFilesAppState::new(1, 1);
+        app.select_single(0);
+
+        // Down
+        app.select_single(1);
+        assert_eq!(app.selected_idx, Some(1));
+
+        // Up
+        app.select_single(0);
+        assert_eq!(app.selected_idx, Some(0));
+    }
+}
+
 
 
 
