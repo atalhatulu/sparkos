@@ -61,14 +61,14 @@ impl Widget for Button {
             UiEvent::MouseClick { x, y } => {
                 if x >= abs_x && x <= abs_x + self.width && y >= abs_y && y <= abs_y + self.height {
                     self.pressed = true;
-                    crate::gui::redraw_all(Some((abs_x, abs_y, self.width, self.height)));
+                    crate::wm::WM.lock().mark_damage(abs_x as i32, abs_y as i32, self.width as u32, self.height as u32);
                     return true;
                 }
             },
             UiEvent::MouseUp { x, y } => {
                 if self.pressed {
                     self.pressed = false;
-                    crate::gui::redraw_all(Some((abs_x, abs_y, self.width, self.height)));
+                    crate::wm::WM.lock().mark_damage(abs_x as i32, abs_y as i32, self.width as u32, self.height as u32);
                     
                     if x >= abs_x && x <= abs_x + self.width && y >= abs_y && y <= abs_y + self.height {
                         if let Some(handler) = self.on_click {

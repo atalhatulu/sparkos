@@ -114,12 +114,16 @@ impl DesktopEnvironment {
                 crate::gui::draw_rect(ix - 4, iy + 62 - 5, 64, 1, 0x0060A5FA);
             }
 
-            // Draw Icon Glyph
-            crate::gui::draw_icon_glyph(ix + 12, iy + 6, icon.icon, 0x0038BDF8, 0x00000000);
+            // Draw Icon Glyph (Horizontally centered in 56px icon cell)
+            let icon_center_x = ix + (56u16.saturating_sub(16)) / 2;
+            crate::gui::draw_icon_glyph(icon_center_x, iy + 6, icon.icon, 0x0038BDF8, 0x00000000);
 
-            // Draw Label with drop-shadow for crisp readability
-            crate::gui::draw_string(ix + 2, iy + 41, icon.label, 0x00000000, 0x00000000);
-            crate::gui::draw_string(ix + 1, iy + 40, icon.label, 0x00F8FAFC, 0x00000000);
+            // Draw Label with drop-shadow for crisp readability (Horizontally centered)
+            let label_len = icon.label.len() as u16;
+            let text_w = label_len * 8;
+            let text_center_x = if text_w < 56 { ix + (56 - text_w) / 2 } else { ix };
+            crate::gui::draw_string(text_center_x + 1, iy + 41, icon.label, 0x00000000, 0x00000000);
+            crate::gui::draw_string(text_center_x, iy + 40, icon.label, 0x00F8FAFC, 0x00000000);
         }
 
         // 3. Desktop Resource Widget (Top-Right HUD)
@@ -164,15 +168,25 @@ impl DesktopEnvironment {
                     return Some(icon.action);
                 } else {
                     // Single click: select icon
+                    let prev_sel = self.selected_icon_id;
                     self.selected_icon_id = Some(icon.id);
                     self.last_click_id = Some(icon.id);
                     self.last_click_tick = current_tick;
+                    if prev_sel != Some(icon.id) {
+                        crate::wm::WM.lock().mark_damage(ix.saturating_sub(6) as i32, iy.saturating_sub(6) as i32, 72, 70);
+                    }
                     return None;
                 }
             }
         }
 
         // Clicked on empty desktop space: deselect
+        if let Some(prev_id) = self.selected_icon_id {
+            if let Some(icon) = self.icons.iter().find(|i| i.id == prev_id) {
+                let (ix, iy) = icon.position;
+                crate::wm::WM.lock().mark_damage(ix.saturating_sub(6) as i32, iy.saturating_sub(6) as i32, 72, 70);
+            }
+        }
         self.selected_icon_id = None;
         self.last_click_id = None;
         None

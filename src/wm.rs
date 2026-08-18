@@ -1030,9 +1030,9 @@ impl WindowManager {
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
             
-            // Draw App Icon & Title strictly from cached Window metadata (ZERO SCHEDULER LOCK CONTENTION)
-            crate::gui::draw_icon_glyph(wx + 6, wy + 6, win.icon, title_fg, title_bg);
-            crate::gui::draw_string(wx + 18, wy + 6, &win.title, title_fg, title_bg);
+            // Draw App Icon & Title strictly from cached Window metadata (Dikey & Yatay Tam Ortalı)
+            crate::gui::draw_icon_glyph(wx + 6, wy + 2, win.icon, title_fg, title_bg);
+            crate::gui::draw_string(wx + 26, wy + 4, &win.title, title_fg, title_bg);
 
             // Control Buttons on Right (— □ ×)
             let is_hover_target = self.hovered_target.as_ref().map(|h| h.window_id == win.window_id).unwrap_or(false);
@@ -1158,22 +1158,34 @@ impl WindowManager {
         }
 
         // 4. Unified Top Panel 2.0 (Start button, Window tabs, System HUD)
-        crate::dock::Dock::render(
-            screen_w,
-            screen_h,
-            &self.windows,
-            self.focused_window,
-            self.launcher_open,
-            self.hovered_dock_tab,
-        );
+        // Ensure top panel is never partially clipped when damaged
+        let touches_top_bar = is_full || clamped.y < (DOCK_HEIGHT as i32 + 2);
+        if touches_top_bar {
+            crate::gui::set_clip(None);
+            crate::dock::Dock::render(
+                screen_w,
+                screen_h,
+                &self.windows,
+                self.focused_window,
+                self.launcher_open,
+                self.hovered_dock_tab,
+            );
+            if !is_full {
+                crate::gui::set_clip(Some((clamped.x as u16, clamped.y as u16, clamped.width as u16, clamped.height as u16)));
+            }
+        }
 
         // 5. Application Launcher 2.0 Dropdown Popup (if open)
         if self.launcher_open {
+            crate::gui::set_clip(None);
             let launcher_state = crate::launcher::LauncherState {
                 open: self.launcher_open,
                 selected_index: self.launcher_selected,
             };
             launcher_state.render(screen_w, screen_h);
+            if !is_full {
+                crate::gui::set_clip(Some((clamped.x as u16, clamped.y as u16, clamped.width as u16, clamped.height as u16)));
+            }
         }
 
         // 6. Global Freeze Protection / Crash Modal & Diagnostic Overlay
@@ -1650,6 +1662,31 @@ impl WindowManager {
             }
             crate::cursor::set_cursor_type(crate::cursor::CursorType::Hand);
             return;
+        }
+
+        // 2b. Check Top Bar Tab Hover (my < DOCK_HEIGHT as i32)
+        if my < DOCK_HEIGHT as i32 {
+            let new_tab = if mx >= 102 && mx <= max_w.saturating_sub(210) {
+                let tab_idx = ((mx - 102) / 92) as usize;
+                if tab_idx < self.windows.len() { Some(tab_idx) } else { None }
+            } else {
+                None
+            };
+
+            if self.hovered_dock_tab != new_tab {
+                self.hovered_dock_tab = new_tab;
+                self.mark_top_bar_damage();
+            }
+
+            crate::cursor::set_cursor_type(if mx <= 92 || new_tab.is_some() {
+                crate::cursor::CursorType::Hand
+            } else {
+                crate::cursor::CursorType::Default
+            });
+            return;
+        } else if self.hovered_dock_tab.is_some() {
+            self.hovered_dock_tab = None;
+            self.mark_top_bar_damage();
         }
 
         // 3. Hover Detection and Cursor Type Selection (Z-Order Top-to-Bottom)

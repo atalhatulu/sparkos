@@ -1,11 +1,5 @@
-//! SparkOS — Shared Memory Surface Subsystem (Faz 11)
-//!
-//! Provides kernel-level Surface Control Blocks, shared memory allocation,
-//! userspace virtual memory mapping at `0x70000000`, ownership enforcement,
-//! dirty rectangle presentation, and automated teardown on process exit.
-
 use alloc::vec::Vec;
-use spin::Mutex;
+use spin::RwLock;
 use x86_64::PhysAddr;
 
 pub const USER_SURFACE_BASE: u64 = 0x70000000;
@@ -31,7 +25,7 @@ pub struct SurfaceInfo {
 }
 
 static NEXT_SURFACE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
-pub static SURFACE_REGISTRY: Mutex<Vec<SurfaceInfo>> = Mutex::new(Vec::new());
+pub static SURFACE_REGISTRY: RwLock<Vec<SurfaceInfo>> = RwLock::new(Vec::new());
 
 /// Creates a new shared memory surface for the current running process.
 pub fn create_surface(width: u32, height: u32) -> Result<u64, &'static str> {
@@ -64,7 +58,7 @@ pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result
         let _ = crate::memory::user_alloc_frame().ok_or("Out of memory for surface backing")?;
     }
 
-    let mut reg = SURFACE_REGISTRY.lock();
+    let mut reg = SURFACE_REGISTRY.write();
     
     // SEC-05 Fix: Bitmask-based slot allocator for reuse & hard limit
     let used_mask: u16 = reg.iter()
@@ -122,24 +116,36 @@ pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result
 /// Presents a dirty rectangle of the specified surface to the compositor.
 pub fn present_surface(surface_id: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), &'static str> {
     let pid = crate::task::process::current_pid();
-    let mut reg = SURFACE_REGISTRY.lock();
+    let (clip_x, clip_y, clip_w, clip_h) = {
+        let mut reg = SURFACE_REGISTRY.write();
 
-    let surface = reg.iter_mut().find(|s| s.surface_id == surface_id)
-        .ok_or("Surface not found")?;
+        let surface = reg.iter_mut().find(|s| s.surface_id == surface_id)
+            .ok_or("Surface not found")?;
 
-    // Ownership check (Confinement)
-    if surface.owner_pid != pid {
-        return Err("Permission denied: caller is not surface owner");
+        // Ownership check (Confinement)
+        if surface.owner_pid != pid {
+            return Err("Permission denied: caller is not surface owner");
+        }
+
+        // Boundary check & clipping
+        let clip_x = x.min(surface.width);
+        let clip_y = y.min(surface.height);
+        let clip_w = w.min(surface.width.saturating_sub(clip_x));
+        let clip_h = h.min(surface.height.saturating_sub(clip_y));
+
+        surface.dirty = true;
+        surface.dirty_rect = (clip_x, clip_y, clip_w, clip_h);
+
+        (clip_x, clip_y, clip_w, clip_h)
+    };
+
+    // Notify Window Manager of the affected window area
+    let mut wm = crate::wm::WM.lock();
+    if let Some(win) = wm.windows.iter().find(|w| w.surface_id == surface_id || w.owner_pid == pid) {
+        let win_x = win.x + clip_x as i32;
+        let win_y = win.y + 20 + clip_y as i32; // title bar is 20px
+        wm.mark_damage(win_x, win_y, clip_w, clip_h);
     }
-
-    // Boundary check & clipping
-    let clip_x = x.min(surface.width);
-    let clip_y = y.min(surface.height);
-    let clip_w = w.min(surface.width.saturating_sub(clip_x));
-    let clip_h = h.min(surface.height.saturating_sub(clip_y));
-
-    surface.dirty = true;
-    surface.dirty_rect = (clip_x, clip_y, clip_w, clip_h);
 
     crate::serial_println!("[SURFACE] Process {} presented surface {} dirty_rect [{}, {}, {}, {}]",
         pid, surface_id, clip_x, clip_y, clip_w, clip_h);
@@ -150,7 +156,7 @@ pub fn present_surface(surface_id: u64, x: u32, y: u32, w: u32, h: u32) -> Resul
 /// Destroys a surface and cleans up its registry record & VMA page mapping.
 pub fn destroy_surface(surface_id: u64) -> Result<(), &'static str> {
     let pid = crate::task::process::current_pid();
-    let mut reg = SURFACE_REGISTRY.lock();
+    let mut reg = SURFACE_REGISTRY.write();
 
     let idx = reg.iter().position(|s| s.surface_id == surface_id)
         .ok_or("Surface not found")?;
@@ -175,7 +181,7 @@ pub fn destroy_surface(surface_id: u64) -> Result<(), &'static str> {
 
 /// Destroys and cleans up all surfaces owned by a terminating process (Zero-Leak Teardown).
 pub fn cleanup_surfaces_for_pid(pid: u64) {
-    let mut reg = SURFACE_REGISTRY.lock();
+    let mut reg = SURFACE_REGISTRY.write();
     let mut removed = alloc::vec::Vec::new();
 
     reg.retain(|s| {

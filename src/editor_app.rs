@@ -1221,7 +1221,7 @@ pub fn spawn_editor_app(name: &str, file_to_open: Option<&str>) -> Result<u64, &
 
     {
         let state = EditorAppState::new(win_id, pid, file_to_open);
-        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
             let phys_addr = surface.shmem_phys_addr;
             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
             state.render_to_surface(surf_ptr, EDITOR_WIDTH, EDITOR_HEIGHT);

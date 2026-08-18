@@ -153,7 +153,7 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
         .map_err(|_| "window creation failed")?;
 
     // Fill initial surface buffer with application default theme
-    if let Some(s) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+    if let Some(s) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
         let ptr = unsafe { (crate::gui::PHYS_OFFSET + s.shmem_phys_addr) as *mut u32 };
         let total_px = (app.default_w * app.default_h) as usize;
         let bg_color = match app.icon {

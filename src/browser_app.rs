@@ -273,7 +273,7 @@ pub fn spawn_browser_app(name: &str) -> Result<u64, &'static str> {
         .create_window(pid, surf_id, 80, 50, BROWSER_WIDTH, BROWSER_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
-    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+    if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
         let phys_addr = surface.shmem_phys_addr;
         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
         let state = BrowserState::new();

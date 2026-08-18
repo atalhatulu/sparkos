@@ -3,10 +3,10 @@
 //! Provides a single unified top panel replacing the bottom dock:
 //! - Top-Left: Start / Launcher trigger button (`[ ❖ SparkOS ]`)
 //! - Center-Left: Dynamic open window tabs (Active, Minimized, Focus states & icons)
-//! - Top-Right: Real-time System HUD (Uptime / Clock, Memory, Network status)
+//! - Top-Right: Real-time System HUD (HD Network Icon, Memory, Clock/Uptime)
 
 use crate::wm::{Window, WindowState};
-use crate::network_manager::NETWORK_MANAGER;
+use crate::network_manager::{NetworkState, NETWORK_MANAGER};
 
 pub struct Dock;
 
@@ -38,7 +38,7 @@ impl Dock {
 
         // 3. Orta-Sol: Açık Pencere Sekmeleri
         let mut tab_x = 102u16;
-        let right_hud_w = 200u16;
+        let right_hud_w = 210u16;
         for (idx, win) in windows.iter().enumerate() {
             if tab_x + 90 > screen_w.saturating_sub(right_hud_w) {
                 break;
@@ -71,45 +71,51 @@ impl Dock {
             crate::gui::draw_rect(tab_x, 2, 88, 1, border_col);
             crate::gui::draw_rect(tab_x, 23, 88, 1, border_col);
 
-            // Uygulama ikonu & başlığı
-            crate::gui::draw_icon_glyph(tab_x + 4, 5, win.icon, tab_fg, tab_bg);
+            // Dikey ortalanmış 16x16 HD ikon ve başlık metni
+            crate::gui::draw_icon_glyph(tab_x + 5, 5, win.icon, tab_fg, tab_bg);
             let short_title = if win.title.len() > 7 { &win.title[..7] } else { &win.title };
             crate::gui::draw_string(tab_x + 24, 7, short_title, tab_fg, tab_bg);
 
             // Aktif göstergesi
             if is_focused {
-                crate::gui::draw_rect(tab_x + 36, 21, 12, 2, 0x0060A5FA);
+                crate::gui::draw_rect(tab_x + 36, 21, 16, 2, 0x0060A5FA);
             } else if win.state != WindowState::Minimized {
-                crate::gui::draw_rect(tab_x + 40, 22, 6, 1, 0x0094A3B8);
+                crate::gui::draw_rect(tab_x + 40, 22, 8, 1, 0x0094A3B8);
             }
 
             tab_x += 92;
         }
 
         // 4. En Sağ Üst: Saat, Sistem Süresi ve Ağ/Bellek Bilgisi
-        let hud_w = 190u16;
+        let hud_w = 206u16;
         let hud_x = screen_w.saturating_sub(hud_w + 4);
         crate::gui::draw_rect(hud_x, 2, hud_w, 22, 0x001E293B);
         crate::gui::draw_rect(hud_x, 2, hud_w, 1, 0x00334155);
 
-        // Ağ durumu
-        let net_sym = NETWORK_MANAGER.lock().get_icon_symbol();
-        crate::gui::draw_string(hud_x + 6, 7, net_sym, 0x0034D399, 0x001E293B);
+        // HD Ağ İkonu (Ethernet / Wi-Fi / Bağlantı Yok)
+        let is_connected = NETWORK_MANAGER.lock().state != NetworkState::Disconnected;
+        let is_wifi = false; // Ethernet öncelikli
+        crate::icons::render_network_icon(hud_x + 6, 5, is_wifi, is_connected);
+
+        // Ağ etiketi
+        let net_lbl = if is_connected { "Online" } else { "Offline" };
+        let net_col = if is_connected { 0x0034D399 } else { 0x0094A3B8 };
+        crate::gui::draw_string(hud_x + 24, 7, net_lbl, net_col, 0x001E293B);
 
         // Bellek
         let (used_mem, _) = crate::memory::get_memory_stats();
         let mem_str = alloc::format!("{}M", (used_mem / 1048576).max(1));
-        crate::gui::draw_string(hud_x + 38, 7, &mem_str, 0x0038BDF8, 0x001E293B);
+        crate::gui::draw_string(hud_x + 76, 7, &mem_str, 0x0038BDF8, 0x001E293B);
 
-        // Saat / Süre (Uptime)
+        // Saat / Süre (Uptime) Kutusu
         let ticks = crate::interrupts::get_tick();
         let seconds = ticks / 1000;
         let mins = seconds / 60;
         let s = seconds % 60;
         let time_str = alloc::format!("{:02}:{:02}s", mins, s);
 
-        crate::gui::draw_rect(hud_x + 94, 3, 90, 20, 0x000F172A);
-        crate::gui::draw_icon_glyph(hud_x + 98, 8, crate::app_registry::AppIcon::SysMon, 0x0038BDF8, 0x000F172A);
-        crate::gui::draw_string(hud_x + 112, 7, &time_str, 0x00F8FAFC, 0x000F172A);
+        crate::gui::draw_rect(hud_x + 110, 3, 92, 20, 0x000F172A);
+        crate::icons::render_icon_16(hud_x + 114, 5, crate::app_registry::AppIcon::SysMon, 0x000F172A);
+        crate::gui::draw_string(hud_x + 134, 7, &time_str, 0x00F8FAFC, 0x000F172A);
     }
 }

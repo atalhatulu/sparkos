@@ -73,7 +73,7 @@ impl LauncherState {
 
         // Header
         crate::gui::draw_rect(px + 2, py + 2, pw - 4, 22, 0x001E293B);
-        crate::gui::draw_string(px + 8, py + 8, "SparkOS Launcher", 0x00FFFFFF, 0x001E293B);
+        crate::gui::draw_string(px + 12, py + 7, "SparkOS Apps", 0x00FFFFFF, 0x001E293B);
 
         // Registered App Items
         let mut item_y = py + 28;
@@ -89,13 +89,14 @@ impl LauncherState {
             crate::gui::draw_rect(px + pw - 5, item_y, 1, 24, border_col);
             crate::gui::draw_rect(px + 4, item_y + 23, pw - 8, 1, border_col);
 
-            crate::gui::draw_icon_glyph(px + 8, item_y + 8, app.icon, text_col, bg_col);
-            crate::gui::draw_string(px + 24, item_y + 7, app.name, text_col, bg_col);
+            // Dikey ortalanmış 16x16 HD ikon ve metin
+            crate::gui::draw_icon_glyph(px + 8, item_y + 4, app.icon, text_col, bg_col);
+            crate::gui::draw_string(px + 30, item_y + 6, app.name, text_col, bg_col);
             item_y += 28;
         }
 
         // Close launcher button
         crate::gui::draw_rect(px + 4, item_y, pw - 8, 20, 0x00334155);
-        crate::gui::draw_string(px + 40, item_y + 5, "Close Menu", 0x0094A3B8, 0x00334155);
+        crate::gui::draw_string(px + 44, item_y + 4, "Close Menu", 0x0094A3B8, 0x00334155);
     }
 }

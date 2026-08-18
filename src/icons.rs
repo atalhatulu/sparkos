@@ -1,30 +1,15 @@
-//! SparkOS Modern 16x16 & 24x24 Icon Theme Package (`src/icons.rs`)
+//! SparkOS Modern 16x16 HD Icon Theme Package (`src/icons.rs`)
 //!
 //! Provides pixel-perfect, anti-aliased RGBA icon assets for all desktop apps,
-//! system status indicators, file types, and window decorations.
-//! Inspired by modern open-source icon sets (Lucide / Tabler / Feather).
+//! network interfaces (Ethernet, Wi-Fi), system status indicators, and shell widgets.
 
 use crate::app_registry::AppIcon;
 
 pub const ICON_SIZE: usize = 16;
 pub const T: u32 = 0x00000000; // Transparent
 
-pub struct IconBitmap16 {
-    pub pixels: [u32; 16 * 16],
-}
-
-/// Helper to blend 32-bit ARGB/RGB color over background if transparent
-#[inline]
-pub fn blend_pixel(fg: u32, bg: u32) -> u32 {
-    if fg == T {
-        bg
-    } else {
-        fg
-    }
-}
-
 // ---------------------------------------------------------------------------
-// 16x16 High-Quality Icon Assets (Modern Palette)
+// Modern Color Tokens
 // ---------------------------------------------------------------------------
 
 const C_LOGO_CORE: u32 = 0x0038BDF8; // Sky 400
@@ -40,7 +25,6 @@ const C_TERM_WHT: u32  = 0x00F8FAFC; // Slate 50
 const C_FILE_FLDR: u32 = 0x00F59E0B; // Amber 500
 const C_FILE_LGT: u32  = 0x00FCD34D; // Amber 300
 const C_FILE_DRK: u32  = 0x00D97706; // Amber 600
-const C_FILE_BLU: u32  = 0x003B82F6; // Blue 500
 
 const C_EDIT_PPR: u32  = 0x00F8FAFC; // White
 const C_EDIT_LIN: u32  = 0x0094A3B8; // Slate 400
@@ -49,7 +33,6 @@ const C_EDIT_DRK: u32  = 0x00CBD5E1; // Slate 300
 
 const C_TASK_BG: u32   = 0x000F172A; // Deep Navy
 const C_TASK_GRN: u32  = 0x0034D399; // Emerald 400
-const C_TASK_RED: u32  = 0x00EF4444; // Red 500
 
 const C_SETT_MTL: u32  = 0x0094A3B8; // Slate 400
 const C_SETT_DRK: u32  = 0x00475569; // Slate 600
@@ -58,6 +41,12 @@ const C_SETT_LGT: u32  = 0x00E2E8F0; // Slate 200
 const C_GLOB_BLU: u32  = 0x003B82F6; // Blue 500
 const C_GLOB_LGT: u32  = 0x0060A5FA; // Blue 400
 const C_GLOB_WHT: u32  = 0x00E0F2FE; // Sky 100
+const C_GLOB_DRK: u32  = 0x001D4ED8; // Blue 700
+
+const C_NET_GRN: u32   = 0x0010B981; // Emerald 500 (Active Link)
+const C_NET_CYN: u32   = 0x0006B6D4; // Cyan 500
+const C_NET_GRY: u32   = 0x0064748B; // Slate 500 (Disconnected)
+const C_NET_RED: u32   = 0x00EF4444; // Red 500 (Error / Off)
 
 // 1. SparkOS Sparkle Logo (16x16)
 pub const ICON_LOGO_16: [u32; 256] = [
@@ -199,10 +188,68 @@ pub const ICON_BROWSER_16: [u32; 256] = [
     T, T, T, T, T, C_GLOB_DRK, C_GLOB_BLU, C_GLOB_BLU, C_GLOB_BLU, C_GLOB_BLU, C_GLOB_DRK, T, T, T, T, T,
 ];
 
-const C_GLOB_DRK: u32 = 0x001D4ED8; // Blue 700
+// 8. Ethernet RJ45 Connection Icon (16x16)
+pub const ICON_ETH_16: [u32; 256] = [
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, T, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_NET_GRN, C_NET_GRN, C_SETT_MTL, C_NET_GRN, C_NET_GRN, C_SETT_MTL, C_NET_GRN, C_NET_GRN, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_NET_GRN, C_NET_GRN, C_SETT_MTL, C_NET_GRN, C_NET_GRN, C_SETT_MTL, C_NET_GRN, C_NET_GRN, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_SETT_MTL, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_MTL, C_SETT_MTL, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_SETT_DRK, C_TERM_BG, C_TERM_BG, C_TERM_BG, C_TERM_BG, C_TERM_BG, C_SETT_DRK, C_SETT_MTL, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_MTL, C_SETT_DRK, C_TERM_BG, C_TERM_BG, C_TERM_BG, C_TERM_BG, C_TERM_BG, C_SETT_DRK, C_SETT_MTL, C_SETT_MTL, C_SETT_DRK, T, T, T,
+    T, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, C_SETT_DRK, T, T, T,
+    T, T, T, T, T, C_NET_GRN, C_NET_GRN, C_NET_GRN, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, C_NET_GRN, C_NET_GRN, C_NET_GRN, T, T, T, T, T, T, T, T,
+    T, T, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, T, T, T,
+    T, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, C_NET_GRN, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+];
 
-/// Renders a high-definition 16x16 icon directly onto the backbuffer
-pub fn render_icon_16(px: u16, py: u16, icon: AppIcon, bg_fallback: u32) {
+// 9. Modern Wi-Fi Wave Broadcast Icon (16x16)
+pub const ICON_WIFI_16: [u32; 256] = [
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, T, T, T,
+    T, T, C_NET_CYN, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_NET_CYN, T, T,
+    T, C_NET_CYN, C_LOGO_WHT, T, T, T, T, T, T, T, T, T, T, C_LOGO_WHT, C_NET_CYN, T,
+    T, T, T, T, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, T, T, T, T,
+    T, T, T, C_NET_CYN, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_NET_CYN, T, T, T,
+    T, T, C_NET_CYN, C_LOGO_WHT, T, T, T, T, T, T, T, T, C_LOGO_WHT, C_NET_CYN, T, T,
+    T, T, T, T, T, T, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, T, T, T, T, T, T,
+    T, T, T, T, T, C_NET_CYN, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_LOGO_WHT, C_NET_CYN, T, T, T, T, T,
+    T, T, T, T, C_NET_CYN, C_LOGO_WHT, T, T, T, T, C_LOGO_WHT, C_NET_CYN, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, C_NET_CYN, C_NET_CYN, C_NET_CYN, C_NET_CYN, T, T, T, T, T, T,
+    T, T, T, T, T, T, C_NET_CYN, C_LOGO_WHT, C_LOGO_WHT, C_NET_CYN, T, T, T, T, T, T,
+    T, T, T, T, T, T, C_NET_CYN, C_LOGO_WHT, C_LOGO_WHT, C_NET_CYN, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, C_NET_CYN, C_NET_CYN, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+];
+
+// 10. Disconnected Network (16x16)
+pub const ICON_NET_DISCONNECTED_16: [u32; 256] = [
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+    T, C_NET_RED, T, T, T, T, T, T, T, T, T, T, T, T, C_NET_RED, T,
+    T, T, C_NET_RED, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_RED, T, T,
+    T, T, C_NET_GRY, C_NET_RED, T, T, T, T, T, T, T, T, C_NET_RED, C_NET_GRY, T, T,
+    T, T, C_NET_GRY, T, C_NET_RED, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_RED, T, C_NET_GRY, T, T,
+    T, T, C_NET_GRY, T, T, C_NET_RED, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_RED, T, T, C_NET_GRY, T, T,
+    T, T, C_NET_GRY, T, T, T, C_NET_RED, T, T, C_NET_RED, T, T, T, C_NET_GRY, T, T,
+    T, T, T, T, T, T, T, C_NET_RED, C_NET_RED, T, T, T, T, T, T, T,
+    T, T, T, T, T, T, T, C_NET_RED, C_NET_RED, T, T, T, T, T, T, T,
+    T, T, C_NET_GRY, T, T, T, C_NET_RED, T, T, C_NET_RED, T, T, T, C_NET_GRY, T, T,
+    T, T, C_NET_GRY, T, T, C_NET_RED, T, T, T, T, C_NET_RED, T, T, C_NET_GRY, T, T,
+    T, T, C_NET_GRY, T, C_NET_RED, T, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, T, C_NET_RED, T, C_NET_GRY, T, T,
+    T, T, C_NET_GRY, C_NET_RED, T, T, T, T, T, T, T, T, C_NET_RED, C_NET_GRY, T, T,
+    T, T, C_NET_RED, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_GRY, C_NET_RED, T, T,
+    T, C_NET_RED, T, T, T, T, T, T, T, T, T, T, T, T, C_NET_RED, T,
+    T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T,
+];
+
+/// Renders a high-definition 16x16 icon directly onto the backbuffer with clipping support
+pub fn render_icon_16(px: u16, py: u16, icon: AppIcon, _bg_fallback: u32) {
     let data = match icon {
         AppIcon::Logo => &ICON_LOGO_16,
         AppIcon::Terminal => &ICON_TERMINAL_16,
@@ -215,6 +262,24 @@ pub fn render_icon_16(px: u16, py: u16, icon: AppIcon, bg_fallback: u32) {
         _ => &ICON_LOGO_16,
     };
 
+    render_raw_icon_16(px, py, data);
+}
+
+/// Renders network status icon (Ethernet / Wi-Fi / Disconnected)
+pub fn render_network_icon(px: u16, py: u16, is_wifi: bool, connected: bool) {
+    let data = if !connected {
+        &ICON_NET_DISCONNECTED_16
+    } else if is_wifi {
+        &ICON_WIFI_16
+    } else {
+        &ICON_ETH_16
+    };
+
+    render_raw_icon_16(px, py, data);
+}
+
+/// Core renderer with strict clipping and backbuffer boundary clamping
+pub fn render_raw_icon_16(px: u16, py: u16, data: &[u32; 256]) {
     let sw = unsafe { crate::gui::VESA.width };
     let sh = unsafe { crate::gui::VESA.height };
     let backbuffer = unsafe { crate::gui::BACKBUFFER };
@@ -227,6 +292,13 @@ pub fn render_icon_16(px: u16, py: u16, icon: AppIcon, bg_fallback: u32) {
         for col in 0..16u16 {
             let cur_x = px + col;
             if cur_x >= sw { break; }
+
+            // Clip Rect Check
+            if let Some((cx, cy, cw, ch)) = unsafe { crate::gui::CLIP_RECT } {
+                if cur_x < cx || cur_x >= cx + cw || cur_y < cy || cur_y >= cy + ch {
+                    continue;
+                }
+            }
 
             let pixel_color = data[(row as usize) * 16 + (col as usize)];
             if pixel_color != T {

@@ -126,7 +126,7 @@ pub fn spawn_sysmon_app(name: &str) -> Result<u64, &'static str> {
         .create_window(pid, surf_id, win_x, win_y, SYSMON_WIDTH, SYSMON_HEIGHT)
         .map_err(|_| "window creation failed")?;
 
-    if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+    if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
         let phys_addr = surface.shmem_phys_addr;
         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
         render_sysmon_surface(surf_ptr, SYSMON_WIDTH, SYSMON_HEIGHT);

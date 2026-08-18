@@ -221,6 +221,12 @@ pub fn draw_cursor_layer() {
                 break;
             }
 
+            if let Some((cx, cy, cw, ch)) = unsafe { crate::gui::CLIP_RECT } {
+                if px < cx || px >= cx + cw || py < cy || py >= cy + ch {
+                    continue;
+                }
+            }
+
             let symbol = bitmap[row as usize][col as usize];
             if symbol == b'*' {
                 let offset = (py as usize) * (screen_w as usize) + (px as usize);

@@ -765,8 +765,8 @@ impl Shell {
                 // Spawn Desktop V1 applications (Terminal & Files)
                 let spawn_res = crate::task::process::spawn_desktop_v1_apps();
 
-                // Immediately render the full desktop environment
-                crate::wm::WM.lock().composite_desktop(0, 0);
+                // Mark full damage for initial desktop environment paint
+                crate::wm::WM.lock().mark_full_damage();
 
                 w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
 
