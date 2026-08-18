@@ -263,8 +263,8 @@ pub async fn mouse_task() {
                         crate::desktop::DesktopIconAction::OpenApplications => {
                             crate::wm::WM.lock().launcher_open = true;
                         }
-                        crate::desktop::DesktopIconAction::OpenTrash => {
-                            let _ = crate::files_app::spawn_files_app("trash.app");
+                        crate::desktop::DesktopIconAction::OpenBrowser => {
+                            let _ = crate::browser_app::spawn_browser_app("browser.app");
                         }
                     }
                 } else if cy < 24 && cx > 1000 {

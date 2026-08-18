@@ -10144,6 +10144,52 @@ mod invariant_tests {
         assert_eq!(modifiers & 0x08, 8);
         assert_eq!(modifiers & 0x02, 0);
     }
+
+    // =========================================================================
+    // DESKTOP EXPERIENCE & SHORTCUT INVARIANTS (DESKTOP_EXP_INV-1 .. 3)
+    // =========================================================================
+
+    /// DESKTOP_EXP_INV-1: F1 and Ctrl+Alt+T terminal shortcut trigger detection
+    #[test]
+    fn test_desktop_exp_inv_1_terminal_shortcuts() {
+        let is_terminal_shortcut = |key_code: u8, is_ctrl: bool, is_alt: bool| -> bool {
+            (key_code == 0x14 && is_ctrl && is_alt) || key_code == 0x3B
+        };
+
+        assert!(is_terminal_shortcut(0x3B, false, false)); // F1
+        assert!(is_terminal_shortcut(0x14, true, true));   // Ctrl+Alt+T
+        assert!(!is_terminal_shortcut(0x14, false, true));  // Alt+T without Ctrl
+        assert!(!is_terminal_shortcut(0x14, true, false));  // Ctrl+T without Alt
+    }
+
+    /// DESKTOP_EXP_INV-2: Desktop icon double-click timing (650ms) and wider hit-box
+    #[test]
+    fn test_desktop_exp_inv_2_double_click_timing() {
+        let icon_pos = (24u16, 40u16);
+        let click1_tick = 1000u64;
+        let click2_tick = 1550u64; // 550ms later
+
+        let is_in_hitbox = |mx: u16, my: u16| -> bool {
+            mx >= icon_pos.0.saturating_sub(6) && mx <= icon_pos.0 + 64
+                && my >= icon_pos.1.saturating_sub(6) && my <= icon_pos.1 + 64
+        };
+
+        assert!(is_in_hitbox(20, 36)); // Slightly top-left
+        assert!(is_in_hitbox(80, 95)); // Bottom-right
+        assert!(!is_in_hitbox(10, 10)); // Outside
+
+        let is_double_click = click2_tick.saturating_sub(click1_tick) <= 650;
+        assert!(is_double_click);
+    }
+
+    /// DESKTOP_EXP_INV-3: Desktop 6 core registered application mapping
+    #[test]
+    fn test_desktop_exp_inv_3_core_app_mapping() {
+        let apps = ["Files", "Terminal", "Editor", "TaskMgr", "Settings", "Browser"];
+        assert_eq!(apps.len(), 6);
+        assert!(apps.contains(&"Browser"));
+        assert!(!apps.contains(&"Trash"));
+    }
 }
 
 

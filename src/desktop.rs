@@ -14,7 +14,7 @@ pub enum DesktopIconAction {
     OpenEditor,
     OpenTaskMgr,
     OpenSettings,
-    OpenTrash,
+    OpenBrowser,
     OpenApplications,
 }
 
@@ -78,9 +78,9 @@ impl DesktopEnvironment {
                 DesktopIcon {
                     id: 6,
                     position: (24, 415),
-                    icon: AppIcon::Trash,
-                    label: "Trash",
-                    action: DesktopIconAction::OpenTrash,
+                    icon: AppIcon::Browser,
+                    label: "Browser",
+                    action: DesktopIconAction::OpenBrowser,
                 },
             ],
             selected_icon_id: None,
@@ -153,9 +153,11 @@ impl DesktopEnvironment {
     pub fn handle_mouse_click(&mut self, mx: u16, my: u16, current_tick: u64) -> Option<DesktopIconAction> {
         for icon in &self.icons {
             let (ix, iy) = icon.position;
-            if mx >= ix - 4 && mx <= ix + 60 && my >= iy - 4 && my <= iy + 60 {
-                // Check for double click (within 500 ticks / ~500ms)
-                if self.last_click_id == Some(icon.id) && current_tick.saturating_sub(self.last_click_tick) <= 500 {
+            let in_x = mx >= ix.saturating_sub(6) && mx <= ix + 64;
+            let in_y = my >= iy.saturating_sub(6) && my <= iy + 64;
+            if in_x && in_y {
+                // Check for double click (within 650 ticks / ~650ms)
+                if self.last_click_id == Some(icon.id) && current_tick.saturating_sub(self.last_click_tick) <= 650 {
                     self.last_click_id = None;
                     self.last_click_tick = 0;
                     crate::serial_println!("[DESKTOP] Double-click activated icon '{}'", icon.label);

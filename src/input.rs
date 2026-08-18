@@ -203,8 +203,8 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         crate::serial_println!("[INPUT] key=0x{:02x} pressed, is_ctrl={}, is_alt={}", key_code, is_ctrl, is_alt);
     }
 
-    // 2. Global Shortcut: Ctrl+Alt+T -> Open/Spawn Terminal
-    if pressed && key_code == 0x14 && is_ctrl && is_alt {
+    // 2. Global Shortcut: Ctrl+Alt+T or F1 -> Open/Spawn Terminal
+    if pressed && ((key_code == 0x14 && is_ctrl && is_alt) || key_code == 0x3B) {
         let res = crate::terminal_app::spawn_terminal_app("terminal.app");
         match res {
             Ok(pid) => {
