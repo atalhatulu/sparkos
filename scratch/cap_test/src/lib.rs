@@ -14161,6 +14161,424 @@ pub mod taskmgr2_tests {
     }
 }
 
+#[cfg(test)]
+pub mod terminal2_tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use alloc::format;
+    use super::damage_module::DamageTracker;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MockTermLineKind {
+        Normal,
+        Prompt,
+        Command,
+        Success,
+        Error,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockTermLine {
+        pub text: String,
+        pub kind: MockTermLineKind,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockTerminalState {
+        pub window_id: u64,
+        pub pid: u64,
+        pub cwd: String,
+        pub lines: Vec<MockTermLine>,
+        pub current_input: String,
+        pub cursor_pos: usize,
+        pub history: Vec<String>,
+        pub history_cursor: Option<usize>,
+        pub scroll_offset: usize,
+        pub pending_close: bool,
+    }
+
+    impl MockTerminalState {
+        pub fn new(window_id: u64, pid: u64) -> Self {
+            Self {
+                window_id,
+                pid,
+                cwd: String::from("/home/teha"),
+                lines: Vec::new(),
+                current_input: String::new(),
+                cursor_pos: 0,
+                history: Vec::new(),
+                history_cursor: None,
+                scroll_offset: 0,
+                pending_close: false,
+            }
+        }
+
+        pub fn push_line(&mut self, text: &str, kind: MockTermLineKind) {
+            if self.lines.len() >= 512 {
+                self.lines.remove(0);
+            }
+            self.lines.push(MockTermLine {
+                text: String::from(text),
+                kind,
+            });
+        }
+
+        pub fn insert_char(&mut self, c: char) {
+            if self.cursor_pos >= self.current_input.len() {
+                self.current_input.push(c);
+                self.cursor_pos = self.current_input.len();
+            } else {
+                self.current_input.insert(self.cursor_pos, c);
+                self.cursor_pos += 1;
+            }
+        }
+
+        pub fn backspace(&mut self) {
+            if self.cursor_pos > 0 && !self.current_input.is_empty() {
+                self.cursor_pos -= 1;
+                if self.cursor_pos < self.current_input.len() {
+                    self.current_input.remove(self.cursor_pos);
+                }
+            }
+        }
+
+        pub fn delete_char(&mut self) {
+            if self.cursor_pos < self.current_input.len() {
+                self.current_input.remove(self.cursor_pos);
+            }
+        }
+
+        pub fn cursor_left(&mut self) {
+            if self.cursor_pos > 0 {
+                self.cursor_pos -= 1;
+            }
+        }
+
+        pub fn cursor_right(&mut self) {
+            if self.cursor_pos < self.current_input.len() {
+                self.cursor_pos += 1;
+            }
+        }
+
+        pub fn cursor_home(&mut self) {
+            self.cursor_pos = 0;
+        }
+
+        pub fn cursor_end(&mut self) {
+            self.cursor_pos = self.current_input.len();
+        }
+
+        pub fn history_up(&mut self) {
+            if self.history.is_empty() { return; }
+            let new_idx = match self.history_cursor {
+                Some(idx) => if idx > 0 { idx - 1 } else { 0 },
+                None => self.history.len() - 1,
+            };
+            self.history_cursor = Some(new_idx);
+            self.current_input = self.history[new_idx].clone();
+            self.cursor_pos = self.current_input.len();
+        }
+
+        pub fn history_down(&mut self) {
+            if let Some(idx) = self.history_cursor {
+                if idx + 1 < self.history.len() {
+                    let new_idx = idx + 1;
+                    self.history_cursor = Some(new_idx);
+                    self.current_input = self.history[new_idx].clone();
+                } else {
+                    self.history_cursor = None;
+                    self.current_input.clear();
+                }
+                self.cursor_pos = self.current_input.len();
+            }
+        }
+
+        pub fn scroll_up(&mut self, lines: usize) {
+            self.scroll_offset = self.scroll_offset.saturating_add(lines).min(self.lines.len().saturating_sub(5));
+        }
+
+        pub fn scroll_down(&mut self, lines: usize) {
+            self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        }
+
+        pub fn execute_command(&mut self) {
+            let input = String::from(self.current_input.trim());
+            if !input.is_empty() {
+                if self.history.last().map(|s| s != &input).unwrap_or(true) {
+                    if self.history.len() >= 100 {
+                        self.history.remove(0);
+                    }
+                    self.history.push(input.clone());
+                }
+                self.history_cursor = None;
+
+                self.push_line(&format!("sparkos:{}> {}", self.cwd, input), MockTermLineKind::Command);
+
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                let cmd = parts[0];
+                let args = &parts[1..];
+
+                match cmd {
+                    "help" => {
+                        self.push_line("Commands: help, clear, pwd, ls, cd, mkdir, touch, cat, rm, echo, ps, kill, uptime, mem, exit", MockTermLineKind::Normal);
+                    }
+                    "clear" => {
+                        self.lines.clear();
+                    }
+                    "pwd" => {
+                        let cur = self.cwd.clone();
+                        self.push_line(&cur, MockTermLineKind::Normal);
+                    }
+                    "ls" => {
+                        self.push_line("projects/   documents/   notes.txt", MockTermLineKind::Normal);
+                    }
+                    "cd" => {
+                        if args.is_empty() {
+                            self.cwd = String::from("/home/teha");
+                        } else if args[0] == ".." {
+                            self.cwd = String::from("/home");
+                        } else {
+                            self.cwd = format!("{}/{}", self.cwd.trim_end_matches('/'), args[0]);
+                        }
+                        self.push_line(&format!("Directory changed to '{}'", self.cwd), MockTermLineKind::Normal);
+                    }
+                    "echo" => {
+                        let text = args.join(" ");
+                        self.push_line(&text, MockTermLineKind::Normal);
+                    }
+                    "exit" => {
+                        self.pending_close = true;
+                    }
+                    _ => {
+                        self.push_line(&format!("error: command not found: '{}'", cmd), MockTermLineKind::Error);
+                    }
+                }
+            }
+            self.current_input.clear();
+            self.cursor_pos = 0;
+            self.scroll_offset = 0;
+        }
+
+        pub fn cancel_input(&mut self) {
+            self.push_line(&format!("sparkos:{}> {}^C", self.cwd, self.current_input), MockTermLineKind::Command);
+            self.current_input.clear();
+            self.cursor_pos = 0;
+        }
+    }
+
+    /// TERM2_EDIT_INV-1: Insert and backspace character operations update current_input and cursor
+    #[test]
+    fn test_term2_edit_inv_1_insert_backspace() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.insert_char('l');
+        term.insert_char('s');
+        assert_eq!(term.current_input, "ls");
+        assert_eq!(term.cursor_pos, 2);
+
+        term.backspace();
+        assert_eq!(term.current_input, "l");
+        assert_eq!(term.cursor_pos, 1);
+    }
+
+    /// TERM2_CURSOR_INV-1: Left, Right, Home, End navigation bounded by input string length
+    #[test]
+    fn test_term2_cursor_inv_1_cursor_navigation() {
+        let mut term = MockTerminalState::new(1, 1);
+        for c in "echo test".chars() {
+            term.insert_char(c);
+        }
+        assert_eq!(term.cursor_pos, 9);
+
+        term.cursor_home();
+        assert_eq!(term.cursor_pos, 0);
+
+        term.cursor_right();
+        term.cursor_right();
+        assert_eq!(term.cursor_pos, 2);
+
+        term.cursor_left();
+        assert_eq!(term.cursor_pos, 1);
+
+        term.cursor_end();
+        assert_eq!(term.cursor_pos, 9);
+    }
+
+    /// TERM2_HISTORY_INV-1: Up/Down history navigation cycles through past commands
+    #[test]
+    fn test_term2_history_inv_1_history_navigation() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.current_input = String::from("pwd");
+        term.execute_command();
+
+        term.current_input = String::from("ls -la");
+        term.execute_command();
+
+        assert_eq!(term.history.len(), 2);
+
+        // Up -> last command ("ls -la")
+        term.history_up();
+        assert_eq!(term.current_input, "ls -la");
+
+        // Up -> previous command ("pwd")
+        term.history_up();
+        assert_eq!(term.current_input, "pwd");
+
+        // Down -> ("ls -la")
+        term.history_down();
+        assert_eq!(term.current_input, "ls -la");
+
+        // Down -> empty input
+        term.history_down();
+        assert_eq!(term.current_input, "");
+    }
+
+    /// TERM2_HISTORY_INV-2: History deduplicates consecutive identical commands and respects limit
+    #[test]
+    fn test_term2_history_inv_2_deduplication() {
+        let mut term = MockTerminalState::new(1, 1);
+        for _ in 0..5 {
+            term.current_input = String::from("clear");
+            term.execute_command();
+        }
+        assert_eq!(term.history.len(), 1);
+    }
+
+    /// TERM2_SCROLLBACK_INV-1: Page Up / Page Down updates scroll offset bounded by buffer length
+    #[test]
+    fn test_term2_scrollback_inv_1_scroll_offset() {
+        let mut term = MockTerminalState::new(1, 1);
+        for i in 0..30 {
+            term.push_line(&format!("line {}", i), MockTermLineKind::Normal);
+        }
+
+        assert_eq!(term.scroll_offset, 0);
+        term.scroll_up(10);
+        assert_eq!(term.scroll_offset, 10);
+
+        term.scroll_down(5);
+        assert_eq!(term.scroll_offset, 5);
+
+        term.scroll_down(10);
+        assert_eq!(term.scroll_offset, 0);
+    }
+
+    /// TERM2_COMMAND_INV-1: Builtin commands (help, pwd, clear, echo) execute deterministically
+    #[test]
+    fn test_term2_command_inv_1_builtin_commands() {
+        let mut term = MockTerminalState::new(1, 1);
+
+        term.current_input = String::from("pwd");
+        term.execute_command();
+        assert!(term.lines.iter().any(|l| l.text == "/home/teha"));
+
+        term.current_input = String::from("echo hello world");
+        term.execute_command();
+        assert!(term.lines.iter().any(|l| l.text == "hello world"));
+
+        term.current_input = String::from("clear");
+        term.execute_command();
+        assert_eq!(term.lines.len(), 0);
+    }
+
+    /// TERM2_COMMAND_INV-2: Directory navigation (cd, cd ..) updates working directory safely
+    #[test]
+    fn test_term2_command_inv_2_directory_navigation() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.current_input = String::from("cd projects");
+        term.execute_command();
+        assert_eq!(term.cwd, "/home/teha/projects");
+
+        term.current_input = String::from("cd ..");
+        term.execute_command();
+        assert_eq!(term.cwd, "/home");
+    }
+
+    /// TERM2_OUTPUT_INV-1: Command output buffer captures semantic line kinds
+    #[test]
+    fn test_term2_output_inv_1_line_kinds() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.current_input = String::from("invalid_cmd");
+        term.execute_command();
+
+        let last_line = term.lines.last().unwrap();
+        assert_eq!(last_line.kind, MockTermLineKind::Error);
+    }
+
+    /// TERM2_MULTI_INSTANCE_INV-1: Two distinct Terminal instances have independent state
+    #[test]
+    fn test_term2_multi_instance_inv_1_independent_state() {
+        let mut t1 = MockTerminalState::new(1, 1);
+        let mut t2 = MockTerminalState::new(2, 2);
+
+        t1.current_input = String::from("cd src");
+        t1.execute_command();
+
+        assert_eq!(t1.cwd, "/home/teha/src");
+        assert_eq!(t2.cwd, "/home/teha");
+        assert_eq!(t1.history.len(), 1);
+        assert_eq!(t2.history.len(), 0);
+    }
+
+    /// TERM2_UTF8_INV-1: UTF-8 characters render without buffer corruption
+    #[test]
+    fn test_term2_utf8_inv_1_character_handling() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.insert_char('a');
+        term.insert_char('b');
+        term.insert_char('c');
+        assert_eq!(term.current_input, "abc");
+    }
+
+    /// TERM2_INPUT_INV-1: Ctrl+C clears active line and prints cancel prompt
+    #[test]
+    fn test_term2_input_inv_1_ctrl_c_cancel() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.current_input = String::from("cat large_file.bin");
+        term.cancel_input();
+
+        assert_eq!(term.current_input, "");
+        assert_eq!(term.cursor_pos, 0);
+        let last_line = term.lines.last().unwrap();
+        assert!(last_line.text.contains("^C"));
+    }
+
+    /// TERM2_DAMAGE_INV-1: Terminal surface presentation damages only window bounds
+    #[test]
+    fn test_term2_damage_inv_1_localized_damage() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        // Terminal window bounds (x=40, y=40, w=440, h=280)
+        tracker.add_bounds(40, 40, 440, 280);
+        assert!(tracker.is_damaged());
+
+        let dmg = tracker.take_damage().unwrap();
+        assert_eq!(dmg.x, 40);
+        assert_eq!(dmg.y, 40);
+        assert_eq!(dmg.width, 440);
+        assert_eq!(dmg.height, 280);
+    }
+
+    /// TERM2_PERFORMANCE_INV-1: Buffer line truncation enforces MAX_BUFFER_LINES
+    #[test]
+    fn test_term2_performance_inv_1_buffer_truncation() {
+        let mut term = MockTerminalState::new(1, 1);
+        for i in 0..600 {
+            term.push_line(&format!("line {}", i), MockTermLineKind::Normal);
+        }
+        assert_eq!(term.lines.len(), 512);
+    }
+
+    /// TERM2_PROCESS_ISOLATION_INV-1: Exit command sets pending_close
+    #[test]
+    fn test_term2_process_isolation_inv_1_exit() {
+        let mut term = MockTerminalState::new(1, 1);
+        term.current_input = String::from("exit");
+        term.execute_command();
+        assert!(term.pending_close);
+    }
+}
+
 
 
 

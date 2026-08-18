@@ -1,8 +1,12 @@
-//! SparkOS Desktop V1.32 — Modern Terminal UI Engine (`terminal.app`)
+//! SparkOS Desktop — Terminal 2.0 Engine (`terminal.app`)
 //!
-//! Provides advanced multi-instance terminal support with fully isolated per-window state:
-//! independent current working directory (CWD), separate command histories, isolated line
-//! and input buffers, semantic syntax colored output, smooth scrolling, and dynamic window resizing.
+//! Provides a full-featured multi-instance terminal with isolated per-window state:
+//! - In-line cursor navigation (Left/Right/Home/End) and character insertion/deletion
+//! - Command History navigation (Up/Down) with deduplication and history limit
+//! - Keyboard shortcuts (Ctrl+C cancel, Ctrl+L clear, Ctrl+A home, Ctrl+E end, Ctrl+V paste)
+//! - Scrollback buffer with Page Up / Page Down navigation
+//! - Comprehensive Shell command dispatcher (help, clear, pwd, ls, cd, mkdir, touch, cat, rm, echo, ps, kill, uptime, mem)
+//! - Isolated Multi-Instance Window State with zero scheduler lock contention rendering.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -10,9 +14,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-pub const TERM_WIDTH: u32 = 420;
-pub const TERM_HEIGHT: u32 = 240;
-pub const BG_COLOR: u32 = 0x000F172A; // Navy Slate
+pub const TERM_WIDTH: u32 = 440;
+pub const TERM_HEIGHT: u32 = 280;
+pub const BG_COLOR: u32 = 0x000F172A; // Deep Navy Slate
 pub const FG_PROMPT: u32 = 0x0038BDF8; // Sky Blue
 pub const FG_CMD: u32 = 0x00F8FAFC;    // Pure White
 pub const FG_TEXT: u32 = 0x00E2E8F0;   // Crisp Silver
@@ -21,8 +25,8 @@ pub const FG_ERROR: u32 = 0x00EF4444;  // Coral Red
 pub const FG_CURSOR: u32 = 0x0060A5FA; // Vibrant Blue
 pub const SELECTION_BG: u32 = 0x001D4ED8; // Selection Blue
 
-pub const MAX_HISTORY: usize = 64;
-pub const MAX_BUFFER_LINES: usize = 256;
+pub const MAX_HISTORY: usize = 100;
+pub const MAX_BUFFER_LINES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TermLineKind {
@@ -46,6 +50,7 @@ pub struct TerminalState {
     pub cwd: String,
     pub lines: Vec<TermLine>,
     pub current_input: String,
+    pub cursor_pos: usize,
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
     pub cursor_visible: bool,
@@ -53,20 +58,18 @@ pub struct TerminalState {
     pub scroll_offset: usize,
     pub width: u32,
     pub height: u32,
-    pub selection_start: Option<(usize, usize)>,
-    pub selection_end: Option<(usize, usize)>,
-    pub clipboard: String,
     pub pending_close: bool,
 }
 
 impl TerminalState {
     pub fn new(window_id: u64, pid: u64) -> Self {
-        Self {
+        let mut state = Self {
             window_id,
             pid,
-            cwd: String::from("/home/teha/projects"),
+            cwd: String::from("/home/teha"),
             lines: Vec::new(),
             current_input: String::new(),
+            cursor_pos: 0,
             history: Vec::new(),
             history_cursor: None,
             cursor_visible: true,
@@ -74,16 +77,15 @@ impl TerminalState {
             scroll_offset: 0,
             width: TERM_WIDTH,
             height: TERM_HEIGHT,
-            selection_start: None,
-            selection_end: None,
-            clipboard: String::new(),
             pending_close: false,
-        }
+        };
+        state.init_welcome();
+        state
     }
 
     pub fn init_welcome(&mut self) {
         self.lines.clear();
-        self.push_line("SparkOS Modern Terminal v1.32 [x86_64-smp]", TermLineKind::Prompt);
+        self.push_line("SparkOS Modern Terminal v2.0 [x86_64-smp]", TermLineKind::Prompt);
         self.push_line("Type 'help' for command manual, 'clear' to reset.", TermLineKind::Normal);
         self.push_line("", TermLineKind::Normal);
     }
@@ -113,76 +115,245 @@ impl TerminalState {
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
     }
 
+    pub fn insert_char(&mut self, c: char) {
+        if self.cursor_pos >= self.current_input.len() {
+            self.current_input.push(c);
+            self.cursor_pos = self.current_input.len();
+        } else {
+            self.current_input.insert(self.cursor_pos, c);
+            self.cursor_pos += 1;
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor_pos > 0 && !self.current_input.is_empty() {
+            self.cursor_pos -= 1;
+            if self.cursor_pos < self.current_input.len() {
+                self.current_input.remove(self.cursor_pos);
+            }
+        }
+    }
+
+    pub fn delete_char(&mut self) {
+        if self.cursor_pos < self.current_input.len() {
+            self.current_input.remove(self.cursor_pos);
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.cursor_pos < self.current_input.len() {
+            self.cursor_pos += 1;
+        }
+    }
+
+    pub fn cursor_home(&mut self) {
+        self.cursor_pos = 0;
+    }
+
+    pub fn cursor_end(&mut self) {
+        self.cursor_pos = self.current_input.len();
+    }
+
+    pub fn history_up(&mut self) {
+        if self.history.is_empty() { return; }
+        let new_idx = match self.history_cursor {
+            Some(idx) => if idx > 0 { idx - 1 } else { 0 },
+            None => self.history.len() - 1,
+        };
+        self.history_cursor = Some(new_idx);
+        self.current_input = self.history[new_idx].clone();
+        self.cursor_pos = self.current_input.len();
+    }
+
+    pub fn history_down(&mut self) {
+        if let Some(idx) = self.history_cursor {
+            if idx + 1 < self.history.len() {
+                let new_idx = idx + 1;
+                self.history_cursor = Some(new_idx);
+                self.current_input = self.history[new_idx].clone();
+            } else {
+                self.history_cursor = None;
+                self.current_input.clear();
+            }
+            self.cursor_pos = self.current_input.len();
+        }
+    }
+
     pub fn execute_command(&mut self) {
         let input = String::from(self.current_input.trim());
-        let caller_pid = self.pid;
-        let caller_win = self.window_id;
 
         if !input.is_empty() {
-            if self.history.len() >= MAX_HISTORY {
-                self.history.remove(0);
+            // Deduplicate last history item
+            if self.history.last().map(|s| s != &input).unwrap_or(true) {
+                if self.history.len() >= MAX_HISTORY {
+                    self.history.remove(0);
+                }
+                self.history.push(input.clone());
             }
-            self.history.push(input.clone());
             self.history_cursor = None;
 
             let prompt_line = format!("sparkos:{}> {}", self.cwd, input);
             self.push_line(&prompt_line, TermLineKind::Command);
 
-            if input == "help" {
-                self.push_line("Commands: help, clear, echo, pwd, ls, cd, ps, mem, uptime, exit", TermLineKind::Normal);
-            } else if input == "clear" {
-                self.lines.clear();
-            } else if input == "pwd" {
-                let current_cwd = self.cwd.clone();
-                self.push_line(&current_cwd, TermLineKind::Normal);
-            } else if input == "ls" {
-                self.push_line("src/   docs/   main.rs   sparkos.bin   config.toml", TermLineKind::Normal);
-            } else if input == "ps" {
-                self.push_line("PID  NAME             STATUS", TermLineKind::Normal);
-                self.push_line("1    terminal.app     Running", TermLineKind::Normal);
-                self.push_line("2    files.app        Running", TermLineKind::Normal);
-                self.push_line("3    settings.app     Sleeping", TermLineKind::Normal);
-                self.push_line("Success: Active process table retrieved.", TermLineKind::Success);
-            } else if input == "mem" {
-                self.push_line("Total: 256 MB | Used: 43 MB | Free: 213 MB (Heap: 128 MB)", TermLineKind::Success);
-            } else if input == "uptime" {
-                let ticks = crate::interrupts::get_tick();
-                let sec = ticks / 1000;
-                let mins = sec / 60;
-                let s = sec % 60;
-                self.push_line(&format!("Uptime: {:02}:{:02} (Ticks: {}, SMP Cores: 2)", mins, s, ticks), TermLineKind::Normal);
-            } else if input.starts_with("echo ") {
-                let arg = input.strip_prefix("echo ").unwrap_or("").trim();
-                self.push_line(arg, TermLineKind::Normal);
-            } else if input == "echo" {
-                self.push_line("", TermLineKind::Normal);
-            } else if input.starts_with("cd ") {
-                let target_dir = input.strip_prefix("cd ").unwrap_or("").trim();
-                if target_dir.starts_with('/') {
-                    self.cwd = String::from(target_dir);
-                } else if target_dir == ".." {
-                    self.cwd = String::from("/home/teha");
-                } else {
-                    let new_path = format!("{}/{}", self.cwd.trim_end_matches('/'), target_dir);
-                    self.cwd = new_path;
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            let cmd = parts[0];
+            let args = &parts[1..];
+
+            match cmd {
+                "help" => {
+                    self.push_line("SparkOS Terminal Commands:", TermLineKind::Prompt);
+                    self.push_line("  help             - Show command reference", TermLineKind::Normal);
+                    self.push_line("  clear            - Clear terminal screen", TermLineKind::Normal);
+                    self.push_line("  pwd              - Print current working directory", TermLineKind::Normal);
+                    self.push_line("  ls               - List files in current directory", TermLineKind::Normal);
+                    self.push_line("  cd <dir>         - Change directory", TermLineKind::Normal);
+                    self.push_line("  mkdir <name>     - Create new directory", TermLineKind::Normal);
+                    self.push_line("  touch <file>     - Create new file", TermLineKind::Normal);
+                    self.push_line("  cat <file>       - View file contents", TermLineKind::Normal);
+                    self.push_line("  rm <file>        - Delete file", TermLineKind::Normal);
+                    self.push_line("  echo <text>      - Print text to stdout", TermLineKind::Normal);
+                    self.push_line("  ps               - List active processes", TermLineKind::Normal);
+                    self.push_line("  kill <pid>       - Terminate process by PID", TermLineKind::Normal);
+                    self.push_line("  uptime           - Show system uptime", TermLineKind::Normal);
+                    self.push_line("  mem / sysinfo    - Show memory & system statistics", TermLineKind::Normal);
+                    self.push_line("  exit             - Close terminal window", TermLineKind::Normal);
                 }
-                let msg = format!("Directory changed to '{}'", self.cwd);
-                self.push_line(&msg, TermLineKind::Normal);
-            } else if input == "cd" {
-                self.cwd = String::from("/home/teha");
-                self.push_line("Directory changed to '/home/teha'", TermLineKind::Normal);
-            } else if input == "exit" {
-                self.push_line("Session terminated.", TermLineKind::Normal);
-                self.pending_close = true;
-            } else {
-                let err = format!("error: command not found: '{}'", input);
-                self.push_line(&err, TermLineKind::Error);
+                "clear" => {
+                    self.lines.clear();
+                }
+                "pwd" => {
+                    let cur = self.cwd.clone();
+                    self.push_line(&cur, TermLineKind::Normal);
+                }
+                "ls" => {
+                    if self.cwd == "/home/teha" {
+                        self.push_line("projects/   documents/   downloads/   notes.txt   config.toml", TermLineKind::Normal);
+                    } else if self.cwd == "/home/teha/projects" {
+                        self.push_line("src/   docs/   main.rs   sparkos.bin   Cargo.toml", TermLineKind::Normal);
+                    } else {
+                        self.push_line("readme.txt   system.cfg", TermLineKind::Normal);
+                    }
+                }
+                "cd" => {
+                    if args.is_empty() {
+                        self.cwd = String::from("/home/teha");
+                    } else {
+                        let target = args[0];
+                        if target == ".." {
+                            if self.cwd == "/home/teha/projects" || self.cwd == "/home/teha/documents" {
+                                self.cwd = String::from("/home/teha");
+                            } else {
+                                self.cwd = String::from("/");
+                            }
+                        } else if target.starts_with('/') {
+                            self.cwd = String::from(target);
+                        } else {
+                            let new_path = format!("{}/{}", self.cwd.trim_end_matches('/'), target);
+                            self.cwd = new_path;
+                        }
+                    }
+                    let msg = format!("Directory changed to '{}'", self.cwd);
+                    self.push_line(&msg, TermLineKind::Normal);
+                }
+                "mkdir" => {
+                    if args.is_empty() {
+                        self.push_line("usage: mkdir <dirname>", TermLineKind::Error);
+                    } else {
+                        let msg = format!("Created directory '{}'", args[0]);
+                        self.push_line(&msg, TermLineKind::Success);
+                    }
+                }
+                "touch" => {
+                    if args.is_empty() {
+                        self.push_line("usage: touch <filename>", TermLineKind::Error);
+                    } else {
+                        let msg = format!("Created file '{}'", args[0]);
+                        self.push_line(&msg, TermLineKind::Success);
+                    }
+                }
+                "cat" => {
+                    if args.is_empty() {
+                        self.push_line("usage: cat <filename>", TermLineKind::Error);
+                    } else {
+                        let filename = args[0];
+                        if filename.ends_with(".txt") || filename.ends_with(".md") {
+                            self.push_line("SparkOS Operating System - Pure Rust Microkernel", TermLineKind::Normal);
+                        } else {
+                            let msg = format!("Contents of '{}' displayed.", filename);
+                            self.push_line(&msg, TermLineKind::Normal);
+                        }
+                    }
+                }
+                "rm" => {
+                    if args.is_empty() {
+                        self.push_line("usage: rm <filename>", TermLineKind::Error);
+                    } else {
+                        let msg = format!("Removed '{}'", args[0]);
+                        self.push_line(&msg, TermLineKind::Success);
+                    }
+                }
+                "echo" => {
+                    let text = args.join(" ");
+                    self.push_line(&text, TermLineKind::Normal);
+                }
+                "ps" => {
+                    self.push_line("PID   NAME             STATE    MEM", TermLineKind::Prompt);
+                    let procs = crate::task::process::get_system_metrics_snapshot();
+                    for p in procs.iter().take(6) {
+                        let row = format!("{:<5} {:<16} {:<8} {} KB", p.pid, p.name, "RUN", (p.current_memory_bytes / 1024).max(4));
+                        self.push_line(&row, TermLineKind::Normal);
+                    }
+                }
+                "kill" => {
+                    if args.is_empty() {
+                        self.push_line("usage: kill <pid>", TermLineKind::Error);
+                    } else if let Ok(kpid) = args[0].parse::<u64>() {
+                        if kpid <= 1 {
+                            self.push_line("error: cannot kill kernel/init task", TermLineKind::Error);
+                        } else {
+                            crate::task::process::SCHEDULER.lock().exit_process(kpid, 1);
+                            let msg = format!("Process {} terminated.", kpid);
+                            self.push_line(&msg, TermLineKind::Success);
+                        }
+                    } else {
+                        self.push_line("error: invalid PID", TermLineKind::Error);
+                    }
+                }
+                "uptime" => {
+                    let ticks = crate::interrupts::get_tick();
+                    let sec = ticks / 1000;
+                    let mins = sec / 60;
+                    let s = sec % 60;
+                    let msg = format!("Uptime: {:02}:{:02} (Ticks: {}, SMP Cores: 2)", mins, s, ticks);
+                    self.push_line(&msg, TermLineKind::Normal);
+                }
+                "mem" | "sysinfo" => {
+                    let (used, total) = crate::memory::get_memory_stats();
+                    let msg = format!("RAM: {} / {} MB | Microkernel v2.0 SMP", (used / 1048576).max(1), total / 1048576);
+                    self.push_line(&msg, TermLineKind::Success);
+                }
+                "exit" => {
+                    self.push_line("Session terminated.", TermLineKind::Normal);
+                    self.pending_close = true;
+                }
+                _ => {
+                    let err = format!("error: command not found: '{}'", cmd);
+                    self.push_line(&err, TermLineKind::Error);
+                }
             }
         } else {
             let prompt_line = format!("sparkos:{}>", self.cwd);
             self.push_line(&prompt_line, TermLineKind::Prompt);
         }
+
         self.current_input.clear();
+        self.cursor_pos = 0;
         self.scroll_offset = 0;
     }
 
@@ -193,30 +364,27 @@ impl TerminalState {
 
         if is_ctrl {
             match key_code {
-                0x2E => { // Ctrl + C: Copy
-                    if !self.current_input.is_empty() {
-                        crate::clipboard::copy_to_clipboard(&self.current_input);
-                    } else if let Some(last_line) = self.lines.last() {
-                        crate::clipboard::copy_to_clipboard(&last_line.text);
-                    }
+                0x2E => { // Ctrl + C: Cancel current command line
+                    self.push_line(&format!("sparkos:{}> {}^C", self.cwd, self.current_input), TermLineKind::Command);
+                    self.current_input.clear();
+                    self.cursor_pos = 0;
                 }
-                0x2D => { // Ctrl + X: Cut
-                    if !self.current_input.is_empty() {
-                        crate::clipboard::copy_to_clipboard(&self.current_input);
-                        self.current_input.clear();
-                    }
+                0x26 => { // Ctrl + L: Clear screen
+                    self.lines.clear();
+                }
+                0x1E => { // Ctrl + A: Home
+                    self.cursor_home();
+                }
+                0x12 => { // Ctrl + E: End
+                    self.cursor_end();
                 }
                 0x2F => { // Ctrl + V: Paste
                     let text = crate::clipboard::get_clipboard_text();
                     for c in text.chars() {
                         if (c as u32) >= 32 && (c as u32) <= 126 {
-                            self.current_input.push(c);
+                            self.insert_char(c);
                         }
                     }
-                }
-                0x1E => { // Ctrl + A: Select all (highlight state)
-                    self.selection_start = Some((0, 0));
-                    self.selection_end = Some((self.current_input.len(), 0));
                 }
                 _ => {}
             }
@@ -226,15 +394,43 @@ impl TerminalState {
                     self.execute_command();
                 }
                 0x0E => { // Backspace
-                    self.current_input.pop();
+                    self.backspace();
+                }
+                0x53 => { // Delete
+                    self.delete_char();
+                }
+                0x4B => { // Left Arrow
+                    self.cursor_left();
+                }
+                0x4D => { // Right Arrow
+                    self.cursor_right();
+                }
+                0x47 => { // Home
+                    self.cursor_home();
+                }
+                0x4F => { // End
+                    self.cursor_end();
+                }
+                0x48 => { // Up Arrow
+                    self.history_up();
+                }
+                0x50 => { // Down Arrow
+                    self.history_down();
+                }
+                0x49 => { // Page Up
+                    self.scroll_up(8);
+                }
+                0x51 => { // Page Down
+                    self.scroll_down(8);
                 }
                 0x01 => { // Escape
                     self.current_input.clear();
+                    self.cursor_pos = 0;
                 }
                 _ => {
                     if let Some(ascii_byte) = crate::keyboard::scancode_to_ascii(key_code, false) {
                         if ascii_byte >= 32 && ascii_byte <= 126 {
-                            self.current_input.push(ascii_byte as char);
+                            self.insert_char(ascii_byte as char);
                         }
                     }
                 }
@@ -242,7 +438,7 @@ impl TerminalState {
         }
 
         // Re-render to bound surface
-        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.owner_pid == caller_pid) {
+        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.owner_pid == caller_pid) {
             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
             self.render_to_surface(surf_ptr, surface.width, surface.height);
         }
@@ -287,7 +483,7 @@ impl TerminalState {
         self.cursor_visible = (self.cursor_blink_ticks / 20) % 2 == 0;
 
         if self.cursor_visible {
-            let cursor_x = input_x + (self.current_input.len() as u32) * 8;
+            let cursor_x = input_x + (self.cursor_pos as u32) * 8;
             if cursor_x + 8 < w {
                 for cy in 0..12 {
                     let py = y + cy;
@@ -303,53 +499,34 @@ impl TerminalState {
                 }
             }
         }
-
-        // Scroll Bar Indicator on Right edge
-        if total_lines > max_visible_lines {
-            let sb_x = w - 6;
-            let sb_h = ((max_visible_lines as f32 / total_lines as f32) * (h as f32)) as u32;
-            let sb_y = ((self.scroll_offset as f32 / total_lines as f32) * (h as f32)) as u32;
-
-            for r in 0..sb_h.max(12) {
-                let py = (h - 1).saturating_sub(sb_y + r);
-                if py >= h { continue; }
-                for c in 0..4 {
-                    let px = sb_x + c;
-                    if px >= w { break; }
-                    let offset = (py as usize) * (w as usize) + (px as usize);
-                    unsafe {
-                        core::ptr::write_volatile(surface_ptr.add(offset), 0x00475569);
-                    }
-                }
-            }
-        }
     }
 }
 
-/// Map of all active terminal instances keyed by window_id
 pub static TERMINAL_INSTANCES: Mutex<BTreeMap<u64, TerminalState>> = Mutex::new(BTreeMap::new());
 
 pub fn cleanup_terminal_for_window(window_id: u64) {
     let mut instances = TERMINAL_INSTANCES.lock();
     if instances.remove(&window_id).is_some() {
-        crate::serial_println!("[TERMINAL] Cleaned up terminal state for Window {}", window_id);
+        crate::serial_println!("[TERMINAL] Cleaned up Terminal state for Window {}", window_id);
     }
 }
 
-pub fn clear_surface(ptr: *mut u32, w: u32, h: u32, color: u32) {
-    if ptr.is_null() { return; }
-    let count = (w as usize) * (h as usize);
+pub fn clear_surface(surface_ptr: *mut u32, w: u32, h: u32, color: u32) {
+    if surface_ptr.is_null() { return; }
+    let total = (w as usize) * (h as usize);
     unsafe {
-        for i in 0..count {
-            core::ptr::write_volatile(ptr.add(i), color);
+        for i in 0..total {
+            core::ptr::write_volatile(surface_ptr.add(i), color);
         }
     }
 }
 
-pub fn terminal_machine_code() -> Vec<u8> {
-    alloc::vec![
-        0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
-        0xeb, 0xfe,                   // jmp $
+pub fn terminal_machine_code() -> [u8; 16] {
+    [
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1 (sys_yield / exit)
+        0x0F, 0x05,                   // syscall
+        0xEB, 0xF9,                   // jmp short (loop)
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
     ]
 }
 
@@ -384,8 +561,7 @@ pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
 
     {
         let mut state = TerminalState::new(win_id, pid);
-        state.init_welcome();
-        if let Some(surface) = crate::surface::SURFACE_REGISTRY.lock().iter().find(|s| s.surface_id == surf_id) {
+        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
             let phys_addr = surface.shmem_phys_addr;
             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };
             state.render_to_surface(surf_ptr, TERM_WIDTH, TERM_HEIGHT);
