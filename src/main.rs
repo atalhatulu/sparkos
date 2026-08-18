@@ -101,30 +101,24 @@ entry_point!(kernel_main);
 
 async fn clock_task() {
     loop {
-        let current_tick = crate::interrupts::get_tick();
-        let seconds = current_tick / 1000;
-        
-        let mut time_str = alloc::string::String::new();
-        core::fmt::write(&mut time_str, format_args!(" UP: {:04}s ", seconds)).unwrap();
-        
         if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
-            let (sw, sh) = unsafe { (crate::gui::VESA.width, crate::gui::VESA.height) };
-            if sw >= 100 && sh >= 30 {
-                let mut px = sw.saturating_sub(95);
-                for c in time_str.chars() {
-                    crate::gui::draw_char(px, sh.saturating_sub(18), c, 0x00E2E8F0, 0x000F172A);
-                    px += 8;
-                }
-                crate::gui::flush_rect(sw.saturating_sub(100), sh.saturating_sub(24), 96, 24);
-            }
+            let sw = unsafe { crate::gui::VESA.width as u32 };
+            // Üst panelin sağ saat / sistem HUD alanını hasar olarak işaretle
+            let hud_w = 210u32;
+            let hud_x = sw.saturating_sub(hud_w);
+            crate::wm::WM.lock().mark_damage(hud_x as i32, 0, hud_w, crate::wm::DOCK_HEIGHT as u32 + 2);
         } else {
+            let current_tick = crate::interrupts::get_tick();
+            let seconds = current_tick / 1000;
+            let mut time_str = alloc::string::String::new();
+            core::fmt::write(&mut time_str, format_args!(" UP: {:04}s ", seconds)).unwrap();
             let mut w = crate::vga_buffer::WRITE_LOCK.lock();
             w.write_at(0, 69, &time_str, crate::vga_buffer::Color::Yellow, crate::vga_buffer::Color::Blue);
         }
         
-        // 24 FPS hissi ve saat guncellemesi (1000ms / 24 ~ 41ms ama saniye basi guncellesek de yeter. User 24fps dedigi icin
-        // ~41 ms bekleyebiliriz ya da saat oldugu icin 1 saniye bekleriz. Ama arayuz animasyonu istediyse 41 ms yapalim)
-        let target = current_tick + 41; // ~24 FPS refresh rate
+        // 500 ms periyotla saat HUD'ını canlı ve akıcı güncelle
+        let current_tick = crate::interrupts::get_tick();
+        let target = current_tick + 500;
         while crate::interrupts::get_tick() < target {
             crate::task::yield_now().await;
         }

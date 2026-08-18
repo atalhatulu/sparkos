@@ -196,6 +196,12 @@ impl WindowManager {
         self.damage_tracker.add_full_screen(sw, sh);
     }
 
+    /// Marks the unified top panel as damaged.
+    pub fn mark_top_bar_damage(&mut self) {
+        let max_w = unsafe { crate::gui::VESA.width as u32 };
+        self.mark_damage(0, 0, max_w, DOCK_HEIGHT as u32 + 2);
+    }
+
     /// Creates a new window with custom metadata (title and icon).
     pub fn create_window_with_meta(
         &mut self,
@@ -260,7 +266,7 @@ impl WindowManager {
         self.touch_mru(window_id);
 
         self.mark_window_damage(clamped_x, clamped_y, clamped_w, clamped_h);
-        self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
+        self.mark_top_bar_damage();
 
         // Register window attachment in process PCB
         {
@@ -357,7 +363,7 @@ impl WindowManager {
         };
 
         self.mark_window_damage(win_x, win_y, win_w, win_h);
-        self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
+        self.mark_top_bar_damage();
 
         if self.focused_window == Some(window_id) {
             self.focused_window = self.windows.iter().rev().find(|w| w.visible && w.state != WindowState::Minimized).map(|w| w.window_id);
@@ -431,7 +437,7 @@ impl WindowManager {
             (win.x, win.y, win.width, win.height)
         };
         self.mark_window_damage(win_x, win_y, win_w, win_h);
-        self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
+        self.mark_top_bar_damage();
         self.raise_to_top_internal(window_id)
     }
 
@@ -754,7 +760,7 @@ impl WindowManager {
         self.clean_mru();
 
         self.mark_window_damage(old_x, old_y, old_w, old_h);
-        self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
+        self.mark_top_bar_damage();
 
         if self.focused_window == Some(window_id) {
             // Transfer focus to the next topmost visible window
@@ -889,9 +895,7 @@ impl WindowManager {
         win.focused = true;
         self.focused_window = Some(window_id);
         self.mark_window_damage(win.x, win.y, win.width, win.height);
-        let max_w = unsafe { crate::gui::VESA.width as u32 };
-        let max_h = unsafe { crate::gui::VESA.height as u32 };
-        self.mark_damage(0, (max_h - DOCK_HEIGHT as u32) as i32, max_w, DOCK_HEIGHT as u32);
+        self.mark_top_bar_damage();
         self.windows.push(win);
         self.touch_mru(window_id);
         Ok(())
