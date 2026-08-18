@@ -81,6 +81,14 @@ pub struct Window {
     pub icon: crate::app_registry::AppIcon,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapPreview {
+    None,
+    Left,
+    Right,
+    Maximized,
+}
+
 #[derive(Debug, Clone)]
 pub struct AltTabSwitcher {
     pub active: bool,
@@ -105,6 +113,7 @@ pub struct WindowManager {
     pub focused_window: Option<u64>,
     pub mru_list: Vec<u64>,
     pub alt_tab: AltTabSwitcher,
+    pub snap_preview: SnapPreview,
     pub dragging_window: Option<(u64, i32, i32)>,
     pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
     pub hovered_target: Option<HoverTarget>,
@@ -122,6 +131,7 @@ impl WindowManager {
             focused_window: None,
             mru_list: Vec::new(),
             alt_tab: AltTabSwitcher::new(),
+            snap_preview: SnapPreview::None,
             dragging_window: None,
             resizing_window: None,
             hovered_target: None,
@@ -1073,6 +1083,39 @@ impl WindowManager {
         }
         drop(surf_reg);
 
+        // 3e. Snap Preview Box Overlay (when window dragging near edge)
+        match self.snap_preview {
+            SnapPreview::Left => {
+                let pw = screen_w / 2;
+                let ph = dock_y.saturating_sub(WORK_AREA_TOP as u16 + 20);
+                crate::gui::draw_rect(0, WORK_AREA_TOP as u16, pw, ph, 0x001E293B);
+                crate::gui::draw_rect(0, WORK_AREA_TOP as u16, pw, 2, 0x003B82F6);
+                crate::gui::draw_rect(0, WORK_AREA_TOP as u16, 2, ph, 0x003B82F6);
+                crate::gui::draw_rect(pw.saturating_sub(2), WORK_AREA_TOP as u16, 2, ph, 0x003B82F6);
+                crate::gui::draw_rect(0, (WORK_AREA_TOP as u16) + ph.saturating_sub(2), pw, 2, 0x003B82F6);
+            }
+            SnapPreview::Right => {
+                let px = screen_w / 2;
+                let pw = screen_w - px;
+                let ph = dock_y.saturating_sub(WORK_AREA_TOP as u16 + 20);
+                crate::gui::draw_rect(px, WORK_AREA_TOP as u16, pw, ph, 0x001E293B);
+                crate::gui::draw_rect(px, WORK_AREA_TOP as u16, pw, 2, 0x003B82F6);
+                crate::gui::draw_rect(px, WORK_AREA_TOP as u16, 2, ph, 0x003B82F6);
+                crate::gui::draw_rect(px + pw.saturating_sub(2), WORK_AREA_TOP as u16, 2, ph, 0x003B82F6);
+                crate::gui::draw_rect(px, (WORK_AREA_TOP as u16) + ph.saturating_sub(2), pw, 2, 0x003B82F6);
+            }
+            SnapPreview::Maximized => {
+                let pw = screen_w;
+                let ph = dock_y.saturating_sub(WORK_AREA_TOP as u16 + 20);
+                crate::gui::draw_rect(0, WORK_AREA_TOP as u16, pw, ph, 0x001E293B);
+                crate::gui::draw_rect(0, WORK_AREA_TOP as u16, pw, 2, 0x003B82F6);
+                crate::gui::draw_rect(0, WORK_AREA_TOP as u16, 2, ph, 0x003B82F6);
+                crate::gui::draw_rect(pw.saturating_sub(2), WORK_AREA_TOP as u16, 2, ph, 0x003B82F6);
+                crate::gui::draw_rect(0, (WORK_AREA_TOP as u16) + ph.saturating_sub(2), pw, 2, 0x003B82F6);
+            }
+            SnapPreview::None => {}
+        }
+
         // 4. Bottom Bar / Dock (y = dock_y, h = 24)
         crate::gui::draw_rect(0, dock_y, screen_w, DOCK_HEIGHT, active_theme.dock_background);
         crate::gui::draw_rect(0, dock_y, screen_w, 1, active_theme.border_color); // Top border
@@ -1490,6 +1533,11 @@ impl WindowManager {
             }
         }
 
+        if self.snap_preview != SnapPreview::None {
+            self.snap_preview = SnapPreview::None;
+            self.damage_tracker.add_bounds(0, WORK_AREA_TOP, max_w as u32, work_h);
+        }
+
         self.resizing_window = None;
         crate::cursor::set_cursor_type(crate::cursor::CursorType::Default);
         let target_id = self.focused_window?;
@@ -1623,6 +1671,22 @@ impl WindowManager {
                 win.y = new_y;
                 if win.state == WindowState::Normal {
                     win.normal_geom = (new_x, new_y, win.width, win.height);
+                }
+
+                let new_preview = if win.y <= WORK_AREA_TOP + EDGE_SNAP_THRESHOLD {
+                    SnapPreview::Maximized
+                } else if win.x <= EDGE_SNAP_THRESHOLD {
+                    SnapPreview::Left
+                } else if win.x + (win.width as i32) >= max_w - EDGE_SNAP_THRESHOLD {
+                    SnapPreview::Right
+                } else {
+                    SnapPreview::None
+                };
+
+                if self.snap_preview != new_preview {
+                    self.snap_preview = new_preview;
+                    let work_h = max_h.saturating_sub(WORK_AREA_TOP + DOCK_HEIGHT as i32 + 20) as u32;
+                    self.damage_tracker.add_bounds(0, WORK_AREA_TOP, max_w as u32, work_h);
                 }
             }
             crate::cursor::set_cursor_type(crate::cursor::CursorType::Hand);

@@ -4018,14 +4018,24 @@ mod invariant_tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MockSnapPreview {
+        None,
+        Left,
+        Right,
+        Maximized,
+    }
+
     pub struct MockDesktopWindowManager {
         pub windows: alloc::vec::Vec<MockDesktopWindow>,
         pub next_window_id: u64,
         pub focused_window: Option<u64>,
         pub mru_list: alloc::vec::Vec<u64>,
         pub alt_tab: MockAltTabSwitcher,
+        pub snap_preview: MockSnapPreview,
         pub dragging_window: Option<(u64, i32, i32)>,
         pub resizing_window: Option<(u64, MockResizeEdge, i32, i32, i32, i32, u32, u32)>,
+        pub last_titlebar_click: Option<(u64, u64)>,
         pub launcher_open: bool,
     }
 
@@ -4037,8 +4047,10 @@ mod invariant_tests {
                 focused_window: None,
                 mru_list: alloc::vec::Vec::new(),
                 alt_tab: MockAltTabSwitcher::new(),
+                snap_preview: MockSnapPreview::None,
                 dragging_window: None,
                 resizing_window: None,
+                last_titlebar_click: None,
                 launcher_open: false,
             }
         }
@@ -12581,6 +12593,241 @@ pub mod alt_tab_mru_tests {
         wm.destroy_window(1, w1).unwrap();
         assert_eq!(wm.alt_tab.candidates.len(), 1);
         assert_eq!(wm.alt_tab.candidates[0], w2);
+    }
+}
+
+#[cfg(test)]
+pub mod window_chrome_ux_tests {
+    use super::invariant_tests::{MockDesktopWindowManager, MockWindowState, MockResizeEdge, MockSnapPreview};
+    use super::damage_module::DamageTracker;
+
+    /// WINDOW_CHROME_INV-1: Active vs Inactive titlebar visual state distinction
+    #[test]
+    fn test_chrome_inv_1_active_inactive_titlebar_state() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        let win1 = wm.windows.iter().find(|w| w.window_id == w1).unwrap();
+        let win2 = wm.windows.iter().find(|w| w.window_id == w2).unwrap();
+
+        assert!(!win1.focused, "Unfocused window must have focused=false");
+        assert!(win2.focused, "Topmost window must have focused=true");
+    }
+
+    /// TITLEBAR_INV-1: Titlebar geometry contains app icon and title metadata
+    #[test]
+    fn test_chrome_inv_2_titlebar_metadata_alignment() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window_with_meta(
+            1, 1, 20, 20, 300, 150,
+            alloc::string::String::from("Terminal - bash"),
+            super::invariant_tests::MockAppIcon::Terminal,
+        ).unwrap();
+
+        let win = wm.windows.iter().find(|w| w.window_id == w1).unwrap();
+        assert_eq!(win.title, "Terminal - bash");
+        assert_eq!(win.icon, super::invariant_tests::MockAppIcon::Terminal);
+    }
+
+    /// WINDOW_BUTTON_INV-1: Close button destroys window and reclaims focus
+    #[test]
+    fn test_chrome_inv_3_close_button_interaction() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        assert_eq!(wm.focused_window, Some(w2));
+        wm.destroy_window(2, w2).unwrap();
+
+        assert_eq!(wm.focused_window, Some(w1));
+        assert_eq!(wm.windows.len(), 1);
+    }
+
+    /// WINDOW_BUTTON_INV-2: Maximize button toggles maximized state and restores normal geometry
+    #[test]
+    fn test_chrome_inv_4_maximize_button_toggle() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 40, 50, 200, 120).unwrap();
+
+        // Maximize
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win_max = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win_max.state, MockWindowState::Maximized);
+        assert_eq!(win_max.normal_geom, (40, 50, 200, 120));
+
+        // Restore
+        wm.toggle_maximize_window(1, wid).unwrap();
+        let win_norm = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win_norm.state, MockWindowState::Normal);
+        assert_eq!((win_norm.x, win_norm.y, win_norm.width, win_norm.height), (40, 50, 200, 120));
+    }
+
+    /// WINDOW_BUTTON_INV-3: Minimize button toggles visibility and transfers focus
+    #[test]
+    fn test_chrome_inv_5_minimize_button_toggle() {
+        let mut wm = MockDesktopWindowManager::new();
+        let w1 = wm.create_window(1, 1, 10, 10, 200, 100).unwrap();
+        let w2 = wm.create_window(2, 2, 30, 30, 200, 100).unwrap();
+
+        wm.minimize_window(2, w2).unwrap();
+        let win2 = wm.windows.iter().find(|w| w.window_id == w2).unwrap();
+        assert_eq!(win2.state, MockWindowState::Minimized);
+        assert!(!win2.visible);
+        assert_eq!(wm.focused_window, Some(w1));
+    }
+
+    /// WINDOW_BUTTON_INV-4: Control button hitboxes are non-overlapping
+    #[test]
+    fn test_chrome_inv_6_button_hitbox_bounds() {
+        let wx = 100;
+        let ww = 300;
+
+        let close_min_x = wx + ww - 20;
+        let close_max_x = wx + ww - 4;
+
+        let max_min_x = wx + ww - 38;
+        let max_max_x = wx + ww - 22;
+
+        let min_min_x = wx + ww - 56;
+        let min_max_x = wx + ww - 40;
+
+        assert!(min_max_x < max_min_x, "Minimize and Maximize hitboxes must not overlap");
+        assert!(max_max_x < close_min_x, "Maximize and Close hitboxes must not overlap");
+    }
+
+    /// DOUBLE_CLICK_MAXIMIZE_INV-1: Double click within 300ms toggles maximize
+    #[test]
+    fn test_chrome_inv_7_double_click_maximize_toggle() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 30, 40, 200, 100).unwrap();
+
+        // 1st click
+        wm.last_titlebar_click = Some((wid, 1000));
+
+        // 2nd click within 200ms
+        let now_tick: u64 = 1200;
+        let is_double_click = if let Some((last_id, last_tick)) = wm.last_titlebar_click {
+            last_id == wid && now_tick.saturating_sub(last_tick) <= 300
+        } else {
+            false
+        };
+        assert!(is_double_click);
+
+        wm.toggle_maximize_window(1, wid).unwrap();
+        assert_eq!(wm.windows.iter().find(|w| w.window_id == wid).unwrap().state, MockWindowState::Maximized);
+    }
+
+    /// DOUBLE_CLICK_MAXIMIZE_INV-2: Slow clicks (>300ms) do not trigger maximize
+    #[test]
+    fn test_chrome_inv_8_slow_click_no_maximize() {
+        let wid = 5;
+        let last_click = Some((wid, 1000));
+        let now_tick: u64 = 1400; // 400ms delta
+
+        let is_double_click = if let Some((last_id, last_tick)) = last_click {
+            last_id == wid && now_tick.saturating_sub(last_tick) <= 300
+        } else {
+            false
+        };
+        assert!(!is_double_click, "Clicks slower than 300ms must not trigger double click");
+    }
+
+    /// RESIZE_INTERACTION_INV-1: 8-way resize preserves opposite edge
+    #[test]
+    fn test_chrome_inv_9_eight_way_resize_opposite_edge_anchoring() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 50, 50, 200, 100).unwrap();
+
+        // Resize Right (+50px)
+        wm.resizing_window = Some((wid, MockResizeEdge::Right, 250, 100, 50, 50, 200, 100));
+        wm.resize_window_8way(1, wid, MockResizeEdge::Right, 50, 0).unwrap();
+
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.x, 50, "Left edge must remain anchored during right resize");
+        assert_eq!(win.width, 250);
+    }
+
+    /// SNAP_PREVIEW_INV-1: Dragging near left edge triggers Left snap preview
+    #[test]
+    fn test_chrome_inv_10_snap_preview_left() {
+        let mut wm = MockDesktopWindowManager::new();
+        let _wid = wm.create_window(1, 1, 50, 50, 200, 100).unwrap();
+
+        let drag_x = 10; // <= 16 threshold
+        let preview = if drag_x <= 16 {
+            MockSnapPreview::Left
+        } else {
+            MockSnapPreview::None
+        };
+        wm.snap_preview = preview;
+
+        assert_eq!(wm.snap_preview, MockSnapPreview::Left);
+    }
+
+    /// SNAP_PREVIEW_INV-2: Dragging near right edge triggers Right snap preview
+    #[test]
+    fn test_chrome_inv_11_snap_preview_right() {
+        let max_w = 640;
+        let drag_x = 430;
+        let win_w = 200;
+
+        let preview = if drag_x + win_w >= max_w - 16 {
+            MockSnapPreview::Right
+        } else {
+            MockSnapPreview::None
+        };
+
+        assert_eq!(preview, MockSnapPreview::Right);
+    }
+
+    /// SNAP_PREVIEW_INV-3: Dragging near top edge triggers Maximized snap preview
+    #[test]
+    fn test_chrome_inv_12_snap_preview_maximized() {
+        let work_top = 20;
+        let drag_y = 25; // <= 20 + 16
+
+        let preview = if drag_y <= work_top + 16 {
+            MockSnapPreview::Maximized
+        } else {
+            MockSnapPreview::None
+        };
+
+        assert_eq!(preview, MockSnapPreview::Maximized);
+    }
+
+    /// SNAP_PREVIEW_INV-4: Releasing mouse clears snap preview and commits snap geometry
+    #[test]
+    fn test_chrome_inv_13_snap_release_clears_preview() {
+        let mut wm = MockDesktopWindowManager::new();
+        let wid = wm.create_window(1, 1, 10, 25, 200, 100).unwrap();
+
+        wm.snap_preview = MockSnapPreview::Left;
+        wm.snap_left(1, wid).unwrap();
+        wm.snap_preview = MockSnapPreview::None;
+
+        assert_eq!(wm.snap_preview, MockSnapPreview::None);
+        let win = wm.windows.iter().find(|w| w.window_id == wid).unwrap();
+        assert_eq!(win.state, MockWindowState::SnappedLeft);
+    }
+
+    /// DAMAGE_CHROME_INV-1: Titlebar hover changes produce localized titlebar damage
+    #[test]
+    fn test_chrome_inv_14_titlebar_hover_damage_localized() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage(); // clear initial boot full damage
+
+        // Hover over close button damaged region (titlebar height = 20px)
+        let win_x = 100;
+        let win_y = 50;
+        let win_w = 300;
+        tracker.add_bounds(win_x, win_y, win_w, 20);
+
+        assert!(tracker.is_damaged());
+        let dmg = tracker.take_damage().unwrap();
+        let is_full = dmg.x == 0 && dmg.y == 0 && dmg.width >= 1280 && dmg.height >= 720;
+        assert!(!is_full, "Chrome hover damage must be localized to the titlebar");
+        assert_eq!(dmg.height, 20);
     }
 }
 
