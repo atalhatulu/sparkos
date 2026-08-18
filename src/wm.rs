@@ -1276,16 +1276,16 @@ impl WindowManager {
 
         // 2. Check Top Bar Click (my < top_bar_h)
         if my < top_bar_h {
-            // Launcher button click (x in 4..80)
-            if mx >= 4 && mx <= 80 {
+            // Launcher button click (x in 4..92)
+            if mx >= 4 && mx <= 92 {
                 self.launcher_open = !self.launcher_open;
                 self.mark_damage(0, 0, screen_w as u32, 350);
                 return None;
             }
 
-            // Window Tab click (x in 84 .. screen_w - 120)
-            if mx >= 84 && mx <= screen_w.saturating_sub(120) {
-                let tab_idx = ((mx - 88) / 84) as usize;
+            // Window Tab click (x in 102 .. screen_w - 200)
+            if mx >= 102 && mx <= screen_w.saturating_sub(200) {
+                let tab_idx = ((mx - 102) / 92) as usize;
                 if tab_idx < self.windows.len() {
                     let win = &self.windows[tab_idx];
                     let wid = win.window_id;
@@ -1299,7 +1299,7 @@ impl WindowManager {
                     } else {
                         let _ = self.raise_to_top_internal(wid);
                     }
-                    self.mark_damage(0, 0, screen_w as u32, top_bar_h as u32);
+                    self.mark_top_bar_damage();
                     return Some((wid, owner));
                 }
             }

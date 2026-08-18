@@ -28,19 +28,19 @@ impl Dock {
 
         // 2. Sol Üst: Başlat (Start / SparkOS) Butonu
         let launcher_bg = if launcher_open { 0x002563EB } else { 0x001E293B };
-        crate::gui::draw_rect(4, 2, 76, 22, launcher_bg);
-        crate::gui::draw_rect(4, 2, 76, 1, if launcher_open { 0x0060A5FA } else { 0x00334155 });
-        crate::gui::draw_icon_glyph(8, 8, crate::app_registry::AppIcon::Logo, 0x0038BDF8, launcher_bg);
-        crate::gui::draw_string(22, 7, "SparkOS", 0x00FFFFFF, launcher_bg);
+        crate::gui::draw_rect(4, 2, 88, 22, launcher_bg);
+        crate::gui::draw_rect(4, 2, 88, 1, if launcher_open { 0x0060A5FA } else { 0x00334155 });
+        crate::gui::draw_icon_glyph(8, 5, crate::app_registry::AppIcon::Logo, 0x0038BDF8, launcher_bg);
+        crate::gui::draw_string(28, 7, "SparkOS", 0x00FFFFFF, launcher_bg);
 
         // Ayrıcı çizgi
-        crate::gui::draw_rect(83, 3, 1, 20, 0x00334155);
+        crate::gui::draw_rect(96, 3, 1, 20, 0x00334155);
 
         // 3. Orta-Sol: Açık Pencere Sekmeleri
-        let mut tab_x = 88u16;
+        let mut tab_x = 102u16;
         let right_hud_w = 200u16;
         for (idx, win) in windows.iter().enumerate() {
-            if tab_x + 84 > screen_w.saturating_sub(right_hud_w) {
+            if tab_x + 90 > screen_w.saturating_sub(right_hud_w) {
                 break;
             }
 
@@ -66,24 +66,24 @@ impl Dock {
             };
 
             // Sekme arkaplanı ve çerçevesi
-            crate::gui::draw_rect(tab_x, 2, 80, 22, tab_bg);
+            crate::gui::draw_rect(tab_x, 2, 88, 22, tab_bg);
             let border_col = if is_focused { 0x0060A5FA } else { 0x00334155 };
-            crate::gui::draw_rect(tab_x, 2, 80, 1, border_col);
-            crate::gui::draw_rect(tab_x, 23, 80, 1, border_col);
+            crate::gui::draw_rect(tab_x, 2, 88, 1, border_col);
+            crate::gui::draw_rect(tab_x, 23, 88, 1, border_col);
 
             // Uygulama ikonu & başlığı
-            crate::gui::draw_icon_glyph(tab_x + 4, 8, win.icon, tab_fg, tab_bg);
+            crate::gui::draw_icon_glyph(tab_x + 4, 5, win.icon, tab_fg, tab_bg);
             let short_title = if win.title.len() > 7 { &win.title[..7] } else { &win.title };
-            crate::gui::draw_string(tab_x + 16, 7, short_title, tab_fg, tab_bg);
+            crate::gui::draw_string(tab_x + 24, 7, short_title, tab_fg, tab_bg);
 
             // Aktif göstergesi
             if is_focused {
-                crate::gui::draw_rect(tab_x + 36, 21, 8, 2, 0x0060A5FA);
+                crate::gui::draw_rect(tab_x + 36, 21, 12, 2, 0x0060A5FA);
             } else if win.state != WindowState::Minimized {
-                crate::gui::draw_rect(tab_x + 38, 22, 4, 1, 0x0094A3B8);
+                crate::gui::draw_rect(tab_x + 40, 22, 6, 1, 0x0094A3B8);
             }
 
-            tab_x += 84;
+            tab_x += 92;
         }
 
         // 4. En Sağ Üst: Saat, Sistem Süresi ve Ağ/Bellek Bilgisi

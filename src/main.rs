@@ -88,6 +88,7 @@ pub mod clipboard;
 pub mod editor_app;
 pub mod launcher;
 pub mod dock;
+pub mod icons;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
