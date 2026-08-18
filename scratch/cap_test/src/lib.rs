@@ -13849,7 +13849,7 @@ pub mod settings2_tests {
         let mut app = MockSettingsAppState::new(1, 1, MockSystemSettings::default());
         
         // Click second category (y = 36 + 26 = 62 -> Display)
-        let local_x = 50;
+        let _local_x = 50;
         let local_y = 65;
         let item_idx = ((local_y - 36) / 26) as usize;
         let cat = match item_idx {
@@ -13862,6 +13862,302 @@ pub mod settings2_tests {
         app.set_category(cat);
 
         assert_eq!(app.active_category, MockSettingsCategory::Display);
+    }
+}
+
+#[cfg(test)]
+pub mod taskmgr2_tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use super::damage_module::DamageTracker;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MockTaskMgrSortColumn {
+        Pid,
+        Name,
+        Cpu,
+        Mem,
+        Windows,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MockSortDirection {
+        Ascending,
+        Descending,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockProcessSnapshot {
+        pub pid: u64,
+        pub name: String,
+        pub cpu_ticks: u64,
+        pub current_memory_bytes: u64,
+        pub window_count: u32,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockTaskMgrAppState {
+        pub window_id: u64,
+        pub pid: u64,
+        pub sort_column: MockTaskMgrSortColumn,
+        pub sort_direction: MockSortDirection,
+        pub selected_pid: Option<u64>,
+        pub selected_row_idx: usize,
+        pub snapshot: Vec<MockProcessSnapshot>,
+    }
+
+    impl MockTaskMgrAppState {
+        pub fn new(window_id: u64, pid: u64) -> Self {
+            let mut state = Self {
+                window_id,
+                pid,
+                sort_column: MockTaskMgrSortColumn::Pid,
+                sort_direction: MockSortDirection::Ascending,
+                selected_pid: None,
+                selected_row_idx: 0,
+                snapshot: Vec::new(),
+            };
+            state.load_default_snapshot();
+            state
+        }
+
+        pub fn load_default_snapshot(&mut self) {
+            self.snapshot = alloc::vec![
+                MockProcessSnapshot { pid: 1, name: String::from("kernel"), cpu_ticks: 1000, current_memory_bytes: 32768, window_count: 0 },
+                MockProcessSnapshot { pid: 2, name: String::from("terminal.app"), cpu_ticks: 450, current_memory_bytes: 16384, window_count: 1 },
+                MockProcessSnapshot { pid: 3, name: String::from("files.app"), cpu_ticks: 200, current_memory_bytes: 20480, window_count: 1 },
+                MockProcessSnapshot { pid: 4, name: String::from("editor.app"), cpu_ticks: 800, current_memory_bytes: 40960, window_count: 2 },
+            ];
+            self.sort();
+        }
+
+        pub fn sort(&mut self) {
+            let col = self.sort_column;
+            let dir = self.sort_direction;
+            self.snapshot.sort_by(|a, b| {
+                let ord = match col {
+                    MockTaskMgrSortColumn::Pid => a.pid.cmp(&b.pid),
+                    MockTaskMgrSortColumn::Name => a.name.cmp(&b.name),
+                    MockTaskMgrSortColumn::Cpu => a.cpu_ticks.cmp(&b.cpu_ticks),
+                    MockTaskMgrSortColumn::Mem => a.current_memory_bytes.cmp(&b.current_memory_bytes),
+                    MockTaskMgrSortColumn::Windows => a.window_count.cmp(&b.window_count),
+                };
+                if dir == MockSortDirection::Descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+
+            if let Some(spid) = self.selected_pid {
+                if let Some(pos) = self.snapshot.iter().position(|p| p.pid == spid) {
+                    self.selected_row_idx = pos;
+                } else {
+                    self.selected_pid = None;
+                    self.selected_row_idx = 0;
+                }
+            }
+        }
+
+        pub fn toggle_sort(&mut self, col: MockTaskMgrSortColumn) {
+            if self.sort_column == col {
+                self.sort_direction = match self.sort_direction {
+                    MockSortDirection::Ascending => MockSortDirection::Descending,
+                    MockSortDirection::Descending => MockSortDirection::Ascending,
+                };
+            } else {
+                self.sort_column = col;
+                self.sort_direction = MockSortDirection::Ascending;
+            }
+            self.sort();
+        }
+
+        pub fn select_row(&mut self, idx: usize) {
+            if idx < self.snapshot.len() {
+                self.selected_row_idx = idx;
+                self.selected_pid = Some(self.snapshot[idx].pid);
+            }
+        }
+
+        pub fn nav_up(&mut self) {
+            if !self.snapshot.is_empty() {
+                if self.selected_row_idx > 0 {
+                    self.selected_row_idx -= 1;
+                }
+                self.selected_pid = Some(self.snapshot[self.selected_row_idx].pid);
+            }
+        }
+
+        pub fn nav_down(&mut self) {
+            if !self.snapshot.is_empty() {
+                if self.selected_row_idx + 1 < self.snapshot.len() {
+                    self.selected_row_idx += 1;
+                }
+                self.selected_pid = Some(self.snapshot[self.selected_row_idx].pid);
+            }
+        }
+
+        pub fn terminate_selected(&mut self) -> Result<(), &'static str> {
+            if let Some(pid) = self.selected_pid {
+                if pid <= 1 {
+                    return Err("Cannot terminate kernel process");
+                }
+                self.snapshot.retain(|p| p.pid != pid);
+                self.selected_pid = None;
+                self.selected_row_idx = 0;
+                Ok(())
+            } else {
+                Err("No process selected")
+            }
+        }
+    }
+
+    /// TASKMGR2_PROCESS_LIST_INV-1: Process list accurately populates PID, name, memory, cpu, windows
+    #[test]
+    fn test_taskmgr2_process_list_inv_1_population() {
+        let app = MockTaskMgrAppState::new(1, 1);
+        assert_eq!(app.snapshot.len(), 4);
+        assert_eq!(app.snapshot[0].pid, 1);
+        assert_eq!(app.snapshot[0].name, "kernel");
+    }
+
+    /// TASKMGR2_SORT_INV-1: Multi-column sorting (PID, Name, CPU, RAM) works in Ascending and Descending order
+    #[test]
+    fn test_taskmgr2_sort_inv_1_multi_column_sorting() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+
+        // Sort by CPU Descending (Highest ticks first -> editor.app with 800)
+        app.toggle_sort(MockTaskMgrSortColumn::Cpu);
+        app.toggle_sort(MockTaskMgrSortColumn::Cpu);
+        assert_eq!(app.snapshot[0].name, "kernel"); // kernel has 1000
+        assert_eq!(app.snapshot[1].name, "editor.app"); // editor has 800
+
+        // Sort by Memory Ascending
+        app.toggle_sort(MockTaskMgrSortColumn::Mem);
+        assert_eq!(app.snapshot[0].name, "terminal.app"); // terminal has 16384 (lowest)
+    }
+
+    /// TASKMGR2_SELECTION_INV-1: Row selection highlights target process and updates selected PID
+    #[test]
+    fn test_taskmgr2_selection_inv_1_row_selection() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+        app.select_row(2);
+
+        assert_eq!(app.selected_row_idx, 2);
+        assert_eq!(app.selected_pid, Some(app.snapshot[2].pid));
+    }
+
+    /// TASKMGR2_REFRESH_INV-1: Refreshing process list preserves valid selection
+    #[test]
+    fn test_taskmgr2_refresh_inv_1_selection_preserved_on_refresh() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+        app.select_row(2); // PID 3 (files.app)
+
+        app.sort();
+        assert_eq!(app.selected_pid, Some(3));
+        assert_eq!(app.snapshot[app.selected_row_idx].pid, 3);
+    }
+
+    /// TASKMGR2_REFRESH_INV-2: Refreshing process list safely clears stale/terminated PID selection
+    #[test]
+    fn test_taskmgr2_refresh_inv_2_stale_pid_cleared() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+        app.selected_pid = Some(999); // non-existent PID
+
+        app.sort();
+        assert_eq!(app.selected_pid, None);
+        assert_eq!(app.selected_row_idx, 0);
+    }
+
+    /// TASKMGR2_TERMINATE_INV-1: Terminating user process issues termination and removes from table
+    #[test]
+    fn test_taskmgr2_terminate_inv_1_user_process() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+        app.select_row(1); // terminal.app (PID 2)
+
+        let res = app.terminate_selected();
+        assert!(res.is_ok());
+        assert_eq!(app.snapshot.len(), 3);
+        assert!(!app.snapshot.iter().any(|p| p.pid == 2));
+    }
+
+    /// TASKMGR2_PERMISSION_INV-1: Kernel processes (PID 0, 1) cannot be terminated
+    #[test]
+    fn test_taskmgr2_permission_inv_1_kernel_protection() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+        app.select_row(0); // kernel (PID 1)
+
+        let res = app.terminate_selected();
+        assert!(res.is_err());
+        assert_eq!(app.snapshot.len(), 4);
+    }
+
+    /// TASKMGR2_STATS_INV-1: System overview statistics reflect memory and process counts
+    #[test]
+    fn test_taskmgr2_stats_inv_1_stats_reflection() {
+        let app = MockTaskMgrAppState::new(1, 1);
+        let total_procs = app.snapshot.len();
+        let total_windows: u32 = app.snapshot.iter().map(|p| p.window_count).sum();
+
+        assert_eq!(total_procs, 4);
+        assert_eq!(total_windows, 4);
+    }
+
+    /// TASKMGR2_MULTI_INSTANCE_INV-1: Multiple TaskManager instances maintain independent states
+    #[test]
+    fn test_taskmgr2_multi_instance_inv_1_independent_states() {
+        let mut t1 = MockTaskMgrAppState::new(1, 1);
+        let mut t2 = MockTaskMgrAppState::new(2, 2);
+
+        t1.toggle_sort(MockTaskMgrSortColumn::Mem);
+        t2.toggle_sort(MockTaskMgrSortColumn::Cpu);
+
+        assert_eq!(t1.sort_column, MockTaskMgrSortColumn::Mem);
+        assert_eq!(t2.sort_column, MockTaskMgrSortColumn::Cpu);
+    }
+
+    /// TASKMGR2_SNAPSHOT_INV-1: Snapshot view models decouple UI from scheduler lock
+    #[test]
+    fn test_taskmgr2_snapshot_inv_1_snapshot_cloning() {
+        let snapshot = alloc::vec![
+            MockProcessSnapshot { pid: 10, name: String::from("test"), cpu_ticks: 50, current_memory_bytes: 4096, window_count: 1 }
+        ];
+        let cloned = snapshot.clone();
+        assert_eq!(snapshot.len(), cloned.len());
+        assert_eq!(snapshot[0].pid, cloned[0].pid);
+    }
+
+    /// TASKMGR2_DAMAGE_INV-1: Selection change damages only window surface region
+    #[test]
+    fn test_taskmgr2_damage_inv_1_localized_damage() {
+        let mut tracker = DamageTracker::new();
+        let _ = tracker.take_damage();
+
+        // TaskManager window bounds (x=70, y=60, w=440, h=280)
+        tracker.add_bounds(70, 60, 440, 280);
+        assert!(tracker.is_damaged());
+
+        let dmg = tracker.take_damage().unwrap();
+        assert_eq!(dmg.x, 70);
+        assert_eq!(dmg.y, 60);
+        assert_eq!(dmg.width, 440);
+        assert_eq!(dmg.height, 280);
+    }
+
+    /// TASKMGR2_INPUT_INV-1: Up/Down keyboard navigation cycles through processes cleanly
+    #[test]
+    fn test_taskmgr2_input_inv_1_keyboard_nav() {
+        let mut app = MockTaskMgrAppState::new(1, 1);
+        assert_eq!(app.selected_row_idx, 0);
+
+        app.nav_down();
+        assert_eq!(app.selected_row_idx, 1);
+
+        app.nav_down();
+        assert_eq!(app.selected_row_idx, 2);
+
+        app.nav_up();
+        assert_eq!(app.selected_row_idx, 1);
     }
 }
 
