@@ -55,15 +55,14 @@ impl LauncherState {
         }
     }
 
-    pub fn render(&self, screen_w: u16, screen_h: u16) {
+    pub fn render(&self, _screen_w: u16, _screen_h: u16) {
         if !self.open { return; }
 
         let px = 4u16;
         let pw = 164u16;
         let total_apps = crate::app_registry::REGISTERED_APPS.len() as u16;
         let ph = 34 + total_apps * 28 + 26;
-        let dock_y = screen_h.saturating_sub(crate::wm::DOCK_HEIGHT);
-        let py = dock_y.saturating_sub(ph + 4);
+        let py = crate::wm::DOCK_HEIGHT + 2;
 
         // Background & Border
         crate::gui::draw_rect(px, py, pw, ph, 0x000F172A);

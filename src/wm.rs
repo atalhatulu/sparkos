@@ -1153,7 +1153,7 @@ impl WindowManager {
             SnapPreview::None => {}
         }
 
-        // 4. Bottom Bar / Dock 2.0
+        // 4. Unified Top Panel 2.0 (Start button, Window tabs, System HUD)
         crate::dock::Dock::render(
             screen_w,
             screen_h,
@@ -1163,10 +1163,7 @@ impl WindowManager {
             self.hovered_dock_tab,
         );
 
-        // 5. System Top Bar (Top layer above windows and dock, below cursor)
-        crate::system_bar::SYSTEM_BAR.lock().render(screen_w, screen_h);
-
-        // 6. Application Launcher 2.0 Popup (if open)
+        // 5. Application Launcher 2.0 Dropdown Popup (if open)
         if self.launcher_open {
             let launcher_state = crate::launcher::LauncherState {
                 open: self.launcher_open,
@@ -1239,16 +1236,15 @@ impl WindowManager {
     /// Handles mouse down: performs titlebar dragging, resize, close/maximize/minimize buttons, dock interaction, or client focus
     pub fn handle_mouse_down(&mut self, mx: i32, my: i32) -> Option<(u64, u64)> {
         let screen_w = unsafe { crate::gui::VESA.width as i32 };
-        let screen_h = unsafe { crate::gui::VESA.height as i32 };
-        let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
+        let top_bar_h = DOCK_HEIGHT as i32;
 
-        // 1. Check Launcher Popup Click (if open)
+        // 1. Check Launcher Dropdown Click (if open)
         if self.launcher_open {
             let px = 4;
-            let pw = 154;
+            let pw = 164;
             let total_apps = crate::app_registry::REGISTERED_APPS.len() as i32;
             let ph = 34 + total_apps * 28 + 26;
-            let py = dock_y.saturating_sub(ph + 4);
+            let py = top_bar_h + 2;
 
             if mx >= px && mx < px + pw && my >= py && my < py + ph {
                 let mut cur_y = py + 28;
@@ -1256,6 +1252,7 @@ impl WindowManager {
                     if my >= cur_y && my < cur_y + 24 {
                         self.pending_spawn_app = Some(app.id);
                         self.launcher_open = false;
+                        self.mark_damage(px, py, pw as u32, ph as u32);
                         return None;
                     }
                     cur_y += 28;
@@ -1263,25 +1260,28 @@ impl WindowManager {
                 // Close Menu button
                 if my >= cur_y && my < cur_y + 24 {
                     self.launcher_open = false;
+                    self.mark_damage(px, py, pw as u32, ph as u32);
                     return None;
                 }
-            } else if !(mx >= 4 && mx <= 80 && my >= dock_y) {
-                // Clicked outside launcher popup -> close launcher
+            } else if !(mx >= 4 && mx <= 80 && my < top_bar_h) {
+                // Clicked outside launcher dropdown -> close launcher
                 self.launcher_open = false;
+                self.mark_damage(px, py, pw as u32, ph as u32);
             }
         }
 
-        // 2. Check Bottom Bar / Dock Click (y >= dock_y)
-        if my >= dock_y {
+        // 2. Check Top Bar Click (my < top_bar_h)
+        if my < top_bar_h {
             // Launcher button click (x in 4..80)
             if mx >= 4 && mx <= 80 {
                 self.launcher_open = !self.launcher_open;
+                self.mark_damage(0, 0, screen_w as u32, 350);
                 return None;
             }
 
-            // Window Tab click (x in 84 .. screen_w - 80)
-            if mx >= 84 && mx <= screen_w.saturating_sub(80) {
-                let tab_idx = ((mx - 84) / 84) as usize;
+            // Window Tab click (x in 84 .. screen_w - 120)
+            if mx >= 84 && mx <= screen_w.saturating_sub(120) {
+                let tab_idx = ((mx - 88) / 84) as usize;
                 if tab_idx < self.windows.len() {
                     let win = &self.windows[tab_idx];
                     let wid = win.window_id;
@@ -1295,6 +1295,7 @@ impl WindowManager {
                     } else {
                         let _ = self.raise_to_top_internal(wid);
                     }
+                    self.mark_damage(0, 0, screen_w as u32, top_bar_h as u32);
                     return Some((wid, owner));
                 }
             }
