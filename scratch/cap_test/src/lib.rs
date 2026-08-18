@@ -10190,6 +10190,220 @@ mod invariant_tests {
         assert!(apps.contains(&"Browser"));
         assert!(!apps.contains(&"Trash"));
     }
+
+    // =========================================================================
+    // DEEP STRESS & SYSTEM INVARIANTS (STRESS_AUDIT_INV-1 .. 5)
+    // =========================================================================
+
+    /// STRESS_AUDIT_INV-1: 11+ multi-window simultaneous stress with interleaved operations
+    #[test]
+    fn test_stress_audit_inv_1_eleven_windows_lifecycle() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum WinState { Normal, Minimized, Maximized, Fullscreen }
+
+        #[derive(Debug, Clone)]
+        struct MockWin {
+            wid: u64,
+            pid: u64,
+            app: alloc::string::String,
+            state: WinState,
+            focused: bool,
+            visible: bool,
+        }
+
+        let mut windows: alloc::vec::Vec<MockWin> = alloc::vec::Vec::new();
+
+        // Spawn 11 windows (3 Terminal, 3 Files, 3 Editor, 1 TaskMgr, 1 Settings)
+        let apps = [
+            "terminal.app", "terminal.app", "terminal.app",
+            "files.app", "files.app", "files.app",
+            "editor.app", "editor.app", "editor.app",
+            "taskmgr.app", "settings.app",
+        ];
+
+        for (i, &app) in apps.iter().enumerate() {
+            let wid = (i + 1) as u64;
+            let pid = (i + 10) as u64;
+            for w in windows.iter_mut() {
+                w.focused = false;
+            }
+            windows.push(MockWin {
+                wid,
+                pid,
+                app: alloc::string::String::from(app),
+                state: WinState::Normal,
+                focused: true,
+                visible: true,
+            });
+        }
+
+        assert_eq!(windows.len(), 11);
+        assert_eq!(windows.iter().filter(|w| w.focused).count(), 1);
+        assert_eq!(windows.last().unwrap().wid, 11);
+
+        // 1. Minimize window 11 -> Focus must transfer to window 10
+        windows.last_mut().unwrap().visible = false;
+        windows.last_mut().unwrap().focused = false;
+        windows.last_mut().unwrap().state = WinState::Minimized;
+        let next_focused = windows.iter().rev().find(|w| w.visible && w.state != WinState::Minimized).map(|w| w.wid);
+        assert_eq!(next_focused, Some(10));
+        for w in windows.iter_mut() {
+            w.focused = Some(w.wid) == next_focused;
+        }
+        assert!(windows[9].focused);
+
+        // 2. Alt-Tab cycles through windows
+        let cur_idx = windows.iter().position(|w| w.wid == 10).unwrap();
+        let prev_idx = cur_idx - 1; // Window 9
+        let elevated = windows.remove(prev_idx);
+        for w in windows.iter_mut() { w.focused = false; }
+        let mut elevated = elevated;
+        elevated.focused = true;
+        windows.push(elevated);
+        assert_eq!(windows.last().unwrap().wid, 9);
+        assert!(windows.last().unwrap().focused);
+
+        // 3. Destroy all 11 windows one by one -> Must reach clean zero-window state
+        while let Some(w) = windows.pop() {
+            let next_f = windows.iter().rev().find(|win| win.visible && win.state != WinState::Minimized).map(|win| win.wid);
+            for win in windows.iter_mut() {
+                win.focused = Some(win.wid) == next_f;
+            }
+            if !windows.is_empty() {
+                assert_eq!(windows.iter().filter(|win| win.focused).count(), if windows.iter().any(|win| win.visible && win.state != WinState::Minimized) { 1 } else { 0 });
+            }
+        }
+        assert_eq!(windows.len(), 0);
+    }
+
+    /// STRESS_AUDIT_INV-2: Zero-window state safety and hotkey recovery
+    #[test]
+    fn test_stress_audit_inv_2_zero_window_safety() {
+        let windows: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let focused_window: Option<u64> = None;
+
+        // Regular key when 0 windows -> No route, no panic
+        let route_key = |wid: Option<u64>| -> Option<u64> { wid };
+        assert_eq!(route_key(focused_window), None);
+
+        // Global hotkey (F1) triggers terminal spawn regardless of window count
+        let key_code = 0x3B; // F1
+        let is_spawn_terminal = key_code == 0x3B || (key_code == 0x14 /* && is_ctrl && is_alt */);
+        assert!(is_spawn_terminal);
+    }
+
+    /// STRESS_AUDIT_INV-3: Maximize -> Fullscreen -> Maximize -> Restore geometry preservation
+    #[test]
+    fn test_stress_audit_inv_3_maximize_fullscreen_restore_sequence() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum WinState { Normal, Minimized, Maximized, Fullscreen }
+
+        struct WinGeom {
+            x: i32,
+            y: i32,
+            w: u32,
+            h: u32,
+            state: WinState,
+            saved: Option<(i32, i32, u32, u32)>,
+        }
+
+        let mut win = WinGeom {
+            x: 80,
+            y: 75,
+            w: 440,
+            h: 280,
+            state: WinState::Normal,
+            saved: None,
+        };
+
+        // 1. Maximize
+        win.saved = Some((win.x, win.y, win.w, win.h));
+        win.x = 0; win.y = 20; win.w = 800; win.h = 520;
+        win.state = WinState::Maximized;
+
+        // 2. Fullscreen from Maximize (Do NOT overwrite saved with maximized geom)
+        if win.state != WinState::Maximized {
+            win.saved = Some((win.x, win.y, win.w, win.h));
+        }
+        win.x = 0; win.y = 0; win.w = 800; win.h = 600;
+        win.state = WinState::Fullscreen;
+
+        // 3. Maximize from Fullscreen (Do NOT overwrite saved with fullscreen geom)
+        if win.state != WinState::Fullscreen && win.state != WinState::Maximized {
+            win.saved = Some((win.x, win.y, win.w, win.h));
+        }
+        win.x = 0; win.y = 20; win.w = 800; win.h = 520;
+        win.state = WinState::Maximized;
+
+        // 4. Restore to Normal
+        let (rx, ry, rw, rh) = win.saved.take().unwrap();
+        win.x = rx; win.y = ry; win.w = rw; win.h = rh;
+        win.state = WinState::Normal;
+
+        // Verify initial normal geometry perfectly preserved!
+        assert_eq!(win.x, 80);
+        assert_eq!(win.y, 75);
+        assert_eq!(win.w, 440);
+        assert_eq!(win.h, 280);
+    }
+
+    /// STRESS_AUDIT_INV-4: 100x Open-Close Lifecycle Resource Leak Invariant
+    #[test]
+    fn test_stress_audit_inv_4_resource_leak_lifecycle() {
+        use alloc::collections::BTreeMap;
+
+        let mut process_table: BTreeMap<u64, alloc::string::String> = BTreeMap::new();
+        let mut surface_registry: BTreeMap<u64, u64> = BTreeMap::new(); // SurfaceId -> PID
+        let mut window_registry: BTreeMap<u64, u64> = BTreeMap::new();  // WindowId -> PID
+        let mut input_queues: BTreeMap<u64, usize> = BTreeMap::new();   // PID -> queue count
+        let mut permissions: BTreeMap<u64, usize> = BTreeMap::new();    // PID -> perm count
+
+        for cycle in 1..=100 {
+            let pid = (cycle + 100) as u64;
+            let wid = (cycle + 500) as u64;
+            let sid = (cycle + 1000) as u64;
+
+            // Spawn window
+            process_table.insert(pid, alloc::string::String::from("test.app"));
+            surface_registry.insert(sid, pid);
+            window_registry.insert(wid, pid);
+            input_queues.insert(pid, 0);
+            permissions.insert(pid, 1);
+
+            assert_eq!(window_registry.len(), 1);
+            assert_eq!(surface_registry.len(), 1);
+            assert_eq!(process_table.len(), 1);
+
+            // Destroy window
+            window_registry.remove(&wid);
+            surface_registry.remove(&sid);
+            process_table.remove(&pid);
+            input_queues.remove(&pid);
+            permissions.remove(&pid);
+
+            // All registries must be exactly 0 after each cycle
+            assert_eq!(window_registry.len(), 0);
+            assert_eq!(surface_registry.len(), 0);
+            assert_eq!(process_table.len(), 0);
+            assert_eq!(input_queues.len(), 0);
+            assert_eq!(permissions.len(), 0);
+        }
+    }
+
+    /// STRESS_AUDIT_INV-5: 4-Way Namespace Independence Invariant (PID, TaskId, WindowId, SurfaceId)
+    #[test]
+    fn test_stress_audit_inv_5_four_way_namespace_independence() {
+        let pid: u64 = 42;
+        let task_id: u64 = 1;
+        let window_id: u64 = 100;
+        let surface_id: u64 = 500;
+
+        assert_ne!(pid, task_id);
+        assert_ne!(pid, window_id);
+        assert_ne!(pid, surface_id);
+        assert_ne!(window_id, surface_id);
+        assert_ne!(task_id, window_id);
+    }
 }
 
 

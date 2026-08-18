@@ -238,8 +238,10 @@ impl WindowManager {
             }
             win.state = WindowState::Normal;
         } else {
-            // Save current geometry and maximize to full desktop workspace (between top bar and dock)
-            win.saved_geom = Some((win.x, win.y, win.width, win.height));
+            // Save current geometry if not already maximized or fullscreen
+            if win.state != WindowState::Fullscreen && win.state != WindowState::Maximized {
+                win.saved_geom = Some((win.x, win.y, win.width, win.height));
+            }
             win.x = 0;
             win.y = WORK_AREA_TOP;
             win.width = max_w;
@@ -384,6 +386,7 @@ impl WindowManager {
 
         if !remaining_windows {
             crate::input::cleanup_input_for_pid(caller_pid);
+            crate::permission::PERMISSION_MANAGER.lock().unregister_process(caller_pid);
         }
 
         crate::serial_println!("[WM] Process {} destroyed Window {} (Surface {} cleaned, Remaining windows: {})",
