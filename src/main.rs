@@ -357,12 +357,18 @@ async fn disk_demo() {
 }
 
 async fn boot_orchestrator() {
-    // Welcome banner and interactive shell prompt
+    // Otomatik olarak GUI Desktop Ortamını Başlat
+    crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
+    let _ = crate::task::process::spawn_desktop_v1_apps();
+    crate::wm::WM.lock().mark_full_damage();
+    crate::serial_println!("[DESKTOP] Auto-booted SparkOS GUI Desktop Environment.");
+
+    // Welcome banner and interactive shell prompt for serial console
     {
         let mut w = crate::vga_buffer::WRITE_LOCK.lock();
         w.set_color(crate::vga_buffer::Color::LightGreen, crate::vga_buffer::Color::Black);
         core::fmt::Write::write_str(&mut *w, "\n================================================================\n").unwrap();
-        core::fmt::Write::write_str(&mut *w, "  SparkOS x86_64 Mikrocekirdek Baslatildi.\n").unwrap();
+        core::fmt::Write::write_str(&mut *w, "  SparkOS x86_64 Mikrocekirdek Baslatildi (GUI Aktif).\n").unwrap();
         core::fmt::Write::write_str(&mut *w, "  Komutlari listelemek icin 'help' yazabilirsiniz.\n").unwrap();
         core::fmt::Write::write_str(&mut *w, "================================================================\n\n").unwrap();
     }
