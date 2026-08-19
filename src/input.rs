@@ -527,7 +527,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     drop(files);
                     let mut browsers = crate::browser_app::BROWSER_INSTANCES.lock();
                     if let Some(browser_state) = browsers.get_mut(&focused_win_id) {
-                        browser_state.handle_key_input(key_code, is_ctrl);
+                        browser_state.handle_key_input(key_code, is_ctrl, is_shift);
                         if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
                             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                             browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);

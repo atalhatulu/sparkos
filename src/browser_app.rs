@@ -1,12 +1,16 @@
-//! SparkOS Desktop V2.0 — Web Browser Subsystem (`src/browser_app.rs`)
+//! SparkOS Desktop V2.1 — Modern Web Browser with Google Search Engine (`src/browser_app.rs`)
 //!
-//! Provides a modern, sandboxed, multi-instance web browser featuring:
-//! - Full-flow sequential HTML DOM parsing (h1..h6, p, a, ul/li, code/pre, hr, button)
+//! Features:
+//! - Full-flow sequential HTML DOM parsing (h1..h6, p, a, ul/li, code/pre, hr, button, text)
+//! - Smart Address & Search Engine Bar:
+//!   * Auto-detects direct URLs vs. Search Queries
+//!   * Default search engine: Google (`https://www.google.com/search?q=...`)
+//!   * One-click clear search button `[×]`
+//!   * Full PS/2 scancode inline editing, cursor positioning, and Enter key execution
+//! - Interactive Google Search Results Page & Google Homepage rendering
 //! - Multi-window isolated browser instances with independent navigation history & scroll
-//! - Interactive URL address bar with inline cursor editing and keyboard dispatch
 //! - Clickable hyperlinks with layout hit-testing
-//! - Built-in native pages (`about:sparkos`, `about:blank`, `about:help`) and HTTP simulation
-//! - Keyboard & mouse scrollback navigation
+//! - Keyboard & mouse scrollback navigation (Page Up/Down, Arrow keys)
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -14,8 +18,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-pub const BROWSER_WIDTH: u32 = 460;
-pub const BROWSER_HEIGHT: u32 = 280;
+pub const BROWSER_WIDTH: u32 = 480;
+pub const BROWSER_HEIGHT: u32 = 300;
 pub const MAX_HTML_TOKEN_LEN: usize = 4096;
 
 pub static BROWSER_INSTANCES: Mutex<BTreeMap<u64, BrowserState>> = Mutex::new(BTreeMap::new());
@@ -72,7 +76,7 @@ impl HtmlDocument {
         while cursor < len {
             if let Some(tag_open) = html_str[cursor..].find('<') {
                 let abs_open = cursor + tag_open;
-                // Accumulate any loose text before tag
+                // Accumulate loose text before tag
                 if abs_open > cursor {
                     let loose_text = html_str[cursor..abs_open].trim();
                     if !loose_text.is_empty() && !loose_text.starts_with('<') {
@@ -215,7 +219,7 @@ impl HtmlDocument {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Browser Instance State
+// 2. Browser Instance State & Smart Search Query Engine
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -248,9 +252,9 @@ impl BrowserState {
     pub fn new(window_id: u64) -> Self {
         let mut state = Self {
             window_id,
-            url_input: String::from("about:sparkos"),
-            active_url: String::from("about:sparkos"),
-            cursor_pos: 13,
+            url_input: String::from("https://www.google.com"),
+            active_url: String::from("https://www.google.com"),
+            cursor_pos: 22,
             url_bar_focused: false,
             history: Vec::new(),
             history_idx: 0,
@@ -261,8 +265,29 @@ impl BrowserState {
             loading: false,
             links: Vec::new(),
         };
-        state.load_url("about:sparkos");
+        state.load_url("https://www.google.com");
         state
+    }
+
+    /// Smart navigation: converts search queries into Google search or loads direct URLs
+    pub fn navigate_to_input(&mut self) {
+        let raw_query = self.url_input.trim();
+        if raw_query.is_empty() { return; }
+
+        let resolved_url = if raw_query.starts_with("http://")
+            || raw_query.starts_with("https://")
+            || raw_query.starts_with("about:")
+            || raw_query.starts_with("file://")
+            || raw_query.starts_with("sparkos://") {
+            String::from(raw_query)
+        } else if is_direct_domain(raw_query) {
+            format!("https://{}", raw_query)
+        } else {
+            // Default search engine: Google Search
+            format!("https://www.google.com/search?q={}", raw_query)
+        };
+
+        self.load_url(&resolved_url);
     }
 
     /// Loads a URL and updates history
@@ -289,8 +314,65 @@ impl BrowserState {
         self.loading = false;
     }
 
-    /// Resolves URL content from internal pages or network
+    /// Resolves URL content from internal pages, Google Search Engine, or simulated network
     pub fn fetch_content(&self, url: &str) -> String {
+        // 1. Google Search Results Page
+        if let Some(q_pos) = url.find("google.com/search?q=") {
+            let query = &url[q_pos + 20..];
+            let clean_q = query.replace('+', " ");
+            return format!(r#"
+                <html>
+                <head><title>{} - Google Search</title></head>
+                <body>
+                    <h1>Google</h1>
+                    <p>Search Results for: <strong>"{}"</strong></p>
+                    <hr>
+                    <h2>1. {} - Official Portal</h2>
+                    <p>Discover latest information, documentation, and resources about {}.</p>
+                    <a href="https://www.google.com/search?q={}+wiki">https://en.wikipedia.org/wiki/{}</a>
+                    <hr>
+                    <h2>2. {} - SparkOS Community Hub</h2>
+                    <p>Fast, microkernel-native operating system articles, discussions, and open-source packages.</p>
+                    <a href="about:sparkos">https://sparkos.org/community/{}</a>
+                    <hr>
+                    <h2>3. {} - Online Developer Reference</h2>
+                    <p>Authoritative guides, API contracts, tutorials, and developer documentation.</p>
+                    <a href="about:help">https://sparkos.org/docs/{}</a>
+                    <hr>
+                    <button>Next Page &gt;</button>
+                    <p></p>
+                    <a href="https://www.google.com">Back to Google Home</a>
+                </body>
+                </html>
+            "#, clean_q, clean_q, clean_q, clean_q, clean_q, clean_q, clean_q, clean_q, clean_q, clean_q);
+        }
+
+        // 2. Google Home Page
+        if url == "https://www.google.com" || url == "http://www.google.com" || url == "https://google.com" || url == "http://google.com" {
+            return String::from(r#"
+                <html>
+                <head><title>Google</title></head>
+                <body>
+                    <h1>Google</h1>
+                    <p>Search the world's information, including webpages, images, videos and more.</p>
+                    <hr>
+                    <p><strong>Quick Searches & Portals:</strong></p>
+                    <a href="https://www.google.com/search?q=sparkos+operating+system">SparkOS Operating System</a>
+                    <p></p>
+                    <a href="https://www.google.com/search?q=rust+programming+language">Rust Programming Language</a>
+                    <p></p>
+                    <a href="https://www.google.com/search?q=microkernel+architecture">Microkernel Architecture</a>
+                    <p></p>
+                    <a href="about:sparkos">SparkOS System Portal</a>
+                    <hr>
+                    <button>Google Search</button>
+                    <button>I'm Feeling Lucky</button>
+                </body>
+                </html>
+            "#);
+        }
+
+        // 3. Native Pages
         match url {
             "about:sparkos" | "sparkos://home" => {
                 String::from(r#"
@@ -307,11 +389,10 @@ impl BrowserState {
                             <li>Pure Rust Zero-Allocation Wire Input Pipeline</li>
                             <li>Multi-Instance Isolated Desktop Applications</li>
                         </ul>
-                        <h2>Explore Applications</h2>
-                        <p>Launch official apps or browse documentation:</p>
-                        <a href="about:help">Open Browser Guide</a>
+                        <h2>Explore Web & Docs</h2>
+                        <a href="https://www.google.com">Google Search Engine</a>
                         <p></p>
-                        <a href="http://sparkos.org/docs">Visit Official Online Docs</a>
+                        <a href="about:help">Open Browser Guide</a>
                         <hr>
                         <button>System Status: OK</button>
                     </body>
@@ -325,12 +406,17 @@ impl BrowserState {
                     <body>
                         <h1>Browser Keyboard & Mouse Controls</h1>
                         <hr>
+                        <p><strong>Search & Address Bar:</strong></p>
+                        <ul>
+                            <li>Type any search query & press Enter to Search with Google</li>
+                            <li>Type direct URL (e.g. google.com or sparkos.org) to visit directly</li>
+                            <li>Click '[x]' to clear address bar immediately</li>
+                        </ul>
                         <p><strong>Navigation:</strong></p>
                         <ul>
                             <li>Click '&lt;' button to go Back</li>
                             <li>Click '&gt;' button to go Forward</li>
                             <li>Click 'R' to Reload current page</li>
-                            <li>Click URL bar to edit address</li>
                         </ul>
                         <p><strong>Scrolling:</strong></p>
                         <ul>
@@ -339,7 +425,7 @@ impl BrowserState {
                             <li>Click Hyperlinks to navigate</li>
                         </ul>
                         <hr>
-                        <a href="about:sparkos">Return to Home</a>
+                        <a href="https://www.google.com">Go to Google</a>
                     </body>
                     </html>
                 "#)
@@ -360,7 +446,7 @@ impl BrowserState {
                         <pre>Server: SparkNet/1.0
 Connection: keep-alive</pre>
                         <hr>
-                        <a href="about:sparkos">Back to SparkOS Portal</a>
+                        <a href="https://www.google.com">Search on Google</a>
                     </body>
                     </html>
                 "#, url, url)
@@ -373,7 +459,7 @@ Connection: keep-alive</pre>
                         <h1>404 Not Found</h1>
                         <p>The requested URL <code>{}</code> could not be resolved.</p>
                         <hr>
-                        <a href="about:sparkos">Return to Home</a>
+                        <a href="https://www.google.com">Search on Google</a>
                     </body>
                     </html>
                 "#, url)
@@ -405,6 +491,13 @@ Connection: keep-alive</pre>
         self.load_url(&current);
     }
 
+    /// Clears search/URL input bar
+    pub fn clear_url_input(&mut self) {
+        self.url_input.clear();
+        self.cursor_pos = 0;
+        self.url_bar_focused = true;
+    }
+
     /// Scrolls the viewport up or down
     pub fn scroll_by(&mut self, delta: i32) {
         if delta < 0 {
@@ -419,37 +512,48 @@ Connection: keep-alive</pre>
     // -----------------------------------------------------------------------
 
     pub fn handle_mouse_click(&mut self, mx: u32, my: u32) -> bool {
-        // 1. Navigation Bar Hit-testing (y in 4..26)
+        // 1. Navigation & Search Bar Hit-testing (y in 4..26)
         if my >= 4 && my <= 26 {
-            // Back Button '<' (x: 8..34)
-            if mx >= 8 && mx <= 34 {
+            // Back Button '<' (x: 6..32)
+            if mx >= 6 && mx <= 32 {
                 self.navigate_back();
                 return true;
             }
-            // Forward Button '>' (x: 38..64)
-            if mx >= 38 && mx <= 64 {
+            // Forward Button '>' (x: 36..62)
+            if mx >= 36 && mx <= 62 {
                 self.navigate_forward();
                 return true;
             }
-            // Reload Button 'R' (x: 68..94)
-            if mx >= 68 && mx <= 94 {
+            // Reload Button 'R' (x: 66..92)
+            if mx >= 66 && mx <= 92 {
                 self.reload();
                 return true;
             }
-            // URL Bar (x: 98 .. w - 54)
-            let url_bar_w = BROWSER_WIDTH.saturating_sub(156);
-            if mx >= 98 && mx <= 98 + url_bar_w {
+
+            let search_btn_w = 48u32;
+            let clear_btn_w = 20u32;
+            let bar_start_x = 96u32;
+            let bar_end_x = BROWSER_WIDTH.saturating_sub(search_btn_w + 8);
+            let url_w = bar_end_x.saturating_sub(bar_start_x);
+
+            // Clear Button '×' (inside URL bar on the right: bar_end_x - 22 .. bar_end_x - 2)
+            if mx >= bar_end_x.saturating_sub(22) && mx <= bar_end_x - 2 {
+                self.clear_url_input();
+                return true;
+            }
+
+            // Search/URL Input Bar Area
+            if mx >= bar_start_x && mx < bar_end_x.saturating_sub(22) {
                 self.url_bar_focused = true;
-                let rel_x = mx.saturating_sub(104);
+                let rel_x = mx.saturating_sub(bar_start_x + 6);
                 let char_idx = (rel_x / 8) as usize;
                 self.cursor_pos = char_idx.min(self.url_input.len());
                 return true;
             }
-            // Go Button (x: w - 50 .. w - 8)
-            let go_x = BROWSER_WIDTH.saturating_sub(50);
-            if mx >= go_x && mx <= go_x + 42 {
-                let target = self.url_input.clone();
-                self.load_url(&target);
+
+            // Search / Go Button [Search] (x: bar_end_x + 4 .. w - 4)
+            if mx >= bar_end_x + 4 && mx <= BROWSER_WIDTH - 4 {
+                self.navigate_to_input();
                 self.url_bar_focused = false;
                 return true;
             }
@@ -474,85 +578,103 @@ Connection: keep-alive</pre>
         false
     }
 
-    pub fn handle_key_input(&mut self, key_code: u8, is_ctrl: bool) -> bool {
+    pub fn handle_key_input(&mut self, scancode: u8, is_ctrl: bool, is_shift: bool) -> bool {
         if self.url_bar_focused {
-            match key_code {
-                10 | 13 => { // Enter
-                    let target = self.url_input.clone();
-                    self.load_url(&target);
+            match scancode {
+                0x1C => { // Enter -> Search with Google or Navigate to URL
+                    self.navigate_to_input();
                     self.url_bar_focused = false;
                     return true;
                 }
-                27 => { // Esc
+                0x01 => { // Esc -> Restore active URL and unfocus
                     self.url_input = self.active_url.clone();
                     self.url_bar_focused = false;
                     return true;
                 }
-                8 => { // Backspace
+                0x0E => { // Backspace
                     if self.cursor_pos > 0 && !self.url_input.is_empty() {
                         self.url_input.remove(self.cursor_pos - 1);
                         self.cursor_pos -= 1;
                     }
                     return true;
                 }
-                127 => { // Delete
+                0x53 => { // Delete
                     if self.cursor_pos < self.url_input.len() {
                         self.url_input.remove(self.cursor_pos);
                     }
                     return true;
                 }
-                17 => { // Left Arrow
+                0x4B => { // Left Arrow
                     self.cursor_pos = self.cursor_pos.saturating_sub(1);
                     return true;
                 }
-                18 => { // Right Arrow
+                0x4D => { // Right Arrow
                     self.cursor_pos = (self.cursor_pos + 1).min(self.url_input.len());
                     return true;
                 }
-                19 => { // Home
+                0x47 => { // Home
                     self.cursor_pos = 0;
                     return true;
                 }
-                20 => { // End
+                0x4F => { // End
                     self.cursor_pos = self.url_input.len();
                     return true;
                 }
-                c if c >= 32 && c <= 126 => {
-                    self.url_input.insert(self.cursor_pos, c as char);
-                    self.cursor_pos += 1;
-                    return true;
+                _ => {
+                    // Try converting PS/2 scancode to ASCII char
+                    if let Some(c) = scancode_to_ascii_char(scancode, is_shift) {
+                        if c >= ' ' && c <= '~' {
+                            self.url_input.insert(self.cursor_pos, c);
+                            self.cursor_pos += 1;
+                            return true;
+                        }
+                    }
                 }
-                _ => {}
             }
         } else {
-            // Viewport Scroll Controls
-            match key_code {
-                21 => { // Page Up
+            // Viewport Scroll Controls & Shortcuts
+            match scancode {
+                0x49 => { // Page Up
                     self.scroll_by(-60);
                     return true;
                 }
-                22 => { // Page Down
+                0x51 => { // Page Down
                     self.scroll_by(60);
                     return true;
                 }
-                23 => { // Up Arrow
+                0x48 => { // Up Arrow
                     self.scroll_by(-20);
                     return true;
                 }
-                24 => { // Down Arrow
+                0x50 => { // Down Arrow
                     self.scroll_by(20);
                     return true;
                 }
-                c if is_ctrl && (c == b'r' || c == b'R') => {
+                0x13 if is_ctrl => { // Ctrl+R -> Reload
                     self.reload();
                     return true;
                 }
-                c if is_ctrl && (c == b'l' || c == b'L') => {
+                0x26 if is_ctrl => { // Ctrl+L -> Focus Address/Search Bar
                     self.url_bar_focused = true;
                     self.cursor_pos = self.url_input.len();
                     return true;
                 }
-                _ => {}
+                0x1C => { // Enter on page -> Focus Search Bar if not focused
+                    self.url_bar_focused = true;
+                    return true;
+                }
+                _ => {
+                    // If user starts typing printable character, automatically focus search bar
+                    if let Some(c) = scancode_to_ascii_char(scancode, is_shift) {
+                        if c >= ' ' && c <= '~' {
+                            self.url_input.clear();
+                            self.url_input.push(c);
+                            self.cursor_pos = 1;
+                            self.url_bar_focused = true;
+                            return true;
+                        }
+                    }
+                }
             }
         }
         false
@@ -579,48 +701,57 @@ Connection: keep-alive</pre>
         // Back Button [<]
         let back_enabled = self.history_idx > 0;
         let back_bg = if back_enabled { 0x002563EB } else { 0x00334155 };
-        draw_surf_rect(surface_ptr, w, h, 8, 4, 26, 22, back_bg);
-        crate::font::draw_text(surface_ptr, w, h, 16, 8, "<", 0x00FFFFFF, back_bg);
+        draw_surf_rect(surface_ptr, w, h, 6, 4, 26, 22, back_bg);
+        crate::font::draw_text(surface_ptr, w, h, 14, 8, "<", 0x00FFFFFF, back_bg);
 
         // Forward Button [>]
         let fwd_enabled = self.history_idx + 1 < self.history.len();
         let fwd_bg = if fwd_enabled { 0x002563EB } else { 0x00334155 };
-        draw_surf_rect(surface_ptr, w, h, 38, 4, 26, 22, fwd_bg);
-        crate::font::draw_text(surface_ptr, w, h, 46, 8, ">", 0x00FFFFFF, fwd_bg);
+        draw_surf_rect(surface_ptr, w, h, 36, 4, 26, 22, fwd_bg);
+        crate::font::draw_text(surface_ptr, w, h, 44, 8, ">", 0x00FFFFFF, fwd_bg);
 
         // Reload Button [R]
-        draw_surf_rect(surface_ptr, w, h, 68, 4, 26, 22, 0x00334155);
-        crate::font::draw_text(surface_ptr, w, h, 76, 8, "R", 0x00E2E8F0, 0x00334155);
+        draw_surf_rect(surface_ptr, w, h, 66, 4, 26, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 74, 8, "R", 0x00E2E8F0, 0x00334155);
 
-        // URL Address Input Bar
-        let url_w = w.saturating_sub(156);
+        // Smart Search / URL Address Input Bar
+        let search_btn_w = 48u32;
+        let bar_start_x = 96u32;
+        let bar_end_x = w.saturating_sub(search_btn_w + 8);
+        let url_w = bar_end_x.saturating_sub(bar_start_x);
+
         let url_bg = if self.url_bar_focused { 0x000F172A } else { 0x00020617 };
         let url_border = if self.url_bar_focused { 0x0038BDF8 } else { 0x00475569 };
-        draw_surf_rect(surface_ptr, w, h, 98, 4, url_w, 22, url_bg);
-        draw_surf_rect(surface_ptr, w, h, 98, 4, url_w, 1, url_border);
-        draw_surf_rect(surface_ptr, w, h, 98, 25, url_w, 1, url_border);
+        draw_surf_rect(surface_ptr, w, h, bar_start_x, 4, url_w, 22, url_bg);
+        draw_surf_rect(surface_ptr, w, h, bar_start_x, 4, url_w, 1, url_border);
+        draw_surf_rect(surface_ptr, w, h, bar_start_x, 25, url_w, 1, url_border);
 
-        // Draw URL text
-        let max_visible_chars = (url_w.saturating_sub(12) / 8) as usize;
+        // Clear '[x]' button inside search bar
+        let clear_x = bar_end_x.saturating_sub(20);
+        if !self.url_input.is_empty() {
+            crate::font::draw_text(surface_ptr, w, h, clear_x, 8, "x", 0x0094A3B8, url_bg);
+        }
+
+        // Draw URL / Search Query Text
+        let max_visible_chars = (url_w.saturating_sub(28) / 8) as usize;
         let display_text = if self.url_input.len() > max_visible_chars {
             &self.url_input[self.url_input.len() - max_visible_chars..]
         } else {
             &self.url_input
         };
-        crate::font::draw_text(surface_ptr, w, h, 104, 8, display_text, 0x00F8FAFC, url_bg);
+        crate::font::draw_text(surface_ptr, w, h, bar_start_x + 6, 8, display_text, 0x00F8FAFC, url_bg);
 
-        // Cursor in URL bar
+        // Cursor in URL / Search bar
         if self.url_bar_focused {
-            let cursor_x = 104 + (self.cursor_pos.min(display_text.len()) as u32) * 8;
-            if cursor_x < 98 + url_w - 4 {
+            let cursor_x = bar_start_x + 6 + (self.cursor_pos.min(display_text.len()) as u32) * 8;
+            if cursor_x < clear_x - 2 {
                 draw_surf_rect(surface_ptr, w, h, cursor_x, 7, 2, 16, 0x0038BDF8);
             }
         }
 
-        // Go Button [Go]
-        let go_x = w.saturating_sub(50);
-        draw_surf_rect(surface_ptr, w, h, go_x, 4, 42, 22, 0x0010B981);
-        crate::font::draw_text(surface_ptr, w, h, go_x + 12, 8, "Go", 0x00FFFFFF, 0x0010B981);
+        // Search / Go Button [Search]
+        draw_surf_rect(surface_ptr, w, h, bar_end_x + 4, 4, search_btn_w, 22, 0x0010B981);
+        crate::font::draw_text(surface_ptr, w, h, bar_end_x + 10, 8, "Search", 0x00FFFFFF, 0x0010B981);
 
         // 2. Web Viewport Card (y = 30 .. h - 18)
         let vp_top = 30u32;
@@ -757,6 +888,63 @@ pub fn draw_surf_rect(surface_ptr: *mut u32, surf_w: u32, surf_h: u32, x: u32, y
     }
 }
 
+/// Helper to detect if a raw string is a domain name (e.g. google.com, sparkos.org)
+fn is_direct_domain(s: &str) -> bool {
+    if s.contains(' ') { return false; }
+    let suffixes = [".com", ".org", ".net", ".io", ".edu", ".gov", ".tr", ".dev", ".me", ".ai"];
+    for suffix in &suffixes {
+        if s.ends_with(suffix) || s.contains(&format!("{}/", suffix)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Converts PS/2 scancode to ASCII char
+fn scancode_to_ascii_char(scancode: u8, shift: bool) -> Option<char> {
+    const MAP_NORMAL: [u8; 128] = [
+        0,    0,   b'1', b'2', b'3', b'4', b'5', b'6',
+        b'7', b'8', b'9', b'0', b'-', b'=', 0,    0,
+        b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i',
+        b'o', b'p', b'[', b']', 0,    0,   b'a', b's',
+        b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';',
+        b'\'',b'`', 0,   b'\\',b'z', b'x', b'c', b'v',
+        b'b', b'n', b'm', b',', b'.', b'/', 0,   b'*',
+        0,   b' ', 0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        b'7', b'8', b'9', b'-', b'4', b'5', b'6', b'+',
+        b'1', b'2', b'3', b'0', b'.', 0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+    ];
+
+    const MAP_SHIFT: [u8; 128] = [
+        0,    0,   b'!', b'@', b'#', b'$', b'%', b'^',
+        b'&', b'*', b'(', b')', b'_', b'+', 0,    0,
+        b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I',
+        b'O', b'P', b'{', b'}', 0,    0,   b'A', b'S',
+        b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':',
+        b'"', b'~', 0,   b'|', b'Z', b'X', b'C', b'V',
+        b'B', b'N', b'M', b'<', b'>', b'?', 0,   b'*',
+        0,   b' ', 0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        b'7', b'8', b'9', b'-', b'4', b'5', b'6', b'+',
+        b'1', b'2', b'3', b'0', b'.', 0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+        0,    0,    0,    0,    0,    0,    0,    0,
+    ];
+
+    let idx = (scancode & 0x7F) as usize;
+    let b = if shift { MAP_SHIFT[idx] } else { MAP_NORMAL[idx] };
+    if b != 0 { Some(b as char) } else { None }
+}
+
 /// Simple word-wrapping helper for fixed width fonts
 fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     let mut lines = Vec::new();
@@ -815,7 +1003,7 @@ pub fn spawn_browser_app(name: &str) -> Result<u64, &'static str> {
 
     let surf_id = crate::surface::create_surface_for_pid(pid, BROWSER_WIDTH, BROWSER_HEIGHT)?;
     let win_id = crate::wm::WM.lock()
-        .create_window_with_meta(pid, surf_id, 90, 60, BROWSER_WIDTH, BROWSER_HEIGHT, String::from("Browser"), crate::app_registry::AppIcon::Browser)
+        .create_window_with_meta(pid, surf_id, 90, 60, BROWSER_WIDTH, BROWSER_HEIGHT, String::from("Google - Browser"), crate::app_registry::AppIcon::Browser)
         .map_err(|_| "window creation failed")?;
 
     let mut state = BrowserState::new(win_id);

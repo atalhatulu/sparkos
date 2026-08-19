@@ -14808,6 +14808,31 @@ pub mod browser2_tests {
             }
         }
 
+        pub fn navigate_to_input(&mut self) {
+            let raw_query = self.url_input.trim();
+            if raw_query.is_empty() { return; }
+
+            let resolved_url = if raw_query.starts_with("http://")
+                || raw_query.starts_with("https://")
+                || raw_query.starts_with("about:")
+                || raw_query.starts_with("file://")
+                || raw_query.starts_with("sparkos://") {
+                String::from(raw_query)
+            } else if raw_query.contains(".com") || raw_query.contains(".org") || raw_query.contains(".net") {
+                format!("https://{}", raw_query)
+            } else {
+                format!("https://www.google.com/search?q={}", raw_query)
+            };
+
+            self.load_url(&resolved_url);
+        }
+
+        pub fn clear_url_input(&mut self) {
+            self.url_input.clear();
+            self.cursor_pos = 0;
+            self.url_bar_focused = true;
+        }
+
         pub fn navigate_forward(&mut self) {
             if self.history_idx + 1 < self.history.len() {
                 self.history_idx += 1;
@@ -14815,6 +14840,49 @@ pub mod browser2_tests {
                 self.load_url(&target);
             }
         }
+    }
+
+    /// BROWSER2_SEARCH_INV-1: Plain text search query resolves to Google Search
+    #[test]
+    fn test_browser2_search_inv_1_default_google_search() {
+        let mut b = MockBrowserInstance::new(1, "https://www.google.com");
+        b.url_input = String::from("rust operating system");
+        b.navigate_to_input();
+
+        assert_eq!(b.active_url, "https://www.google.com/search?q=rust operating system");
+    }
+
+    /// BROWSER2_SEARCH_INV-2: Direct domain name resolves with https scheme
+    #[test]
+    fn test_browser2_search_inv_2_direct_domain_detection() {
+        let mut b = MockBrowserInstance::new(1, "https://www.google.com");
+        b.url_input = String::from("sparkos.org");
+        b.navigate_to_input();
+
+        assert_eq!(b.active_url, "https://sparkos.org");
+    }
+
+    /// BROWSER2_SEARCH_INV-3: Clear button clears URL input bar
+    #[test]
+    fn test_browser2_search_inv_3_clear_button() {
+        let mut b = MockBrowserInstance::new(1, "https://www.google.com");
+        assert_eq!(b.url_input, "https://www.google.com");
+
+        b.clear_url_input();
+        assert_eq!(b.url_input, "");
+        assert_eq!(b.cursor_pos, 0);
+        assert_eq!(b.url_bar_focused, true);
+    }
+
+    /// BROWSER2_SEARCH_INV-4: Google Search Results Page DOM Tree
+    #[test]
+    fn test_browser2_search_inv_4_google_search_results_page() {
+        let html = "<html><head><title>rust - Google Search</title></head><body><h1>Google</h1><p>Search Results for: rust</p><h2>1. Rust Portal</h2><a href=\"https://rust-lang.org\">Rust Lang</a></body></html>";
+        let doc = MockHtmlDoc::parse(html);
+
+        assert_eq!(doc.title, "rust - Google Search");
+        assert_eq!(doc.blocks[0], MockHtmlBlock::Heading(1, String::from("Google")));
+        assert_eq!(doc.blocks[1], MockHtmlBlock::Paragraph(String::from("Search Results for: rust")));
     }
 
     /// BROWSER2_HTML_PARSER_INV-1: Sequential DOM tree parsing
