@@ -1089,7 +1089,7 @@ impl WindowManager {
                 let surf_w = surface.width as usize;
                 let surf_h = surface.height as usize;
                 let target_w = (ww as usize).min((screen_w.saturating_sub(wx)) as usize);
-                let target_h = (wh as usize).min((dock_y.saturating_sub(wy + 20)) as usize);
+                let target_h = (wh as usize).min((screen_h.saturating_sub(wy + 20)) as usize);
 
                 let copy_w = surf_w.min(target_w);
                 let copy_h = surf_h.min(target_h);
