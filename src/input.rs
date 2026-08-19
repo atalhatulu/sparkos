@@ -125,7 +125,7 @@ pub fn route_mouse_down(cx: i32, cy: i32) {
     drop(wm);
 
     if let Some((wid, owner_pid)) = event_target {
-        let (local_x, local_y, target_surf_id) = {
+        let (local_x, local_y, target_surf_id, win_w, win_h) = {
             let wm = crate::wm::WM.lock();
             if let Some(w) = wm.windows.iter().find(|w| w.window_id == wid) {
                 let surf_reg = crate::surface::SURFACE_REGISTRY.read();
@@ -143,9 +143,9 @@ pub fn route_mouse_down(cx: i32, cy: i32) {
                 } else {
                     (cx - w.x, cy - (w.y + 20))
                 };
-                (lx, ly, Some(w.surface_id))
+                (lx, ly, Some(w.surface_id), w.width, w.height)
             } else {
-                (cx, cy, None)
+                (cx, cy, None, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT)
             }
         };
 
@@ -169,7 +169,7 @@ pub fn route_mouse_down(cx: i32, cy: i32) {
                 files_state.handle_mouse_click(local_x as u32, local_y as u32);
                 if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| Some(s.surface_id) == target_surf_id || s.owner_pid == owner_pid) {
                     let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                    files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
+                    files_state.render_to_surface(surf_ptr, win_w, win_h);
                 }
                 drop(files);
             } else {
@@ -180,7 +180,7 @@ pub fn route_mouse_down(cx: i32, cy: i32) {
                         editor_state.handle_mouse_click(local_x as u32, local_y as u32);
                         if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| Some(s.surface_id) == target_surf_id || s.owner_pid == owner_pid) {
                             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                            editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                            editor_state.render_to_surface(surf_ptr, win_w, win_h);
                         }
                         (true, editor_state.pending_close)
                     } else {
@@ -195,7 +195,7 @@ pub fn route_mouse_down(cx: i32, cy: i32) {
                         browser_state.handle_mouse_click(local_x as u32, local_y as u32);
                         if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| Some(s.surface_id) == target_surf_id || s.owner_pid == owner_pid) {
                             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                            browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                            browser_state.render_to_surface(surf_ptr, win_w, win_h);
                         }
                         drop(browsers);
                         let mut wm = crate::wm::WM.lock();
@@ -417,11 +417,11 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
         return None;
     }
 
-    let (focused_pid, focused_win_id, focused_surf_id) = {
+    let (focused_pid, focused_win_id, focused_surf_id, focused_win_w, focused_win_h) = {
         let wm = crate::wm::WM.lock();
         let fid = wm.focused_window?;
         let win = wm.windows.iter().find(|w| w.window_id == fid)?;
-        (win.owner_pid, fid, win.surface_id)
+        (win.owner_pid, fid, win.surface_id, win.width, win.height)
     };
 
     // 2. Check Alt-F4 Window Close Shortcut
@@ -433,7 +433,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     editor_state.show_unsaved_dialog = true;
                     if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
                         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                        editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                        editor_state.render_to_surface(surf_ptr, focused_win_w, focused_win_h);
                     }
                     true
                 } else {
@@ -494,7 +494,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     editor_state.handle_key_input(key_code, pressed);
                     if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
                         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                        editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                        editor_state.render_to_surface(surf_ptr, focused_win_w, focused_win_h);
                     }
                     (true, editor_state.pending_close)
                 } else {
@@ -518,7 +518,7 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     files_state.handle_key_input(key_code, pressed);
                     if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
                         let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                        files_state.render_to_surface(surf_ptr, crate::files_app::FILES_WIDTH, crate::files_app::FILES_HEIGHT);
+                        files_state.render_to_surface(surf_ptr, focused_win_w, focused_win_h);
                     }
                     drop(files);
                     let mut wm = crate::wm::WM.lock();
@@ -536,10 +536,10 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                                 let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
                                 match res {
                                     crate::browser_app::BrowserKeyResult::ToolbarChanged => {
-                                        browser_state.render_toolbar_only(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                                        browser_state.render_toolbar_only(surf_ptr, focused_win_w, focused_win_h);
                                     }
                                     crate::browser_app::BrowserKeyResult::FullPageChanged => {
-                                        browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                                        browser_state.render_to_surface(surf_ptr, focused_win_w, focused_win_h);
                                     }
                                     _ => {}
                                 }

@@ -40,6 +40,8 @@ pub struct FilesAppState {
     pub clipboard_item: Option<(String, bool)>, // (full_path, is_cut)
     pub status_message: String,
     pub last_click_item: Option<(usize, u64)>, // (index, tick) for double click
+    pub width: u32,
+    pub height: u32,
 }
 
 impl FilesAppState {
@@ -57,6 +59,8 @@ impl FilesAppState {
             clipboard_item: None,
             status_message: String::from("Ready"),
             last_click_item: None,
+            width: FILES_WIDTH,
+            height: FILES_HEIGHT,
         };
         state.load_directory("/home/teha");
         state
@@ -489,8 +493,10 @@ impl FilesAppState {
             }
         }
 
-        // 2. Left Places Sidebar Clicks (x in 0..90, y in 30..FILES_HEIGHT-18)
-        if local_x <= 90 && local_y >= 30 && local_y < FILES_HEIGHT.saturating_sub(18) {
+        let cur_h = self.height.max(crate::wm::MIN_WINDOW_HEIGHT);
+
+        // 2. Left Places Sidebar Clicks (x in 0..90, y in 30..cur_h-18)
+        if local_x <= 90 && local_y >= 30 && local_y < cur_h.saturating_sub(18) {
             let place_y = local_y.saturating_sub(44);
             let place_idx = place_y / 20;
             match place_idx {
@@ -503,9 +509,9 @@ impl FilesAppState {
             return;
         }
 
-        // 3. File Item List Clicks (x in 92..w, y in 48..FILES_HEIGHT-18)
+        // 3. File Item List Clicks (x in 92..w, y in 48..cur_h-18)
         let row_height = 20u32;
-        if local_x >= 92 && local_y >= 48 && local_y < FILES_HEIGHT.saturating_sub(18) {
+        if local_x >= 92 && local_y >= 48 && local_y < cur_h.saturating_sub(18) {
             let row_idx = ((local_y - 48) / row_height) as usize;
             if row_idx < self.entries.len() {
                 let is_double_click = if let Some((last_idx, last_tick)) = self.last_click_item {
@@ -554,8 +560,11 @@ impl FilesAppState {
         }
     }
 
-    pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
+    pub fn render_to_surface(&mut self, surface_ptr: *mut u32, w: u32, h: u32) {
         if surface_ptr.is_null() { return; }
+
+        self.width = w;
+        self.height = h;
         let bg_color = 0x000F172A;     // Main Content Dark Slate
         let sidebar_bg = 0x00090E17;   // Places Sidebar Darker Tone
         let toolbar_bg = 0x001E293B;   // Top Flat Toolbar
@@ -739,7 +748,7 @@ pub fn spawn_files_app(name: &str) -> Result<u64, &'static str> {
         .map_err(|_| "window creation failed")?;
 
     {
-        let state = FilesAppState::new(win_id, pid);
+        let mut state = FilesAppState::new(win_id, pid);
         if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == surf_id) {
             let phys_addr = surface.shmem_phys_addr;
             let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *mut u32 };

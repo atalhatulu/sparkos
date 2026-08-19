@@ -1412,7 +1412,7 @@ impl WindowManager {
                             editor_state.show_unsaved_dialog = true;
                             if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == win.surface_id || s.owner_pid == owner) {
                                 let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                                editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
+                                editor_state.render_to_surface(surf_ptr, win.width, win.height);
                             }
                             drop(editors);
                             return None;
