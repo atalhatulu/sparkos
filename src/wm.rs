@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
-pub const WORK_AREA_TOP: i32 = 20;
+pub const WORK_AREA_TOP: i32 = 24;
 pub const DOCK_HEIGHT: u16 = 24;
 pub const MIN_WINDOW_WIDTH: u32 = 120;
 pub const MIN_WINDOW_HEIGHT: u32 = 60;
@@ -385,7 +385,7 @@ impl WindowManager {
     pub fn restore_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
         let max_w = unsafe { crate::gui::VESA.width as u32 };
         let max_h = unsafe { crate::gui::VESA.height as u32 };
-        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32 + 20);
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
         let (win_x, win_y, win_w, win_h) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
@@ -445,7 +445,7 @@ impl WindowManager {
     pub fn snap_left(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
         let max_w = unsafe { crate::gui::VESA.width as u32 };
         let max_h = unsafe { crate::gui::VESA.height as u32 };
-        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32 + 20);
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
         let (old_x, old_y, old_w, old_h) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(WmError::NotFound)?;
@@ -477,7 +477,7 @@ impl WindowManager {
     pub fn snap_right(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
         let max_w = unsafe { crate::gui::VESA.width as u32 };
         let max_h = unsafe { crate::gui::VESA.height as u32 };
-        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32 + 20);
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
         let target_x = (max_w / 2) as i32;
         let target_w = max_w - (max_w / 2);
 
@@ -512,7 +512,7 @@ impl WindowManager {
         self.mark_full_damage();
         let max_w = unsafe { crate::gui::VESA.width as u32 };
         let max_h = unsafe { crate::gui::VESA.height as u32 };
-        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32 + 20);
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
         let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
@@ -525,7 +525,7 @@ impl WindowManager {
             // Restore to Normal geometry
             let (nx, ny, nw, nh) = win.normal_geom;
             win.x = nx.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
-            win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + DOCK_HEIGHT as u32 + 20)) as i32);
+            win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + 20)) as i32);
             win.width = nw.clamp(MIN_WINDOW_WIDTH, max_w);
             win.height = nh.clamp(MIN_WINDOW_HEIGHT, work_h);
             win.state = WindowState::Normal;
@@ -553,7 +553,7 @@ impl WindowManager {
         self.mark_full_damage();
         let max_w = unsafe { crate::gui::VESA.width as u32 };
         let max_h = unsafe { crate::gui::VESA.height as u32 };
-        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32 + DOCK_HEIGHT as u32 + 20);
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
         let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
@@ -573,7 +573,7 @@ impl WindowManager {
             } else {
                 let (nx, ny, nw, nh) = win.normal_geom;
                 win.x = nx.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
-                win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + DOCK_HEIGHT as u32 + 20)) as i32);
+                win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + 20)) as i32);
                 win.width = nw.clamp(MIN_WINDOW_WIDTH, max_w);
                 win.height = nh.clamp(MIN_WINDOW_HEIGHT, max_h);
                 win.state = WindowState::Normal;
@@ -1345,49 +1345,49 @@ impl WindowManager {
                 if mx >= wx - 6 && mx <= wx + 8 && my >= wy - 6 && my <= wy + 8 {
                     self.resizing_window = Some((wid, ResizeEdge::TopLeft, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 2. Top-Right Corner (10x10)
                 if mx >= wx + ww - 8 && mx <= wx + ww + 6 && my >= wy - 6 && my <= wy + 8 {
                     self.resizing_window = Some((wid, ResizeEdge::TopRight, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 3. Bottom-Left Corner (10x10)
                 if mx >= wx - 6 && mx <= wx + 8 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 6 {
                     self.resizing_window = Some((wid, ResizeEdge::BottomLeft, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 4. Bottom-Right Corner (10x10)
                 if mx >= wx + ww - 8 && mx <= wx + ww + 6 && my >= wy + 20 + wh - 8 && my <= wy + 20 + wh + 6 {
                     self.resizing_window = Some((wid, ResizeEdge::BottomRight, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 5. Left Edge
                 if mx >= wx - 6 && mx <= wx + 4 && my >= wy && my <= wy + 20 + wh {
                     self.resizing_window = Some((wid, ResizeEdge::Left, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 6. Right Edge
                 if mx >= wx + ww - 4 && mx <= wx + ww + 6 && my >= wy && my <= wy + 20 + wh {
                     self.resizing_window = Some((wid, ResizeEdge::Right, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 7. Top Edge
                 if mx >= wx && mx <= wx + ww && my >= wy - 6 && my <= wy + 4 {
                     self.resizing_window = Some((wid, ResizeEdge::Top, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
                 // 8. Bottom Edge
                 if mx >= wx && mx <= wx + ww && my >= wy + 20 + wh - 4 && my <= wy + 20 + wh + 6 {
                     self.resizing_window = Some((wid, ResizeEdge::Bottom, mx, my, wx, wy, win.width, win.height));
                     let _ = self.raise_to_top_internal(wid);
-                    return Some((wid, owner));
+                    return None;
                 }
             }
 
@@ -1404,7 +1404,7 @@ impl WindowManager {
                                 editor_state.render_to_surface(surf_ptr, crate::editor_app::EDITOR_WIDTH, crate::editor_app::EDITOR_HEIGHT);
                             }
                             drop(editors);
-                            return Some((wid, owner));
+                            return None;
                         }
                     }
                     drop(editors);
@@ -1434,7 +1434,7 @@ impl WindowManager {
                 if is_double_click {
                     self.last_titlebar_click = None;
                     let _ = self.toggle_maximize_window(owner, wid);
-                    return Some((wid, owner));
+                    return None;
                 } else {
                     self.last_titlebar_click = Some((wid, now_tick));
                 }
@@ -1442,10 +1442,10 @@ impl WindowManager {
                 // 5. Titlebar Drag start (Clicking on titlebar itself, not buttons)
                 self.dragging_window = Some((wid, mx - wx, my - wy));
                 let _ = self.raise_to_top_internal(wid);
-                return Some((wid, owner));
+                return None;
             }
 
-            // 3c. Check Client area click -> focus only (Surface content click does NOT start dragging)
+            // 3c. Check Client area click -> deliver event to client surface
             if mx >= wx && mx < wx + ww && my >= wy + 20 && my < wy + 20 + wh {
                 let _ = self.raise_to_top_internal(wid);
                 return Some((wid, owner));
@@ -1458,7 +1458,7 @@ impl WindowManager {
     pub fn handle_mouse_up(&mut self) -> Option<(u64, u64)> {
         let max_w = unsafe { crate::gui::VESA.width as i32 };
         let max_h = unsafe { crate::gui::VESA.height as i32 };
-        let work_h = max_h.saturating_sub(WORK_AREA_TOP + DOCK_HEIGHT as i32 + 20) as u32;
+        let work_h = max_h.saturating_sub(WORK_AREA_TOP) as u32;
 
         if let Some((wid, _, _)) = self.dragging_window.take() {
             if let Some(win) = self.windows.iter_mut().find(|w| w.window_id == wid) {
@@ -1522,7 +1522,6 @@ impl WindowManager {
     pub fn handle_mouse_move(&mut self, mx: i32, my: i32) {
         let max_w = unsafe { crate::gui::VESA.width as i32 };
         let max_h = unsafe { crate::gui::VESA.height as i32 };
-        let dock_y = max_h.saturating_sub(DOCK_HEIGHT as i32);
 
         // 1. Handle Window Resizing (8-Way)
         if let Some((wid, edge, start_mx, start_my, orig_x, orig_y, orig_w, orig_h)) = self.resizing_window {
@@ -1530,7 +1529,7 @@ impl WindowManager {
             let dy = my - start_my;
 
             if let Some(win) = self.windows.iter_mut().find(|w| w.window_id == wid) {
-                let max_avail_h = (dock_y - (orig_y + 20)).max(MIN_WINDOW_HEIGHT as i32) as u32;
+                let max_avail_h = (max_h - (orig_y + 20)).max(MIN_WINDOW_HEIGHT as i32) as u32;
 
                 let old_w = win.width;
                 let old_h = win.height;
@@ -1631,7 +1630,7 @@ impl WindowManager {
                 let prev_x = win.x;
                 let prev_y = win.y;
                 let new_x = (mx - ox).clamp(-100, max_w.saturating_sub(50));
-                let new_y = (my - oy).clamp(WORK_AREA_TOP, dock_y.saturating_sub(30));
+                let new_y = (my - oy).clamp(WORK_AREA_TOP, max_h.saturating_sub(30));
 
                 let min_box_x = prev_x.min(new_x) - 4;
                 let min_box_y = prev_y.min(new_y) - 4;

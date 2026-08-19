@@ -283,6 +283,9 @@ pub fn route_mouse_move(cx: i32, cy: i32, last_x: i32, last_y: i32) {
     wm.mark_damage(last_x.saturating_sub(4), last_y.saturating_sub(4), 28, 28);
     wm.mark_damage(cx.saturating_sub(4), cy.saturating_sub(4), 28, 28);
     wm.handle_mouse_move(cx, cy);
+    if wm.resizing_window.is_some() || wm.dragging_window.is_some() {
+        return;
+    }
     if let Some(target_id) = wm.hit_test(cx, cy) {
         if let Some(win) = wm.windows.iter().find(|w| w.window_id == target_id) {
             let local_x = cx - win.x;
