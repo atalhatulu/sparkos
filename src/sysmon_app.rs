@@ -13,52 +13,73 @@ pub fn render_sysmon_surface(surface_ptr: *mut u32, w: u32, h: u32) {
     if surface_ptr.is_null() { return; }
 
     let bg_color = 0x000F172A;     // Deep Slate
+    let panel_bg = 0x001E293B;     // Slate 800
+    let border_col = 0x00334155;
     let text_color = 0x00F8FAFC;   // Pure White
+    let text_muted = 0x0094A3B8;   // Muted Gray
     let header_color = 0x0038BDF8; // Sky Blue
-    let sub_color = 0x0094A3B8;    // Muted Gray
     let metric_green = 0x0034D399; // Emerald Green
     let metric_blue = 0x0060A5FA;  // Bright Blue
 
     crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-    // 1. Title & Header
-    crate::font::draw_text(surface_ptr, w, h, 8, 8, "SparkOS System Monitor v1.34", 0x00FBBF24, bg_color);
+    // 1. Title & Header Bar (y = 0..30)
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 0, w, 30, panel_bg);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 29, w, 1, border_col);
+    crate::font::draw_text(surface_ptr, w, h, 10, 8, "SparkOS System Monitor 2.0", header_color, panel_bg);
 
-    // 2. Hardware Resource Metrics Bar
+    // 2. Hardware Resource Metrics Cards (y = 34..68)
     let (used_mem, total_mem) = crate::memory::get_memory_stats();
     let used_mb = (used_mem / (1024 * 1024)).max(1);
     let total_mb = total_mem / (1024 * 1024);
 
     let metrics = crate::task::process::get_system_metrics_snapshot();
     let active_pids = metrics.len();
-    let cpu_pct = (active_pids * 3).min(99);
+    let cpu_pct = (active_pids * 4).min(99);
 
-    let sys_line1 = format!("CPU: {}% (Active: {})  |  RAM: {} / {} MB", cpu_pct, active_pids, used_mb, total_mb);
-    let sys_line2 = format!("DISK: 12 / 64 MB (SPFS)  |  GPU: N/A (Software Fallback)");
+    // CPU Card (x: 6..140)
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, 34, 134, 30, 0x000B132B);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, 34, 134, 1, border_col);
+    crate::font::draw_text(surface_ptr, w, h, 12, 38, "CPU USAGE", 0x0064748B, 0x000B132B);
+    let cpu_str = format!("{}%", cpu_pct);
+    crate::font::draw_text(surface_ptr, w, h, 12, 50, &cpu_str, 0x0038BDF8, 0x000B132B);
 
-    crate::font::draw_text(surface_ptr, w, h, 8, 24, &sys_line1, metric_green, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 38, &sys_line2, sub_color, bg_color);
+    // RAM Card (x: 146..286)
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 146, 34, 140, 30, 0x000B132B);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 146, 34, 140, 1, border_col);
+    crate::font::draw_text(surface_ptr, w, h, 152, 38, "MEMORY", 0x0064748B, 0x000B132B);
+    let ram_str = format!("{}/{} MB", used_mb, total_mb);
+    crate::font::draw_text(surface_ptr, w, h, 152, 50, &ram_str, metric_green, 0x000B132B);
 
-    crate::font::draw_text(surface_ptr, w, h, 8, 54, "--------------------------------------------------------", 0x00334155, bg_color);
+    // Storage Card (x: 292..w-6)
+    let card3_w = w.saturating_sub(298);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 292, 34, card3_w, 30, 0x000B132B);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 292, 34, card3_w, 1, border_col);
+    crate::font::draw_text(surface_ptr, w, h, 298, 38, "STORAGE (SPFS)", 0x0064748B, 0x000B132B);
+    crate::font::draw_text(surface_ptr, w, h, 298, 50, "12 / 64 MB", metric_blue, 0x000B132B);
 
-    // 3. Process Table Header
-    crate::font::draw_text(surface_ptr, w, h, 8, 66, "PID   NAME             STATE       MEM         CPU", header_color, bg_color);
-    crate::font::draw_text(surface_ptr, w, h, 8, 76, "--------------------------------------------------------", 0x00334155, bg_color);
+    // 3. Process Table Header (y = 70..88)
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 70, w, 18, 0x000B132B);
+    crate::font::draw_text(surface_ptr, w, h, 8, 74, "PID", 0x0038BDF8, 0x000B132B);
+    crate::font::draw_text(surface_ptr, w, h, 48, 74, "PROCESS NAME", 0x0038BDF8, 0x000B132B);
+    crate::font::draw_text(surface_ptr, w, h, 175, 74, "STATE", 0x0038BDF8, 0x000B132B);
+    crate::font::draw_text(surface_ptr, w, h, 260, 74, "MEMORY", 0x0038BDF8, 0x000B132B);
+    crate::font::draw_text(surface_ptr, w, h, 350, 74, "CPU TIME", 0x0038BDF8, 0x000B132B);
 
-    // 4. Live Process Rows
-    let mut y = 88u32;
-    for proc in metrics.iter() {
-        if y + 14 > h.saturating_sub(20) { break; }
+    // 4. Live Process Rows (y = 92..h-20)
+    let mut y = 92u32;
+    for (i, proc) in metrics.iter().enumerate() {
+        if y + 16 > h.saturating_sub(20) { break; }
 
-        let state_str = match proc.state {
-            crate::task::process::ProcessState::Running => "Running",
-            crate::task::process::ProcessState::Ready => "Ready",
-            crate::task::process::ProcessState::Blocked => "Blocked",
-            crate::task::process::ProcessState::Crashed => "Crashed",
-            crate::task::process::ProcessState::Terminated => "Terminated",
-            crate::task::process::ProcessState::Exited => "Exited",
-            crate::task::process::ProcessState::Reaped => "Reaped",
-            crate::task::process::ProcessState::New => "New",
+        let row_bg = if i % 2 == 0 { 0x00131C2E } else { bg_color };
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 4, y, w.saturating_sub(8), 16, row_bg);
+
+        let (state_str, state_col) = match proc.state {
+            crate::task::process::ProcessState::Running => ("RUNNING", 0x0034D399),
+            crate::task::process::ProcessState::Ready => ("READY", 0x0038BDF8),
+            crate::task::process::ProcessState::Blocked => ("BLOCKED", 0x00FBBF24),
+            crate::task::process::ProcessState::Terminated => ("STOPPED", 0x00EF4444),
+            _ => ("IDLE", 0x0094A3B8),
         };
 
         let mem_kb = (proc.current_memory_bytes / 1024).max(64);
@@ -70,21 +91,22 @@ pub fn render_sysmon_surface(surface_ptr: *mut u32, w: u32, h: u32) {
 
         let cpu_str = format!("{} ms", proc.cpu_time_ms);
 
-        let row = format!("{:<5} {:<16} {:<11} {:<11} {}",
-            proc.pid,
-            truncate_str(&proc.name, 16),
-            state_str,
-            mem_str,
-            cpu_str
-        );
+        let pid_str = format!("{}", proc.pid);
+        crate::font::draw_text(surface_ptr, w, h, 8, y + 2, &pid_str, text_color, row_bg);
+        crate::font::draw_text(surface_ptr, w, h, 48, y + 2, &truncate_str(&proc.name, 15), text_color, row_bg);
+        crate::font::draw_text(surface_ptr, w, h, 175, y + 2, state_str, state_col, row_bg);
+        crate::font::draw_text(surface_ptr, w, h, 260, y + 2, &mem_str, text_color, row_bg);
+        crate::font::draw_text(surface_ptr, w, h, 350, y + 2, &cpu_str, text_muted, row_bg);
 
-        crate::font::draw_text(surface_ptr, w, h, 8, y, &row, text_color, bg_color);
-        y += 14;
+        y += 18;
     }
 
-    // 5. Footer summary
-    let footer = format!("Total Processes: {} | Quota: Enforced", active_pids);
-    crate::font::draw_text(surface_ptr, w, h, 8, h.saturating_sub(16), &footer, metric_blue, bg_color);
+    // 5. Footer Summary Bar (y = h - 18 .. h)
+    let footer_y = h.saturating_sub(18);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, footer_y, w, 18, panel_bg);
+    crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, footer_y, w, 1, border_col);
+    let footer = format!("Total Processes: {} | Capability Quota: Active", active_pids);
+    crate::font::draw_text(surface_ptr, w, h, 8, footer_y + 4, &footer, metric_blue, panel_bg);
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

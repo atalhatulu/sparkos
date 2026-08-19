@@ -152,34 +152,35 @@ impl SettingsAppState {
 
     pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
         if surface_ptr.is_null() { return; }
-        let bg_color = 0x000F172A; // Deep Navy Slate
-        let sidebar_bg = 0x001E293B; // Slate 800
+        let bg_color = 0x000F172A;     // Deep Navy Slate
+        let sidebar_bg = 0x00090E17;   // Darker Slate Sidebar
+        let border_col = 0x00334155;
         let text_color = 0x00F8FAFC;
         let accent_color = 0x0038BDF8;
         let muted_color = 0x0094A3B8;
 
         crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-        // 1. Sidebar (Categories Navigation on Left: w = 110)
+        // 1. Left Flat Sidebar (x = 0..110)
         let sidebar_w = 110u32;
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 0, sidebar_w, h, sidebar_bg);
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, sidebar_w - 1, 0, 1, h, 0x00334155);
+        let content_h = h.saturating_sub(18);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 0, sidebar_w, content_h, sidebar_bg);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, sidebar_w - 1, 0, 1, content_h, border_col);
 
-        // Sidebar Header
-        crate::font::draw_text(surface_ptr, w, h, 12, 10, "Settings", accent_color, sidebar_bg);
+        crate::font::draw_text(surface_ptr, w, h, 10, 10, "SETTINGS", 0x0064748B, sidebar_bg);
 
         let categories = [
             (SettingsCategory::Appearance, "Appearance"),
             (SettingsCategory::Display, "Display"),
             (SettingsCategory::Desktop, "Desktop"),
-            (SettingsCategory::Keyboard, "Keyboard"),
+            (SettingsCategory::Keyboard, "Shortcuts"),
             (SettingsCategory::System, "System"),
         ];
 
-        let mut cat_y = 36u32;
+        let mut cat_y = 28u32;
         for (cat, label) in categories.iter() {
             let is_active = self.active_category == *cat;
-            let item_bg = if is_active { 0x002563EB } else { sidebar_bg };
+            let item_bg = if is_active { 0x002563EB } else { 0x00131C2E };
             let item_fg = if is_active { 0x00FFFFFF } else { muted_color };
 
             crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, cat_y, sidebar_w - 12, 22, item_bg);
@@ -187,56 +188,65 @@ impl SettingsAppState {
             cat_y += 26;
         }
 
-        // 2. Main Content Pane on Right (x = 124..w)
-        let cx = 124u32;
-        let cy = 12u32;
+        // 2. Main Content Pane on Right (x = 116..w)
+        let cx = sidebar_w + 10;
+        let cy = 10u32;
+        let main_w = w.saturating_sub(cx + 8);
+
+        // Category Header Strip
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, cx, cy, main_w, 24, 0x001E293B);
+        let cat_title = match self.active_category {
+            SettingsCategory::Appearance => "Appearance & Theme",
+            SettingsCategory::Display => "Display & Resolution",
+            SettingsCategory::Desktop => "Desktop Configuration",
+            SettingsCategory::Keyboard => "Global Shortcuts",
+            SettingsCategory::System => "System Information",
+        };
+        crate::font::draw_text(surface_ptr, w, h, cx + 8, cy + 4, cat_title, accent_color, 0x001E293B);
+
+        let card_y = cy + 32;
 
         match self.active_category {
             SettingsCategory::Appearance => {
-                crate::font::draw_text(surface_ptr, w, h, cx, cy, "Appearance Settings", accent_color, bg_color);
                 let theme_name = THEME_MANAGER.lock().current_theme.name;
                 let theme_label = format!("Active Theme: {}", theme_name);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 24, &theme_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y, &theme_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, "Accent Color: Sky Blue (#38BDF8)", text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Window Chrome: Flat 2D Modern", muted_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Top Panel: Unified Single Bar", muted_color, bg_color);
 
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 44, "Accent Color: Sky Blue (#38BDF8)", text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 64, "Window Chrome: Modern Rounded", muted_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 84, "Dock & Launcher: Dark Translucent", muted_color, bg_color);
-
-                // Theme Toggle Button
-                crate::files_app::draw_surf_rect(surface_ptr, w, h, cx, cy + 106, 140, 24, 0x002563EB);
-                crate::font::draw_text(surface_ptr, w, h, cx + 16, cy + 110, "[ Toggle Theme ]", 0x00FFFFFF, 0x002563EB);
+                // Theme Toggle Flat Button
+                crate::files_app::draw_surf_rect(surface_ptr, w, h, cx, card_y + 86, 150, 24, 0x002563EB);
+                crate::font::draw_text(surface_ptr, w, h, cx + 12, card_y + 90, "Toggle Dark / Light", 0x00FFFFFF, 0x002563EB);
             }
             SettingsCategory::Display => {
-                crate::font::draw_text(surface_ptr, w, h, cx, cy, "Display & Resolution", accent_color, bg_color);
                 let vesa_w = unsafe { crate::gui::VESA.width };
                 let vesa_h = unsafe { crate::gui::VESA.height };
-                let res_label = format!("Current Resolution: {}x{} @ 60 Hz", vesa_w, vesa_h);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 24, &res_label, text_color, bg_color);
+                let res_label = format!("Resolution: {}x{} @ 60 Hz", vesa_w, vesa_h);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y, &res_label, text_color, bg_color);
 
-                let work_h = vesa_h.saturating_sub(crate::wm::WORK_AREA_TOP as u16 + crate::wm::DOCK_HEIGHT + 20);
-                let work_label = format!("Desktop Work Area: {}x{}", vesa_w, work_h);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 44, &work_label, text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 64, "Display Driver: VESA Linear Framebuffer", muted_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 84, "Compositor: Decoupled 60 FPS Engine", 0x0010B981, bg_color);
+                let work_h = vesa_h.saturating_sub(crate::wm::WORK_AREA_TOP as u16 + 20);
+                let work_label = format!("Work Area: {}x{}", vesa_w, work_h);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, &work_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Driver: VESA Linear Framebuffer", muted_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Compositor: 60 FPS Damage Tracking", 0x0034D399, bg_color);
             }
             SettingsCategory::Desktop => {
-                crate::font::draw_text(surface_ptr, w, h, cx, cy, "Desktop Configuration", accent_color, bg_color);
                 let store = SETTINGS_STORE.lock();
                 let wp_label = format!("Wallpaper: {}", store.wallpaper_name);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 24, &wp_label, text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 44, "Desktop Icons: Enabled (Visible)", text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 64, "Dock Style: Fixed Bottom Bar (24px)", muted_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 84, "Launcher: Start Menu with Dynamic Apps", muted_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y, &wp_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, "Desktop Icons: Enabled (Visible)", text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Top Panel: Top Taskbar & Launcher", muted_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Launcher: Full Application Menu", muted_color, bg_color);
             }
             SettingsCategory::Keyboard => {
-                crate::font::draw_text(surface_ptr, w, h, cx, cy, "Keyboard Shortcuts", accent_color, bg_color);
                 let shortcuts = [
                     ("F1 / Ctrl+Alt+T", "Spawn Terminal Instance"),
-                    ("Alt + Tab", "MRU Window Switcher HUD"),
-                    ("Ctrl + Escape", "Toggle Application Launcher"),
+                    ("Alt + Tab", "MRU Window Switcher"),
+                    ("Ctrl + Escape", "Application Launcher"),
                     ("Alt + F4", "Close Focused Window"),
                 ];
-                let mut sy = cy + 24;
+                let mut sy = card_y;
                 for (keys, desc) in shortcuts.iter() {
                     let kline = format!("• {}:", keys);
                     crate::font::draw_text(surface_ptr, w, h, cx, sy, &kline, 0x00F8FAFC, bg_color);
@@ -245,21 +255,21 @@ impl SettingsAppState {
                 }
             }
             SettingsCategory::System => {
-                crate::font::draw_text(surface_ptr, w, h, cx, cy, "System Information", accent_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 24, "OS: SparkOS Microkernel v1.36", 0x0034D399, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 44, "CPU: x86_64 SMP (Multi-Core)", text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 64, "RAM: 256 MB Total Physical Memory", text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y, "OS: SparkOS Microkernel v2.0", 0x0034D399, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, "CPU: x86_64 SMP (Preemptive)", text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Memory: 256 MB Physical RAM", text_color, bg_color);
                 let win_count = crate::wm::WM.lock().windows.len();
                 let win_label = format!("Active Windows: {}", win_count);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 84, &win_label, text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, cy + 104, "Isolation: Capability CSpace + CR3", text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, &win_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 80, "Security: Capability CSpace Model", text_color, bg_color);
             }
         }
 
         // 3. Status Bar at bottom
         let status_y = h.saturating_sub(18);
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, sidebar_bg);
-        crate::font::draw_text(surface_ptr, w, h, 10, status_y + 2, &self.status_message, muted_color, sidebar_bg);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, 0x001E293B);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 1, border_col);
+        crate::font::draw_text(surface_ptr, w, h, 8, status_y + 4, &self.status_message, 0x0034D399, 0x001E293B);
     }
 }
 

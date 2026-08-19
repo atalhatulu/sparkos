@@ -1007,81 +1007,88 @@ impl EditorAppState {
 
     pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
         if surface_ptr.is_null() { return; }
-        let bg_color = 0x000B0F19; // Obsidian Dark Slate
-        let panel_bg = 0x001E293B; // Slate 800
+        let bg_color = 0x000B0F19;     // Obsidian Dark Slate
+        let panel_bg = 0x001E293B;     // Slate 800
+        let border_col = 0x00334155;
         let text_color = 0x00F8FAFC;
+        let text_muted = 0x0094A3B8;
         let line_num_col = 0x0064748B;
-        let dirty_col = 0x00F59E0B; // Amber
-        let sel_bg = 0x002563EB;   // Selection Blue
+        let dirty_col = 0x00F59E0B;     // Amber
+        let sel_bg = 0x002563EB;       // Selection Blue
 
         crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-        // 1. Top Toolbar
-        draw_surf_rect(surface_ptr, w, h, 0, 0, w, 26, panel_bg);
+        // 1. Top Flat Toolbar (y = 0..30)
+        draw_surf_rect(surface_ptr, w, h, 0, 0, w, 30, panel_bg);
+        draw_surf_rect(surface_ptr, w, h, 0, 29, w, 1, border_col);
 
-        // [Save]
-        draw_surf_rect(surface_ptr, w, h, 6, 4, 46, 18, 0x002563EB);
-        crate::font::draw_text(surface_ptr, w, h, 12, 7, "Save", text_color, 0x002563EB);
+        // [ Save ]
+        draw_surf_rect(surface_ptr, w, h, 6, 4, 46, 22, 0x002563EB);
+        crate::font::draw_text(surface_ptr, w, h, 14, 8, "Save", text_color, 0x002563EB);
 
-        // [New]
-        draw_surf_rect(surface_ptr, w, h, 56, 4, 42, 18, 0x00334155);
-        crate::font::draw_text(surface_ptr, w, h, 64, 7, "New", text_color, 0x00334155);
+        // [ New ]
+        draw_surf_rect(surface_ptr, w, h, 56, 4, 42, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 64, 8, "New", text_color, 0x00334155);
 
-        // [Wrap]
+        // [ Undo ]
+        draw_surf_rect(surface_ptr, w, h, 102, 4, 42, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 108, 8, "Undo", text_color, 0x00334155);
+
+        // [ Wrap ]
         let wrap_bg = if self.word_wrap { 0x0016A34A } else { 0x00334155 };
-        draw_surf_rect(surface_ptr, w, h, 102, 4, 46, 18, wrap_bg);
-        crate::font::draw_text(surface_ptr, w, h, 108, 7, "Wrap", text_color, wrap_bg);
+        draw_surf_rect(surface_ptr, w, h, 148, 4, 44, 22, wrap_bg);
+        crate::font::draw_text(surface_ptr, w, h, 154, 8, "Wrap", text_color, wrap_bg);
 
-        // [Find]
+        // [ Find ]
         let find_bg = if self.show_find_dialog { 0x00D97706 } else { 0x00334155 };
-        draw_surf_rect(surface_ptr, w, h, 152, 4, 42, 18, find_bg);
-        crate::font::draw_text(surface_ptr, w, h, 160, 7, "Find", text_color, find_bg);
+        draw_surf_rect(surface_ptr, w, h, 196, 4, 42, 22, find_bg);
+        crate::font::draw_text(surface_ptr, w, h, 204, 8, "Find", text_color, find_bg);
 
         // File Title & Dirty Marker
         let file_label = self.file_path.as_deref().unwrap_or("[Untitled]");
         let dirty_marker = if self.is_dirty { " *" } else { "" };
         let full_title = format!("{}{}", file_label, dirty_marker);
         let title_col = if self.is_dirty { dirty_col } else { 0x0038BDF8 };
-        crate::font::draw_text(surface_ptr, w, h, 202, 7, &full_title, title_col, panel_bg);
+        crate::font::draw_text(surface_ptr, w, h, 246, 8, &full_title, title_col, panel_bg);
 
         // 2. Find & Replace Overlay Toolbar (if open)
         let text_start_y = if self.show_find_dialog {
-            draw_surf_rect(surface_ptr, w, h, 0, 26, w, 28, 0x000F172A);
-            draw_surf_rect(surface_ptr, w, h, 0, 53, w, 1, 0x00334155);
+            draw_surf_rect(surface_ptr, w, h, 0, 30, w, 28, 0x000F172A);
+            draw_surf_rect(surface_ptr, w, h, 0, 57, w, 1, border_col);
 
             // Find Query Input Box
             let f_box_bg = if self.active_input_field == 1 { 0x001E293B } else { 0x000B0F19 };
-            draw_surf_rect(surface_ptr, w, h, 6, 30, 134, 20, f_box_bg);
+            draw_surf_rect(surface_ptr, w, h, 6, 33, 134, 22, f_box_bg);
             let f_display = if self.search_query.is_empty() { "Search..." } else { &self.search_query };
             let f_col = if self.search_query.is_empty() { 0x0064748B } else { 0x00FFFFFF };
-            crate::font::draw_text(surface_ptr, w, h, 10, 33, f_display, f_col, f_box_bg);
+            crate::font::draw_text(surface_ptr, w, h, 10, 37, f_display, f_col, f_box_bg);
 
             // [Next]
-            draw_surf_rect(surface_ptr, w, h, 146, 30, 38, 20, 0x002563EB);
-            crate::font::draw_text(surface_ptr, w, h, 150, 33, "Next", 0x00FFFFFF, 0x002563EB);
+            draw_surf_rect(surface_ptr, w, h, 146, 33, 38, 22, 0x002563EB);
+            crate::font::draw_text(surface_ptr, w, h, 150, 37, "Next", 0x00FFFFFF, 0x002563EB);
 
             // [Prev]
-            draw_surf_rect(surface_ptr, w, h, 188, 30, 38, 20, 0x00334155);
-            crate::font::draw_text(surface_ptr, w, h, 194, 33, "Prev", 0x00FFFFFF, 0x00334155);
+            draw_surf_rect(surface_ptr, w, h, 188, 33, 38, 22, 0x00334155);
+            crate::font::draw_text(surface_ptr, w, h, 194, 37, "Prev", 0x00FFFFFF, 0x00334155);
 
             // [Aa] Match Case
             let case_bg = if self.case_sensitive { 0x0016A34A } else { 0x00334155 };
-            draw_surf_rect(surface_ptr, w, h, 230, 30, 28, 20, case_bg);
-            crate::font::draw_text(surface_ptr, w, h, 236, 33, "Aa", 0x00FFFFFF, case_bg);
+            draw_surf_rect(surface_ptr, w, h, 230, 33, 28, 22, case_bg);
+            crate::font::draw_text(surface_ptr, w, h, 236, 37, "Aa", 0x00FFFFFF, case_bg);
 
             if self.show_replace_dialog {
                 // [Replace All]
-                draw_surf_rect(surface_ptr, w, h, 264, 30, 86, 20, 0x007C3AED);
-                crate::font::draw_text(surface_ptr, w, h, 268, 33, "Replace All", 0x00FFFFFF, 0x007C3AED);
+                draw_surf_rect(surface_ptr, w, h, 264, 33, 86, 22, 0x007C3AED);
+                crate::font::draw_text(surface_ptr, w, h, 268, 37, "Replace All", 0x00FFFFFF, 0x007C3AED);
             }
 
             // Close Find Box [X]
-            draw_surf_rect(surface_ptr, w, h, w.saturating_sub(30), 30, 24, 20, 0x00DC2626);
-            crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(22), 33, "x", 0x00FFFFFF, 0x00DC2626);
+            draw_surf_rect(surface_ptr, w, h, w.saturating_sub(30), 33, 24, 22, 0x00DC2626);
+            crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(22), 37, "x", 0x00FFFFFF, 0x00DC2626);
 
-            58u32
+            62u32
         } else {
-            30u32
+            34u32
         };
 
         // 3. Main Editor Text Area (with Scroll Offsets and Smart Word Wrap)
@@ -1127,11 +1134,15 @@ impl EditorAppState {
             y += 16;
         }
 
-        // 4. Status Bar at bottom
+        // 4. Status Bar at Bottom (y = h - 18 .. h)
         let status_y = h.saturating_sub(18);
         draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, panel_bg);
+        draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 1, border_col);
         let cursor_info = format!("Ln {}, Col {} | {}", self.cursor_row + 1, self.cursor_col + 1, self.status_message);
-        crate::font::draw_text(surface_ptr, w, h, 10, status_y + 2, &cursor_info, 0x0094A3B8, panel_bg);
+        crate::font::draw_text(surface_ptr, w, h, 8, status_y + 4, &cursor_info, 0x0034D399, panel_bg);
+
+        let enc_info = "UTF-8";
+        crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(50), status_y + 4, enc_info, text_muted, panel_bg);
 
         // 5. Modal Dialog: Unsaved Changes (if active)
         if self.show_unsaved_dialog {

@@ -459,29 +459,54 @@ impl FilesAppState {
     pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) {
         let now_tick = crate::interrupts::get_tick();
 
-        // 1. Toolbar clicks (y in 6..28)
-        if local_y >= 6 && local_y <= 28 {
-            // [<- Back] (x: 6..38)
-            if local_x >= 6 && local_x <= 38 {
+        // 1. Flat Toolbar Clicks (y in 4..26)
+        if local_y >= 4 && local_y <= 26 {
+            // [ < ] Back (x: 6..28)
+            if local_x >= 6 && local_x <= 28 {
                 self.go_back();
                 return;
             }
-            // [^ Up] (x: 42..74)
-            if local_x >= 42 && local_x <= 74 {
+            // [ > ] Forward (x: 32..54)
+            if local_x >= 32 && local_x <= 54 {
+                self.go_forward();
+                return;
+            }
+            // [ ^ ] Up (x: 58..80)
+            if local_x >= 58 && local_x <= 80 {
                 self.go_parent();
                 return;
             }
-            // [Refresh] (x: 360..436)
-            if local_x >= 360 && local_x <= 436 {
+            // [ R ] Refresh (x: 84..106)
+            if local_x >= 84 && local_x <= 106 {
                 self.refresh();
+                return;
+            }
+            // [ + New ] Create new file (x: 110..158)
+            if local_x >= 110 && local_x <= 158 {
+                let new_file_name = format!("file_{}.txt", self.entries.len() + 1);
+                self.create_file(&new_file_name);
                 return;
             }
         }
 
-        // 2. File item list clicks (y in 38..h-20)
+        // 2. Left Places Sidebar Clicks (x in 0..90, y in 30..FILES_HEIGHT-18)
+        if local_x <= 90 && local_y >= 30 && local_y < FILES_HEIGHT.saturating_sub(18) {
+            let place_y = local_y.saturating_sub(44);
+            let place_idx = place_y / 20;
+            match place_idx {
+                0 => self.navigate_to("/home/teha"),
+                1 => self.navigate_to("/"),
+                2 => self.navigate_to("/bin"),
+                3 => self.navigate_to("/tmp"),
+                _ => {}
+            }
+            return;
+        }
+
+        // 3. File Item List Clicks (x in 92..w, y in 48..FILES_HEIGHT-18)
         let row_height = 20u32;
-        if local_y >= 38 && local_y < FILES_HEIGHT.saturating_sub(20) {
-            let row_idx = ((local_y - 38) / row_height) as usize;
+        if local_x >= 92 && local_y >= 48 && local_y < FILES_HEIGHT.saturating_sub(18) {
+            let row_idx = ((local_y - 48) / row_height) as usize;
             if row_idx < self.entries.len() {
                 let is_double_click = if let Some((last_idx, last_tick)) = self.last_click_item {
                     last_idx == row_idx && now_tick.saturating_sub(last_tick) <= 300
@@ -531,58 +556,127 @@ impl FilesAppState {
 
     pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
         if surface_ptr.is_null() { return; }
-        let bg_color = 0x000F172A; // Deep Navy Slate
-        let panel_bg = 0x001E293B; // Slate 800
+        let bg_color = 0x000F172A;     // Main Content Dark Slate
+        let sidebar_bg = 0x00090E17;   // Places Sidebar Darker Tone
+        let toolbar_bg = 0x001E293B;   // Top Flat Toolbar
+        let border_col = 0x00334155;
         let text_color = 0x00F8FAFC;
-        let accent_color = 0x0038BDF8;
+        let text_muted = 0x0094A3B8;
+        let accent_sky = 0x0038BDF8;
+        let btn_bg = 0x00334155;
+        let btn_accent = 0x002563EB;
 
         crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-        // 1. Navigation & Breadcrumb Toolbar
-        draw_surf_rect(surface_ptr, w, h, 6, 6, 32, 22, 0x00334155);
-        crate::font::draw_text(surface_ptr, w, h, 14, 10, "<-", text_color, 0x00334155);
+        // 1. Top Flat Navigation Toolbar (y = 0..30)
+        draw_surf_rect(surface_ptr, w, h, 0, 0, w, 30, toolbar_bg);
+        draw_surf_rect(surface_ptr, w, h, 0, 29, w, 1, border_col);
 
-        draw_surf_rect(surface_ptr, w, h, 42, 6, 32, 22, 0x00334155);
-        crate::font::draw_text(surface_ptr, w, h, 52, 10, "^", text_color, 0x00334155);
+        // [ < ] Back
+        let back_enabled = self.history_idx > 0;
+        let back_bg = if back_enabled { btn_accent } else { btn_bg };
+        draw_surf_rect(surface_ptr, w, h, 6, 4, 22, 22, back_bg);
+        crate::font::draw_text(surface_ptr, w, h, 14, 8, "<", text_color, back_bg);
 
-        // Path Display
-        let path_w = w.saturating_sub(160);
-        draw_surf_rect(surface_ptr, w, h, 78, 6, path_w, 22, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 84, 10, &self.current_path, accent_color, panel_bg);
+        // [ > ] Forward
+        let fwd_enabled = self.history_idx + 1 < self.history.len();
+        let fwd_bg = if fwd_enabled { btn_accent } else { btn_bg };
+        draw_surf_rect(surface_ptr, w, h, 32, 4, 22, 22, fwd_bg);
+        crate::font::draw_text(surface_ptr, w, h, 40, 8, ">", text_color, fwd_bg);
 
-        // Refresh Button
-        let refresh_x = w.saturating_sub(76);
-        draw_surf_rect(surface_ptr, w, h, refresh_x, 6, 70, 22, 0x002563EB);
-        crate::font::draw_text(surface_ptr, w, h, refresh_x + 10, 10, "Refresh", text_color, 0x002563EB);
+        // [ ^ ] Up
+        draw_surf_rect(surface_ptr, w, h, 58, 4, 22, 22, btn_bg);
+        crate::font::draw_text(surface_ptr, w, h, 66, 8, "^", text_color, btn_bg);
 
-        // 2. Directory Listing Table
-        let mut y = 38u32;
+        // [ R ] Refresh
+        draw_surf_rect(surface_ptr, w, h, 84, 4, 22, 22, btn_bg);
+        crate::font::draw_text(surface_ptr, w, h, 92, 8, "R", accent_sky, btn_bg);
+
+        // [ + New ] Create
+        draw_surf_rect(surface_ptr, w, h, 110, 4, 48, 22, 0x0010B981);
+        crate::font::draw_text(surface_ptr, w, h, 116, 8, "+ New", text_color, 0x0010B981);
+
+        // Path Display Bar (Flat Address Box)
+        let path_x = 164u32;
+        let path_w = w.saturating_sub(path_x + 6);
+        draw_surf_rect(surface_ptr, w, h, path_x, 4, path_w, 22, 0x00020617);
+        draw_surf_rect(surface_ptr, w, h, path_x, 4, path_w, 1, border_col);
+        draw_surf_rect(surface_ptr, w, h, path_x, 25, path_w, 1, border_col);
+        crate::font::draw_text(surface_ptr, w, h, path_x + 6, 8, &self.current_path, accent_sky, 0x00020617);
+
+        // 2. Left Places Sidebar (x = 0..90, y = 30..h-18)
+        let sidebar_w = 90u32;
+        let content_h = h.saturating_sub(48);
+        draw_surf_rect(surface_ptr, w, h, 0, 30, sidebar_w, content_h, sidebar_bg);
+        draw_surf_rect(surface_ptr, w, h, sidebar_w - 1, 30, 1, content_h, border_col);
+
+        crate::font::draw_text(surface_ptr, w, h, 8, 34, "PLACES", 0x0064748B, sidebar_bg);
+
+        let places = [
+            ("Home", "/home/teha"),
+            ("Root", "/"),
+            ("Bin", "/bin"),
+            ("Temp", "/tmp"),
+        ];
+
+        for (idx, (label, path)) in places.iter().enumerate() {
+            let py = 48 + (idx as u32 * 22);
+            let is_active = self.current_path == *path;
+            let item_bg = if is_active { 0x001E293B } else { sidebar_bg };
+            let item_fg = if is_active { accent_sky } else { text_muted };
+            draw_surf_rect(surface_ptr, w, h, 4, py, sidebar_w - 8, 18, item_bg);
+            crate::font::draw_text(surface_ptr, w, h, 8, py + 2, label, item_fg, item_bg);
+        }
+
+        // 3. File Table Header (x = 92..w, y = 30..46)
+        let main_x = sidebar_w + 4;
+        let main_w = w.saturating_sub(main_x + 4);
+        draw_surf_rect(surface_ptr, w, h, main_x, 30, main_w, 16, toolbar_bg);
+        crate::font::draw_text(surface_ptr, w, h, main_x + 4, 32, "NAME", 0x0094A3B8, toolbar_bg);
+        crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(130), 32, "TYPE", 0x0094A3B8, toolbar_bg);
+        crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(60), 32, "SIZE", 0x0094A3B8, toolbar_bg);
+
+        // 4. File Table Items (y = 48..h-20)
+        let mut y = 48u32;
         for (i, entry) in self.entries.iter().enumerate() {
-            if y + 20 >= h.saturating_sub(20) { break; }
+            if y + 18 >= h.saturating_sub(18) { break; }
 
             let is_selected = self.selected_indices.contains(&i) || self.selected_idx == Some(i);
-            let row_bg = if is_selected { 0x001D4ED8 } else if i % 2 == 0 { panel_bg } else { bg_color };
+            let row_bg = if is_selected { 0x001D4ED8 } else if i % 2 == 0 { 0x00131C2E } else { bg_color };
 
-            draw_surf_rect(surface_ptr, w, h, 6, y, w.saturating_sub(12), 18, row_bg);
+            draw_surf_rect(surface_ptr, w, h, main_x, y, main_w, 18, row_bg);
 
-            let (icon_sym, icon_col) = match entry.item_type {
-                FileItemType::Directory => ("[DIR]", 0x00FBBF24), // Folder Amber
-                FileItemType::File => ("[FILE]", 0x0038BDF8),      // Document Sky Blue
-                FileItemType::Executable => ("[BIN]", 0x0010B981),// Binary Emerald
+            let (icon_sym, icon_col, type_str) = match entry.item_type {
+                FileItemType::Directory => ("D", 0x00FBBF24, "Folder"),
+                FileItemType::File => ("F", 0x0038BDF8, "Doc"),
+                FileItemType::Executable => ("X", 0x0034D399, "App"),
             };
 
-            crate::font::draw_text(surface_ptr, w, h, 10, y + 2, icon_sym, icon_col, row_bg);
-            crate::font::draw_text(surface_ptr, w, h, 58, y + 2, &entry.name, text_color, row_bg);
+            // Icon square
+            draw_surf_rect(surface_ptr, w, h, main_x + 4, y + 2, 14, 14, 0x001E293B);
+            crate::font::draw_text(surface_ptr, w, h, main_x + 8, y + 2, icon_sym, icon_col, 0x001E293B);
+
+            // Name
+            crate::font::draw_text(surface_ptr, w, h, main_x + 24, y + 2, &entry.name, text_color, row_bg);
+
+            // Type
+            crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(130), y + 2, type_str, text_muted, row_bg);
+
+            // Size
             let size_str = format!("{} B", entry.size_bytes);
-            crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(90), y + 2, &size_str, 0x0094A3B8, row_bg);
+            crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(60), y + 2, &size_str, text_muted, row_bg);
 
             y += 20;
         }
 
-        // 3. Status Bar at bottom
+        // 5. Status Bar at Bottom (y = h - 18 .. h)
         let status_y = h.saturating_sub(18);
-        draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 10, status_y + 2, &self.status_message, 0x0094A3B8, panel_bg);
+        draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, toolbar_bg);
+        draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 1, border_col);
+        crate::font::draw_text(surface_ptr, w, h, 8, status_y + 4, &self.status_message, 0x0034D399, toolbar_bg);
+
+        let fs_type = "SPFS v1.0";
+        crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(80), status_y + 4, fs_type, text_muted, toolbar_bg);
     }
 }
 

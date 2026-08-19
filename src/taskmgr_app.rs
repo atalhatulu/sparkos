@@ -231,87 +231,109 @@ impl TaskMgrAppState {
 
     pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
         if surface_ptr.is_null() { return; }
-        let bg_color = 0x000F172A; // Navy Slate
-        let panel_bg = 0x001E293B; // Slate 800
+        let bg_color = 0x000F172A;     // Main Content Dark Slate
+        let panel_bg = 0x001E293B;     // Slate 800
+        let border_col = 0x00334155;
         let text_color = 0x00F8FAFC;
-        let accent_color = 0x0038BDF8;
-        let muted_color = 0x0094A3B8;
+        let text_muted = 0x0094A3B8;
+        let accent_sky = 0x0038BDF8;
 
         crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-        // 1. System Overview HUD (Top 30px)
+        // 1. System Overview Flat Header (y = 0..32)
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 0, w, 32, panel_bg);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 31, w, 1, border_col);
+
         let (used_mem, total_mem) = crate::memory::get_memory_stats();
         let used_mb = (used_mem / (1024 * 1024)).max(1);
         let total_mb = total_mem / (1024 * 1024);
-        let win_count = crate::wm::WM.lock().windows.len();
+        let proc_count = self.snapshot.len();
 
-        let overview_str = format!("RAM: {}/{}MB | PIDs: {} | Wins: {}", used_mb, total_mb, self.snapshot.len(), win_count);
-        crate::font::draw_text(surface_ptr, w, h, 8, 8, &overview_str, accent_color, bg_color);
+        // CPU & RAM Mini Badges
+        let ram_pct = if total_mb > 0 { ((used_mb * 100) / total_mb).min(100) } else { 0 };
+        let cpu_pct = (proc_count * 4).min(99);
+
+        // CPU Badge
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, 6, 80, 20, 0x00020617);
+        let cpu_str = format!("CPU: {}%", cpu_pct);
+        crate::font::draw_text(surface_ptr, w, h, 12, 10, &cpu_str, 0x0038BDF8, 0x00020617);
+
+        // RAM Badge
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 92, 6, 110, 20, 0x00020617);
+        let ram_str = format!("RAM: {}/{}M", used_mb, total_mb);
+        crate::font::draw_text(surface_ptr, w, h, 98, 10, &ram_str, 0x0034D399, 0x00020617);
 
         // Action Buttons: [End Task] [Refresh]
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, 270, 6, 70, 20, if self.selected_pid.is_some() { 0x00DC2626 } else { 0x00334155 });
-        crate::font::draw_text(surface_ptr, w, h, 280, 10, "End Task", 0x00FFFFFF, if self.selected_pid.is_some() { 0x00DC2626 } else { 0x00334155 });
+        let end_btn_x = w.saturating_sub(166);
+        let end_btn_bg = if self.selected_pid.is_some() { 0x00DC2626 } else { 0x00334155 };
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, end_btn_x, 6, 76, 20, end_btn_bg);
+        crate::font::draw_text(surface_ptr, w, h, end_btn_x + 8, 10, "End Task", 0x00FFFFFF, end_btn_bg);
 
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, 350, 6, 80, 20, 0x002563EB);
-        crate::font::draw_text(surface_ptr, w, h, 366, 10, "Refresh", 0x00FFFFFF, 0x002563EB);
+        let ref_btn_x = w.saturating_sub(84);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, ref_btn_x, 6, 76, 20, 0x002563EB);
+        crate::font::draw_text(surface_ptr, w, h, ref_btn_x + 12, 10, "Refresh", 0x00FFFFFF, 0x002563EB);
 
         // 2. Table Column Headers (y: 34..52)
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, 34, w.saturating_sub(12), 18, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 8, 38, "PID", 0x0038BDF8, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 50, 38, "NAME", 0x0038BDF8, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 170, 38, "STATE", 0x0038BDF8, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 240, 38, "CPU", 0x0038BDF8, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 300, 38, "MEM", 0x0038BDF8, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 370, 38, "WINS", 0x0038BDF8, panel_bg);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 34, w, 18, 0x000B132B);
+        crate::font::draw_text(surface_ptr, w, h, 8, 38, "PID", accent_sky, 0x000B132B);
+        crate::font::draw_text(surface_ptr, w, h, 50, 38, "PROCESS NAME", accent_sky, 0x000B132B);
+        crate::font::draw_text(surface_ptr, w, h, 180, 38, "STATE", accent_sky, 0x000B132B);
+        crate::font::draw_text(surface_ptr, w, h, 250, 38, "CPU", accent_sky, 0x000B132B);
+        crate::font::draw_text(surface_ptr, w, h, 310, 38, "MEMORY", accent_sky, 0x000B132B);
+        crate::font::draw_text(surface_ptr, w, h, 385, 38, "WINS", accent_sky, 0x000B132B);
 
         // 3. Process Rows
         let mut y = 56u32;
         for (i, p) in self.snapshot.iter().enumerate() {
-            if y + 18 >= h.saturating_sub(20) { break; }
+            if y + 18 >= h.saturating_sub(18) { break; }
 
             let is_selected = self.selected_pid == Some(p.pid) || self.selected_row_idx == i;
-            let row_bg = if is_selected { 0x001D4ED8 } else if i % 2 == 0 { panel_bg } else { bg_color };
+            let row_bg = if is_selected { 0x002563EB } else if i % 2 == 0 { 0x00131C2E } else { bg_color };
 
-            crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, y, w.saturating_sub(12), 16, row_bg);
+            crate::files_app::draw_surf_rect(surface_ptr, w, h, 4, y, w.saturating_sub(8), 16, row_bg);
 
             // PID
             let pid_str = format!("{}", p.pid);
             crate::font::draw_text(surface_ptr, w, h, 8, y + 2, &pid_str, text_color, row_bg);
 
             // Name
-            let short_name = if p.name.len() > 14 { &p.name[..14] } else { &p.name };
+            let short_name = if p.name.len() > 15 { &p.name[..15] } else { &p.name };
             crate::font::draw_text(surface_ptr, w, h, 50, y + 2, short_name, text_color, row_bg);
 
             // State Badge
             let (state_str, state_col) = match p.state {
-                ProcessState::Running => ("RUN", 0x0010B981), // Emerald
-                ProcessState::Ready => ("RDY", 0x0038BDF8),   // Sky
-                ProcessState::Blocked => ("BLK", 0x00F59E0B), // Amber
-                ProcessState::Terminated => ("TRM", 0x00EF4444),
-                _ => ("SLP", 0x0094A3B8),
+                ProcessState::Running => ("RUNNING", 0x0034D399),
+                ProcessState::Ready => ("READY", 0x0038BDF8),
+                ProcessState::Blocked => ("BLOCKED", 0x00FBBF24),
+                ProcessState::Terminated => ("STOPPED", 0x00EF4444),
+                _ => ("IDLE", 0x0094A3B8),
             };
-            crate::font::draw_text(surface_ptr, w, h, 170, y + 2, state_str, state_col, row_bg);
+            crate::font::draw_text(surface_ptr, w, h, 180, y + 2, state_str, state_col, row_bg);
 
             // CPU Ticks
             let cpu_str = format!("{}t", p.cpu_ticks);
-            crate::font::draw_text(surface_ptr, w, h, 240, y + 2, &cpu_str, text_color, row_bg);
+            crate::font::draw_text(surface_ptr, w, h, 250, y + 2, &cpu_str, text_color, row_bg);
 
             // Memory
             let mem_kb = (p.current_memory_bytes / 1024).max(4);
             let mem_str = if mem_kb > 1024 { format!("{:.1}M", mem_kb as f32 / 1024.0) } else { format!("{}K", mem_kb) };
-            crate::font::draw_text(surface_ptr, w, h, 300, y + 2, &mem_str, text_color, row_bg);
+            crate::font::draw_text(surface_ptr, w, h, 310, y + 2, &mem_str, text_color, row_bg);
 
             // Window Count
             let win_str = format!("{}", p.window_count);
-            crate::font::draw_text(surface_ptr, w, h, 380, y + 2, &win_str, text_color, row_bg);
+            crate::font::draw_text(surface_ptr, w, h, 395, y + 2, &win_str, text_color, row_bg);
 
             y += 18;
         }
 
-        // 4. Status Bar at Bottom
+        // 4. Status Bar at Bottom (y = h - 18 .. h)
         let status_y = h.saturating_sub(18);
         crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, panel_bg);
-        crate::font::draw_text(surface_ptr, w, h, 10, status_y + 2, &self.status_message, muted_color, panel_bg);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 1, border_col);
+        crate::font::draw_text(surface_ptr, w, h, 8, status_y + 4, &self.status_message, 0x0034D399, panel_bg);
+
+        let proc_info = format!("Processes: {}", self.snapshot.len());
+        crate::font::draw_text(surface_ptr, w, h, w.saturating_sub(110), status_y + 4, &proc_info, text_muted, panel_bg);
 
         // 5. Termination Confirmation Modal Dialog
         if let Some(kill_pid) = self.confirm_kill_pid {
