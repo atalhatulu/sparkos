@@ -250,6 +250,8 @@ pub struct BrowserState {
     pub status: String,
     pub loading: bool,
     pub links: Vec<HyperlinkHitbox>,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl BrowserState {
@@ -268,6 +270,8 @@ impl BrowserState {
             status: String::from("Ready"),
             loading: false,
             links: Vec::new(),
+            width: BROWSER_WIDTH,
+            height: BROWSER_HEIGHT,
         };
         state.load_url("https://www.google.com");
         state
@@ -545,9 +549,10 @@ Connection: keep-alive</pre>
                 return true;
             }
 
+            let cur_w = self.width.max(crate::wm::MIN_WINDOW_WIDTH);
             let search_btn_w = 44u32;
             let bar_start_x = 120u32;
-            let bar_end_x = BROWSER_WIDTH.saturating_sub(search_btn_w + 8);
+            let bar_end_x = cur_w.saturating_sub(search_btn_w + 8);
 
             // Clear Button '×' (inside URL bar on the right: bar_end_x - 20 .. bar_end_x - 2)
             if mx >= bar_end_x.saturating_sub(20) && mx <= bar_end_x - 2 {
@@ -565,7 +570,7 @@ Connection: keep-alive</pre>
             }
 
             // Search / Go Button [Go] (x: bar_end_x + 4 .. w - 4)
-            if mx >= bar_end_x + 4 && mx <= BROWSER_WIDTH - 4 {
+            if mx >= bar_end_x + 4 && mx <= cur_w - 4 {
                 self.navigate_to_input();
                 self.url_bar_focused = false;
                 return true;
@@ -770,6 +775,9 @@ Connection: keep-alive</pre>
 
     pub fn render_to_surface(&mut self, surface_ptr: *mut u32, w: u32, h: u32) {
         if surface_ptr.is_null() { return; }
+
+        self.width = w;
+        self.height = h;
 
         let bg_color = 0x000F172A;     // Dark Slate
         let bar_bg = 0x001E293B;       // Classic Top Toolbar
