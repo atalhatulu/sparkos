@@ -1,16 +1,13 @@
-//! SparkOS Desktop V2.1 — Modern Web Browser with Google Search Engine (`src/browser_app.rs`)
+//! SparkOS Desktop V2.2 — Classic Minimalist Web Browser (`src/browser_app.rs`)
 //!
-//! Features:
-//! - Full-flow sequential HTML DOM parsing (h1..h6, p, a, ul/li, code/pre, hr, button, text)
-//! - Smart Address & Search Engine Bar:
-//!   * Auto-detects direct URLs vs. Search Queries
-//!   * Default search engine: Google (`https://www.google.com/search?q=...`)
-//!   * One-click clear search button `[×]`
-//!   * Full PS/2 scancode inline editing, cursor positioning, and Enter key execution
-//! - Interactive Google Search Results Page & Google Homepage rendering
-//! - Multi-window isolated browser instances with independent navigation history & scroll
+//! Inspired by classic early desktop browsers (Mosaic, Netscape 1.0, IE 3.0):
+//! - Clean & Simple Navigation Bar: Back (<), Forward (>), Reload (R), Home (H), URL/Search Bar, Clear (x), Go (Search)
+//! - Smart Address / Search Box: Direct URL navigation + Automatic Google Search fallback
+//! - Sequential HTML DOM Parser (Headings, Paragraphs, Links, Lists, Code blocks, Horizontal rules, Buttons)
 //! - Clickable hyperlinks with layout hit-testing
-//! - Keyboard & mouse scrollback navigation (Page Up/Down, Arrow keys)
+//! - Keyboard navigation (scancode editing, Backspace, Delete, Arrows, Home/End, Enter, Page Up/Down scrolling)
+//! - Multi-window isolated browser instances with independent navigation history & scroll
+//! - Bottom Status Bar: Loading state, HTTP status, and active page title
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -219,7 +216,7 @@ impl HtmlDocument {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Browser Instance State & Smart Search Query Engine
+// 2. Browser Instance State & Smart Search Engine
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -411,6 +408,7 @@ impl BrowserState {
                             <li>Type any search query & press Enter to Search with Google</li>
                             <li>Type direct URL (e.g. google.com or sparkos.org) to visit directly</li>
                             <li>Click '[x]' to clear address bar immediately</li>
+                            <li>Click 'H' to return to Home (Google)</li>
                         </ul>
                         <p><strong>Navigation:</strong></p>
                         <ul>
@@ -491,6 +489,11 @@ Connection: keep-alive</pre>
         self.load_url(&current);
     }
 
+    /// Go to Home (Google)
+    pub fn go_home(&mut self) {
+        self.load_url("https://www.google.com");
+    }
+
     /// Clears search/URL input bar
     pub fn clear_url_input(&mut self) {
         self.url_input.clear();
@@ -512,38 +515,41 @@ Connection: keep-alive</pre>
     // -----------------------------------------------------------------------
 
     pub fn handle_mouse_click(&mut self, mx: u32, my: u32) -> bool {
-        // 1. Navigation & Search Bar Hit-testing (y in 4..26)
+        // 1. Classic Toolbar Hit-testing (y in 4..26)
         if my >= 4 && my <= 26 {
-            // Back Button '<' (x: 6..32)
-            if mx >= 6 && mx <= 32 {
+            // Back Button '<' (x: 6..30)
+            if mx >= 6 && mx <= 30 {
                 self.navigate_back();
                 return true;
             }
-            // Forward Button '>' (x: 36..62)
-            if mx >= 36 && mx <= 62 {
+            // Forward Button '>' (x: 34..58)
+            if mx >= 34 && mx <= 58 {
                 self.navigate_forward();
                 return true;
             }
-            // Reload Button 'R' (x: 66..92)
-            if mx >= 66 && mx <= 92 {
+            // Reload Button 'R' (x: 62..86)
+            if mx >= 62 && mx <= 86 {
                 self.reload();
                 return true;
             }
+            // Home Button 'H' (x: 90..114)
+            if mx >= 90 && mx <= 114 {
+                self.go_home();
+                return true;
+            }
 
-            let search_btn_w = 48u32;
-            let clear_btn_w = 20u32;
-            let bar_start_x = 96u32;
+            let search_btn_w = 44u32;
+            let bar_start_x = 120u32;
             let bar_end_x = BROWSER_WIDTH.saturating_sub(search_btn_w + 8);
-            let url_w = bar_end_x.saturating_sub(bar_start_x);
 
-            // Clear Button '×' (inside URL bar on the right: bar_end_x - 22 .. bar_end_x - 2)
-            if mx >= bar_end_x.saturating_sub(22) && mx <= bar_end_x - 2 {
+            // Clear Button '×' (inside URL bar on the right: bar_end_x - 20 .. bar_end_x - 2)
+            if mx >= bar_end_x.saturating_sub(20) && mx <= bar_end_x - 2 {
                 self.clear_url_input();
                 return true;
             }
 
             // Search/URL Input Bar Area
-            if mx >= bar_start_x && mx < bar_end_x.saturating_sub(22) {
+            if mx >= bar_start_x && mx < bar_end_x.saturating_sub(20) {
                 self.url_bar_focused = true;
                 let rel_x = mx.saturating_sub(bar_start_x + 6);
                 let char_idx = (rel_x / 8) as usize;
@@ -551,7 +557,7 @@ Connection: keep-alive</pre>
                 return true;
             }
 
-            // Search / Go Button [Search] (x: bar_end_x + 4 .. w - 4)
+            // Search / Go Button [Go] (x: bar_end_x + 4 .. w - 4)
             if mx >= bar_end_x + 4 && mx <= BROWSER_WIDTH - 4 {
                 self.navigate_to_input();
                 self.url_bar_focused = false;
@@ -688,35 +694,39 @@ Connection: keep-alive</pre>
         if surface_ptr.is_null() { return; }
 
         let bg_color = 0x000F172A;     // Dark Slate
-        let bar_bg = 0x001E293B;       // Top Nav Bar
-        let page_bg = 0x00FFFFFF;      // Content Background (Crisp White)
+        let bar_bg = 0x001E293B;       // Classic Top Toolbar
+        let page_bg = 0x00FFFFFF;      // Content Background (Pure White)
         let border_col = 0x00334155;
 
         crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-        // 1. Navigation Toolbar (y = 0..30)
+        // 1. Classic Navigation Toolbar (y = 0..30)
         draw_surf_rect(surface_ptr, w, h, 0, 0, w, 30, bar_bg);
         draw_surf_rect(surface_ptr, w, h, 0, 29, w, 1, border_col);
 
         // Back Button [<]
         let back_enabled = self.history_idx > 0;
         let back_bg = if back_enabled { 0x002563EB } else { 0x00334155 };
-        draw_surf_rect(surface_ptr, w, h, 6, 4, 26, 22, back_bg);
+        draw_surf_rect(surface_ptr, w, h, 6, 4, 24, 22, back_bg);
         crate::font::draw_text(surface_ptr, w, h, 14, 8, "<", 0x00FFFFFF, back_bg);
 
         // Forward Button [>]
         let fwd_enabled = self.history_idx + 1 < self.history.len();
         let fwd_bg = if fwd_enabled { 0x002563EB } else { 0x00334155 };
-        draw_surf_rect(surface_ptr, w, h, 36, 4, 26, 22, fwd_bg);
-        crate::font::draw_text(surface_ptr, w, h, 44, 8, ">", 0x00FFFFFF, fwd_bg);
+        draw_surf_rect(surface_ptr, w, h, 34, 4, 24, 22, fwd_bg);
+        crate::font::draw_text(surface_ptr, w, h, 42, 8, ">", 0x00FFFFFF, fwd_bg);
 
         // Reload Button [R]
-        draw_surf_rect(surface_ptr, w, h, 66, 4, 26, 22, 0x00334155);
-        crate::font::draw_text(surface_ptr, w, h, 74, 8, "R", 0x00E2E8F0, 0x00334155);
+        draw_surf_rect(surface_ptr, w, h, 62, 4, 24, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 70, 8, "R", 0x00E2E8F0, 0x00334155);
+
+        // Home Button [H]
+        draw_surf_rect(surface_ptr, w, h, 90, 4, 24, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 98, 8, "H", 0x0038BDF8, 0x00334155);
 
         // Smart Search / URL Address Input Bar
-        let search_btn_w = 48u32;
-        let bar_start_x = 96u32;
+        let search_btn_w = 44u32;
+        let bar_start_x = 120u32;
         let bar_end_x = w.saturating_sub(search_btn_w + 8);
         let url_w = bar_end_x.saturating_sub(bar_start_x);
 
@@ -727,13 +737,13 @@ Connection: keep-alive</pre>
         draw_surf_rect(surface_ptr, w, h, bar_start_x, 25, url_w, 1, url_border);
 
         // Clear '[x]' button inside search bar
-        let clear_x = bar_end_x.saturating_sub(20);
+        let clear_x = bar_end_x.saturating_sub(18);
         if !self.url_input.is_empty() {
             crate::font::draw_text(surface_ptr, w, h, clear_x, 8, "x", 0x0094A3B8, url_bg);
         }
 
         // Draw URL / Search Query Text
-        let max_visible_chars = (url_w.saturating_sub(28) / 8) as usize;
+        let max_visible_chars = (url_w.saturating_sub(26) / 8) as usize;
         let display_text = if self.url_input.len() > max_visible_chars {
             &self.url_input[self.url_input.len() - max_visible_chars..]
         } else {
@@ -749,9 +759,9 @@ Connection: keep-alive</pre>
             }
         }
 
-        // Search / Go Button [Search]
+        // Search / Go Button [Go]
         draw_surf_rect(surface_ptr, w, h, bar_end_x + 4, 4, search_btn_w, 22, 0x0010B981);
-        crate::font::draw_text(surface_ptr, w, h, bar_end_x + 10, 8, "Search", 0x00FFFFFF, 0x0010B981);
+        crate::font::draw_text(surface_ptr, w, h, bar_end_x + 14, 8, "Go", 0x00FFFFFF, 0x0010B981);
 
         // 2. Web Viewport Card (y = 30 .. h - 18)
         let vp_top = 30u32;
