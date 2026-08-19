@@ -120,77 +120,81 @@ impl Shell {
                 }
             }
 
-            // 2. PS/2 Keyboard (TigerVNC Window)
-            while let Some(key) = crate::keyboard::read_key() {
-                got_input = true;
-                match key {
-                    Key::CtrlC => {
-                        let mut w = WRITE_LOCK.lock();
-                        core::fmt::Write::write_str(&mut *w, "^C\n").unwrap();
-                        self.len = 0;
-                        self.prompt();
-                    }
-                    Key::Ascii(c) => {
-                        if self.len < CMD_BUF {
-                            self.buf[self.len] = c as u8;
-                            self.len += 1;
+            // 2. PS/2 Keyboard (Only consumed by CLI when GUI is NOT active)
+            if !crate::display::is_gui_active() {
+                while let Some(key) = crate::keyboard::read_key() {
+                    got_input = true;
+                    match key {
+                        Key::CtrlC => {
                             let mut w = WRITE_LOCK.lock();
-                            core::fmt::Write::write_char(&mut *w, c as char).unwrap();
+                            core::fmt::Write::write_str(&mut *w, "^C\n").unwrap();
+                            self.len = 0;
+                            self.prompt();
                         }
-                    }
-                    Key::Backspace => {
-                        if self.len > 0 {
-                            self.len -= 1;
-                            let mut w = WRITE_LOCK.lock();
-                            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
-                        }
-                    }
-                    Key::Enter => {
-                        let mut w = WRITE_LOCK.lock();
-                        core::fmt::Write::write_str(&mut *w, "\n").unwrap();
-                        
-                        let cmd_str = self.cmd().to_string();
-                        if !cmd_str.trim().is_empty() {
-                            if self.history.last() != Some(&cmd_str) {
-                                self.history.push(cmd_str);
-                                if self.history.len() > 20 {
-                                    self.history.remove(0);
-                                }
+                        Key::Ascii(c) => {
+                            if self.len < CMD_BUF {
+                                self.buf[self.len] = c as u8;
+                                self.len += 1;
+                                let mut w = WRITE_LOCK.lock();
+                                core::fmt::Write::write_char(&mut *w, c as char).unwrap();
                             }
                         }
-                        self.history_idx = self.history.len();
-                        return;
-                    }
-                    Key::Escape => {
-                        let mut w = WRITE_LOCK.lock();
-                        for _ in 0..self.len {
-                            core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
+                        Key::Backspace => {
+                            if self.len > 0 {
+                                self.len -= 1;
+                                let mut w = WRITE_LOCK.lock();
+                                core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
+                            }
                         }
-                        self.len = 0;
-                    }
-                    Key::Up => {
-                        if self.history_idx > 0 {
-                            self.history_idx -= 1;
-                            self.load_history();
+                        Key::Enter => {
+                            let mut w = WRITE_LOCK.lock();
+                            core::fmt::Write::write_str(&mut *w, "\n").unwrap();
+                            
+                            let cmd_str = self.cmd().to_string();
+                            if !cmd_str.trim().is_empty() {
+                                if self.history.last() != Some(&cmd_str) {
+                                    self.history.push(cmd_str);
+                                    if self.history.len() > 20 {
+                                        self.history.remove(0);
+                                    }
+                                }
+                            }
+                            self.history_idx = self.history.len();
+                            return;
                         }
-                    }
-                    Key::Down => {
-                        if self.history_idx < self.history.len() {
-                            self.history_idx += 1;
-                            self.load_history();
+                        Key::Escape => {
+                            let mut w = WRITE_LOCK.lock();
+                            for _ in 0..self.len {
+                                core::fmt::Write::write_char(&mut *w, '\x08').unwrap();
+                            }
+                            self.len = 0;
                         }
-                    }
-                    Key::Tab => {
-                        let cmd_str = self.cmd().to_string();
-                        if let Some(last_space) = cmd_str.rfind(' ') {
-                            let prefix = &cmd_str[last_space + 1..];
-                            self.auto_complete(prefix, last_space + 1);
-                        } else {
-                            self.auto_complete(&cmd_str, 0);
+                        Key::Up => {
+                            if self.history_idx > 0 {
+                                self.history_idx -= 1;
+                                self.load_history();
+                            }
                         }
+                        Key::Down => {
+                            if self.history_idx < self.history.len() {
+                                self.history_idx += 1;
+                                self.load_history();
+                            }
+                        }
+                        Key::Tab => {
+                            let cmd_str = self.cmd().to_string();
+                            if let Some(last_space) = cmd_str.rfind(' ') {
+                                let prefix = &cmd_str[last_space + 1..];
+                                self.auto_complete(prefix, last_space + 1);
+                            } else {
+                                self.auto_complete(&cmd_str, 0);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+            } else {
+                crate::keyboard::KEYBOARD.lock().clear();
             }
 
             if !got_input {

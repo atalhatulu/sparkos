@@ -219,6 +219,13 @@ impl HtmlDocument {
 // 2. Browser Instance State & Smart Search Engine
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserKeyResult {
+    Ignored,
+    ToolbarChanged,
+    FullPageChanged,
+}
+
 #[derive(Debug, Clone)]
 pub struct HyperlinkHitbox {
     pub x: i32,
@@ -584,47 +591,47 @@ Connection: keep-alive</pre>
         false
     }
 
-    pub fn handle_key_input(&mut self, scancode: u8, is_ctrl: bool, is_shift: bool) -> bool {
+    pub fn handle_key_input(&mut self, scancode: u8, is_ctrl: bool, is_shift: bool) -> BrowserKeyResult {
         if self.url_bar_focused {
             match scancode {
                 0x1C => { // Enter -> Search with Google or Navigate to URL
                     self.navigate_to_input();
                     self.url_bar_focused = false;
-                    return true;
+                    BrowserKeyResult::FullPageChanged
                 }
                 0x01 => { // Esc -> Restore active URL and unfocus
                     self.url_input = self.active_url.clone();
                     self.url_bar_focused = false;
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x0E => { // Backspace
                     if self.cursor_pos > 0 && !self.url_input.is_empty() {
                         self.url_input.remove(self.cursor_pos - 1);
                         self.cursor_pos -= 1;
                     }
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x53 => { // Delete
                     if self.cursor_pos < self.url_input.len() {
                         self.url_input.remove(self.cursor_pos);
                     }
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x4B => { // Left Arrow
                     self.cursor_pos = self.cursor_pos.saturating_sub(1);
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x4D => { // Right Arrow
                     self.cursor_pos = (self.cursor_pos + 1).min(self.url_input.len());
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x47 => { // Home
                     self.cursor_pos = 0;
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x4F => { // End
                     self.cursor_pos = self.url_input.len();
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 _ => {
                     // Try converting PS/2 scancode to ASCII char
@@ -632,9 +639,10 @@ Connection: keep-alive</pre>
                         if c >= ' ' && c <= '~' {
                             self.url_input.insert(self.cursor_pos, c);
                             self.cursor_pos += 1;
-                            return true;
+                            return BrowserKeyResult::ToolbarChanged;
                         }
                     }
+                    BrowserKeyResult::Ignored
                 }
             }
         } else {
@@ -642,32 +650,32 @@ Connection: keep-alive</pre>
             match scancode {
                 0x49 => { // Page Up
                     self.scroll_by(-60);
-                    return true;
+                    BrowserKeyResult::FullPageChanged
                 }
                 0x51 => { // Page Down
                     self.scroll_by(60);
-                    return true;
+                    BrowserKeyResult::FullPageChanged
                 }
                 0x48 => { // Up Arrow
                     self.scroll_by(-20);
-                    return true;
+                    BrowserKeyResult::FullPageChanged
                 }
                 0x50 => { // Down Arrow
                     self.scroll_by(20);
-                    return true;
+                    BrowserKeyResult::FullPageChanged
                 }
                 0x13 if is_ctrl => { // Ctrl+R -> Reload
                     self.reload();
-                    return true;
+                    BrowserKeyResult::FullPageChanged
                 }
                 0x26 if is_ctrl => { // Ctrl+L -> Focus Address/Search Bar
                     self.url_bar_focused = true;
                     self.cursor_pos = self.url_input.len();
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 0x1C => { // Enter on page -> Focus Search Bar if not focused
                     self.url_bar_focused = true;
-                    return true;
+                    BrowserKeyResult::ToolbarChanged
                 }
                 _ => {
                     // If user starts typing printable character, automatically focus search bar
@@ -677,13 +685,83 @@ Connection: keep-alive</pre>
                             self.url_input.push(c);
                             self.cursor_pos = 1;
                             self.url_bar_focused = true;
-                            return true;
+                            return BrowserKeyResult::ToolbarChanged;
                         }
                     }
+                    BrowserKeyResult::Ignored
                 }
             }
         }
-        false
+    }
+
+    pub fn render_toolbar_only(&self, surface_ptr: *mut u32, w: u32, h: u32) {
+        if surface_ptr.is_null() { return; }
+
+        let bar_bg = 0x001E293B;       // Classic Top Toolbar
+        let border_col = 0x00334155;
+
+        // 1. Classic Navigation Toolbar (y = 0..30)
+        draw_surf_rect(surface_ptr, w, h, 0, 0, w, 30, bar_bg);
+        draw_surf_rect(surface_ptr, w, h, 0, 29, w, 1, border_col);
+
+        // Back Button [<]
+        let back_enabled = self.history_idx > 0;
+        let back_bg = if back_enabled { 0x002563EB } else { 0x00334155 };
+        draw_surf_rect(surface_ptr, w, h, 6, 4, 24, 22, back_bg);
+        crate::font::draw_text(surface_ptr, w, h, 14, 8, "<", 0x00FFFFFF, back_bg);
+
+        // Forward Button [>]
+        let fwd_enabled = self.history_idx + 1 < self.history.len();
+        let fwd_bg = if fwd_enabled { 0x002563EB } else { 0x00334155 };
+        draw_surf_rect(surface_ptr, w, h, 34, 4, 24, 22, fwd_bg);
+        crate::font::draw_text(surface_ptr, w, h, 42, 8, ">", 0x00FFFFFF, fwd_bg);
+
+        // Reload Button [R]
+        draw_surf_rect(surface_ptr, w, h, 62, 4, 24, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 70, 8, "R", 0x00E2E8F0, 0x00334155);
+
+        // Home Button [H]
+        draw_surf_rect(surface_ptr, w, h, 90, 4, 24, 22, 0x00334155);
+        crate::font::draw_text(surface_ptr, w, h, 98, 8, "H", 0x0038BDF8, 0x00334155);
+
+        // Smart Search / URL Address Input Bar
+        let search_btn_w = 44u32;
+        let bar_start_x = 120u32;
+        let bar_end_x = w.saturating_sub(search_btn_w + 8);
+        let url_w = bar_end_x.saturating_sub(bar_start_x);
+
+        let url_bg = if self.url_bar_focused { 0x000F172A } else { 0x00020617 };
+        let url_border = if self.url_bar_focused { 0x0038BDF8 } else { 0x00475569 };
+        draw_surf_rect(surface_ptr, w, h, bar_start_x, 4, url_w, 22, url_bg);
+        draw_surf_rect(surface_ptr, w, h, bar_start_x, 4, url_w, 1, url_border);
+        draw_surf_rect(surface_ptr, w, h, bar_start_x, 25, url_w, 1, url_border);
+
+        // Clear '[x]' button inside search bar
+        let clear_x = bar_end_x.saturating_sub(18);
+        if !self.url_input.is_empty() {
+            crate::font::draw_text(surface_ptr, w, h, clear_x, 8, "x", 0x0094A3B8, url_bg);
+        }
+
+        // Draw URL / Search Query Text
+        let max_visible_chars = (url_w.saturating_sub(26) / 8) as usize;
+        let display_text = if self.url_input.len() > max_visible_chars {
+            &self.url_input[self.url_input.len() - max_visible_chars..]
+        } else {
+            &self.url_input
+        };
+        crate::font::draw_text(surface_ptr, w, h, bar_start_x + 6, 8, display_text, 0x00F8FAFC, url_bg);
+
+        // Cursor in URL / Search bar
+        if self.url_bar_focused {
+            let cursor_x = bar_start_x + 6 + (self.cursor_pos.min(display_text.len()) as u32) * 8;
+            if cursor_x < clear_x - 2 {
+                draw_surf_rect(surface_ptr, w, h, cursor_x, 7, 2, 16, 0x0038BDF8);
+            }
+        }
+
+        // Search / Go Button [Go]
+        draw_surf_rect(surface_ptr, w, h, bar_end_x + 4, 4, search_btn_w, 22, 0x0010B981);
+        crate::font::draw_text(surface_ptr, w, h, bar_end_x + 14, 8, "Go", 0x00FFFFFF, 0x0010B981);
     }
 
     // -----------------------------------------------------------------------

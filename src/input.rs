@@ -527,16 +527,36 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     drop(files);
                     let mut browsers = crate::browser_app::BROWSER_INSTANCES.lock();
                     if let Some(browser_state) = browsers.get_mut(&focused_win_id) {
-                        browser_state.handle_key_input(key_code, is_ctrl, is_shift);
-                        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
-                            let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                            browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
-                        }
-                        drop(browsers);
-                        let mut wm = crate::wm::WM.lock();
-                        let geom = wm.windows.iter().find(|w| w.window_id == focused_win_id).map(|w| (w.x, w.y, w.width, w.height));
-                        if let Some((x, y, w, h)) = geom {
-                            wm.mark_window_damage(x, y, w, h);
+                        let res = browser_state.handle_key_input(key_code, is_ctrl, is_shift);
+                        if res != crate::browser_app::BrowserKeyResult::Ignored {
+                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
+                                let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                                match res {
+                                    crate::browser_app::BrowserKeyResult::ToolbarChanged => {
+                                        browser_state.render_toolbar_only(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                                    }
+                                    crate::browser_app::BrowserKeyResult::FullPageChanged => {
+                                        browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            drop(browsers);
+                            let mut wm = crate::wm::WM.lock();
+                            let geom = wm.windows.iter().find(|w| w.window_id == focused_win_id).map(|w| (w.x, w.y, w.width, w.height));
+                            if let Some((x, y, w, h)) = geom {
+                                match res {
+                                    crate::browser_app::BrowserKeyResult::ToolbarChanged => {
+                                        wm.mark_window_damage(x, y, w, 52); // Localized Toolbar damage (instant response)
+                                    }
+                                    crate::browser_app::BrowserKeyResult::FullPageChanged => {
+                                        wm.mark_window_damage(x, y, w, h);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else {
+                            drop(browsers);
                         }
                     }
                 }
