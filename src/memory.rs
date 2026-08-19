@@ -158,6 +158,35 @@ pub fn user_alloc_frame() -> Option<PhysFrame> {
     None
 }
 
+/// Allocates `count` contiguous physical frames directly from bump regions for large DMA/surfaces.
+pub fn user_alloc_contiguous_frames(count: usize) -> Option<PhysFrame> {
+    if count == 0 { return None; }
+    let required_bytes = (count as u64).checked_mul(4096)?;
+
+    let mut guard = USER_FRAME_ALLOC.lock();
+    let alloc = guard.as_mut()?;
+
+    while alloc.next_region < alloc.regions.len() {
+        let (start, end) = alloc.regions[alloc.next_region];
+        if start.checked_add(required_bytes)? <= end {
+            alloc.regions[alloc.next_region].0 = start + required_bytes;
+            for i in 0..count {
+                alloc.allocated_frames.insert(start + (i as u64) * 4096);
+            }
+
+            // Zero contiguous frame memory
+            let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+            let dest = (phys_offset + start).as_mut_ptr::<u8>();
+            unsafe {
+                core::ptr::write_bytes(dest, 0, required_bytes as usize);
+            }
+            return Some(PhysFrame::containing_address(PhysAddr::new(start)));
+        }
+        alloc.next_region += 1;
+    }
+    None
+}
+
 /// Releases a physical frame back to the pool (Faz 25 TD-MED-3 Resolution).
 /// Enforces double-free protection and out-of-bounds checks.
 pub fn user_free_frame(frame: PhysFrame) {

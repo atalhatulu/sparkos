@@ -387,16 +387,16 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
-        let (win_x, win_y, win_w, win_h) = {
-            let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
-                .ok_or(WmError::NotFound)?;
-
+        let (win_x, win_y, win_w, win_h, surf_id, owner) = {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(WmError::NotFound)?;
             if win.owner_pid != caller_pid {
                 return Err(WmError::PermissionDenied);
             }
-
+            if win.state == WindowState::Minimized {
+                win.state = win.prev_state;
+            }
             win.visible = true;
-            match win.prev_state {
+            match win.state {
                 WindowState::Maximized => {
                     win.state = WindowState::Maximized;
                     win.x = 0;
@@ -434,9 +434,9 @@ impl WindowManager {
                     win.height = nh;
                 }
             }
-            (win.x, win.y, win.width, win.height)
+            (win.x, win.y, win.width, win.height, win.surface_id, win.owner_pid)
         };
-        crate::app_registry::rerender_app_for_window(window_id, win_w, win_h);
+        crate::app_registry::rerender_app_surface(window_id, surf_id, owner, win_w, win_h);
         self.mark_window_damage(win_x, win_y, win_w, win_h);
         self.mark_top_bar_damage();
         self.raise_to_top_internal(window_id)
@@ -448,7 +448,7 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
-        let (old_x, old_y, old_w, old_h) = {
+        let (old_x, old_y, old_w, old_h, surf_id, owner) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(WmError::NotFound)?;
             if win.owner_pid != caller_pid {
                 return Err(WmError::PermissionDenied);
@@ -456,7 +456,7 @@ impl WindowManager {
             if win.state == WindowState::Normal {
                 win.normal_geom = (win.x, win.y, win.width, win.height);
             }
-            let old_geom = (win.x, win.y, win.width, win.height);
+            let old_geom = (win.x, win.y, win.width, win.height, win.surface_id, win.owner_pid);
             win.x = 0;
             win.y = WORK_AREA_TOP;
             win.width = max_w / 2;
@@ -466,7 +466,7 @@ impl WindowManager {
             old_geom
         };
 
-        crate::app_registry::rerender_app_for_window(window_id, max_w / 2, work_h);
+        crate::app_registry::rerender_app_surface(window_id, surf_id, owner, max_w / 2, work_h);
         let min_x = old_x.min(0) - 4;
         let min_y = old_y.min(WORK_AREA_TOP) - 4;
         let max_bw = (old_w.max(max_w / 2)) + (old_x - 0).abs() as u32 + 8;
@@ -483,7 +483,7 @@ impl WindowManager {
         let target_x = (max_w / 2) as i32;
         let target_w = max_w - (max_w / 2);
 
-        let (old_x, old_y, old_w, old_h) = {
+        let (old_x, old_y, old_w, old_h, surf_id, owner) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id).ok_or(WmError::NotFound)?;
             if win.owner_pid != caller_pid {
                 return Err(WmError::PermissionDenied);
@@ -491,7 +491,7 @@ impl WindowManager {
             if win.state == WindowState::Normal {
                 win.normal_geom = (win.x, win.y, win.width, win.height);
             }
-            let old_geom = (win.x, win.y, win.width, win.height);
+            let old_geom = (win.x, win.y, win.width, win.height, win.surface_id, win.owner_pid);
             win.x = target_x;
             win.y = WORK_AREA_TOP;
             win.width = target_w;
@@ -501,7 +501,7 @@ impl WindowManager {
             old_geom
         };
 
-        crate::app_registry::rerender_app_for_window(window_id, target_w, work_h);
+        crate::app_registry::rerender_app_surface(window_id, surf_id, owner, target_w, work_h);
         let min_x = old_x.min(target_x) - 4;
         let min_y = old_y.min(WORK_AREA_TOP) - 4;
         let max_bw = (old_w.max(target_w)) + (old_x - target_x).abs() as u32 + 8;
@@ -517,7 +517,7 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
-        let (new_w, new_h) = {
+        let (new_w, new_h, surf_id, owner) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
                 .ok_or(WmError::NotFound)?;
 
@@ -548,10 +548,10 @@ impl WindowManager {
                 win.state = WindowState::Maximized;
                 win.prev_state = WindowState::Normal;
             }
-            (win.width, win.height)
+            (win.width, win.height, win.surface_id, win.owner_pid)
         };
 
-        crate::app_registry::rerender_app_for_window(window_id, new_w, new_h);
+        crate::app_registry::rerender_app_surface(window_id, surf_id, owner, new_w, new_h);
         self.raise_to_top_internal(window_id)
     }
 
@@ -562,7 +562,7 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
-        let (new_w, new_h) = {
+        let (new_w, new_h, surf_id, owner) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
                 .ok_or(WmError::NotFound)?;
 
@@ -601,10 +601,10 @@ impl WindowManager {
                 win.height = max_h;
                 win.state = WindowState::Fullscreen;
             }
-            (win.width, win.height)
+            (win.width, win.height, win.surface_id, win.owner_pid)
         };
 
-        crate::app_registry::rerender_app_for_window(window_id, new_w, new_h);
+        crate::app_registry::rerender_app_surface(window_id, surf_id, owner, new_w, new_h);
         self.raise_to_top_internal(window_id)
     }
 
@@ -1508,8 +1508,8 @@ impl WindowManager {
                     win.normal_geom = (win.x, win.y, win.width, win.height);
                 }
 
-                let (ww, wh) = (win.width, win.height);
-                crate::app_registry::rerender_app_for_window(wid, ww, wh);
+                let (ww, wh, surf_id, owner) = (win.width, win.height, win.surface_id, win.owner_pid);
+                crate::app_registry::rerender_app_surface(wid, surf_id, owner, ww, wh);
                 let min_box_x = old_x.min(win.x) - 4;
                 let min_box_y = old_y.min(win.y) - 4;
                 let max_box_w = (old_w.max(win.width)) + (old_x - win.x).abs() as u32 + 8;
@@ -1525,7 +1525,7 @@ impl WindowManager {
 
         if let Some((wid, ..)) = self.resizing_window.take() {
             if let Some(win) = self.windows.iter().find(|w| w.window_id == wid) {
-                crate::app_registry::rerender_app_for_window(wid, win.width, win.height);
+                crate::app_registry::rerender_app_surface(wid, win.surface_id, win.owner_pid, win.width, win.height);
             }
         }
         crate::cursor::set_cursor_type(crate::cursor::CursorType::Default);

@@ -177,16 +177,7 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
 }
 
 /// Re-renders the application content to its surface matching the new window width and height
-pub fn rerender_app_for_window(window_id: u64, width: u32, height: u32) {
-    let (surface_id, owner_pid) = {
-        let wm = crate::wm::WM.lock();
-        if let Some(w) = wm.windows.iter().find(|w| w.window_id == window_id) {
-            (w.surface_id, w.owner_pid)
-        } else {
-            return;
-        }
-    };
-
+pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, width: u32, height: u32) {
     let surf_ptr = {
         let mut reg = crate::surface::SURFACE_REGISTRY.write();
         if let Some(surf) = reg.iter_mut().find(|s| s.surface_id == surface_id || s.owner_pid == owner_pid) {

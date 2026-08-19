@@ -52,11 +52,10 @@ pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result
     }
 
     let pages = ((total_bytes + 4095) / 4096) as u64;
-    let first_frame = crate::memory::user_alloc_frame().ok_or("Out of memory for surface backing")?;
+    let first_frame = crate::memory::user_alloc_contiguous_frames(pages as usize)
+        .or_else(|| crate::memory::user_alloc_frame())
+        .ok_or("Out of memory for surface backing")?;
     let phys_frame = first_frame.start_address().as_u64();
-    for _ in 1..pages {
-        let _ = crate::memory::user_alloc_frame().ok_or("Out of memory for surface backing")?;
-    }
 
     let mut reg = SURFACE_REGISTRY.write();
     
