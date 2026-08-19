@@ -792,10 +792,11 @@ impl WindowManager {
             }
         }
 
-        // Clean up per-window terminal instance if attached
+        // Clean up per-window terminal/files/editor/browser instance if attached
         crate::terminal_app::cleanup_terminal_for_window(window_id);
         crate::files_app::cleanup_files_for_window(window_id);
         crate::editor_app::cleanup_editor_for_window(window_id);
+        crate::browser_app::cleanup_browser_for_window(window_id);
 
         // Unregister window from process PCB, decrement window count, and check remaining windows
         let remaining_windows = self.windows.iter().any(|w| w.owner_pid == caller_pid);

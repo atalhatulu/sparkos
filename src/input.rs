@@ -189,6 +189,21 @@ pub fn route_mouse_down(cx: i32, cy: i32) {
                 };
                 if is_editor && should_close {
                     let _ = crate::wm::WM.lock().destroy_window(owner_pid, wid);
+                } else if !is_editor {
+                    let mut browsers = crate::browser_app::BROWSER_INSTANCES.lock();
+                    if let Some(browser_state) = browsers.get_mut(&wid) {
+                        browser_state.handle_mouse_click(local_x as u32, local_y as u32);
+                        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| Some(s.surface_id) == target_surf_id || s.owner_pid == owner_pid) {
+                            let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                            browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                        }
+                        drop(browsers);
+                        let mut wm = crate::wm::WM.lock();
+                        let geom = wm.windows.iter().find(|w| w.window_id == wid).map(|w| (w.x, w.y, w.width, w.height));
+                        if let Some((x, y, w, h)) = geom {
+                            wm.mark_window_damage(x, y, w, h);
+                        }
+                    }
                 }
             }
         }
@@ -507,6 +522,22 @@ pub fn dispatch_keyboard_event(key_code: u8, pressed: bool, modifiers: u8) -> Op
                     let geom = wm.windows.iter().find(|w| w.window_id == focused_win_id).map(|w| (w.x, w.y, w.width, w.height));
                     if let Some((x, y, w, h)) = geom {
                         wm.mark_window_damage(x, y, w, h);
+                    }
+                } else {
+                    drop(files);
+                    let mut browsers = crate::browser_app::BROWSER_INSTANCES.lock();
+                    if let Some(browser_state) = browsers.get_mut(&focused_win_id) {
+                        browser_state.handle_key_input(key_code, is_ctrl);
+                        if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == focused_surf_id || s.owner_pid == focused_pid) {
+                            let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                            browser_state.render_to_surface(surf_ptr, crate::browser_app::BROWSER_WIDTH, crate::browser_app::BROWSER_HEIGHT);
+                        }
+                        drop(browsers);
+                        let mut wm = crate::wm::WM.lock();
+                        let geom = wm.windows.iter().find(|w| w.window_id == focused_win_id).map(|w| (w.x, w.y, w.width, w.height));
+                        if let Some((x, y, w, h)) = geom {
+                            wm.mark_window_damage(x, y, w, h);
+                        }
                     }
                 }
             }

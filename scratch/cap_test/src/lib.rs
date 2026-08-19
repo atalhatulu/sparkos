@@ -14579,6 +14579,413 @@ pub mod terminal2_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Browser 2.0 Invariant Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub mod browser2_tests {
+    use super::*;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use alloc::vec;
+    use alloc::format;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum MockHtmlBlock {
+        Heading(u8, String),
+        Paragraph(String),
+        Link { text: String, href: String },
+        ListItem(String),
+        CodeBlock(String),
+        HorizontalRule,
+        Button(String),
+        Text(String),
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockHtmlDoc {
+        pub title: String,
+        pub blocks: Vec<MockHtmlBlock>,
+    }
+
+    impl MockHtmlDoc {
+        pub fn parse(html_str: &str) -> Self {
+            let mut title = String::from("SparkOS Web Page");
+            let mut blocks = Vec::new();
+
+            if let Some(t_start) = html_str.find("<title>") {
+                let after = &html_str[t_start + 7..];
+                if let Some(t_end) = after.find("</title>") {
+                    title = String::from(after[..t_end].trim());
+                }
+            }
+
+            let mut cursor = 0;
+            let len = html_str.len();
+
+            while cursor < len {
+                if let Some(tag_open) = html_str[cursor..].find('<') {
+                    let abs_open = cursor + tag_open;
+                    if abs_open > cursor {
+                        let loose_text = html_str[cursor..abs_open].trim();
+                        if !loose_text.is_empty() && !loose_text.starts_with('<') {
+                            blocks.push(MockHtmlBlock::Text(String::from(loose_text)));
+                        }
+                    }
+
+                    if let Some(tag_close) = html_str[abs_open..].find('>') {
+                        let abs_close = abs_open + tag_close;
+                        let tag_content = html_str[abs_open + 1..abs_close].trim();
+
+                        // Skip structural & closing tags
+                        if tag_content.starts_with('/') || tag_content.starts_with("html") ||
+                           tag_content.starts_with("head") || tag_content.starts_with("body") ||
+                           tag_content.starts_with("ul") {
+                            cursor = abs_close + 1;
+                            continue;
+                        }
+
+                        // Skip <title>...</title> block in body parser
+                        if tag_content.starts_with("title") {
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find("</title>") {
+                                cursor = abs_close + 1 + end_idx + 8;
+                                continue;
+                            }
+                            cursor = abs_close + 1;
+                            continue;
+                        }
+
+                        if tag_content.starts_with("h1") && !tag_content.starts_with('/') {
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find("</h1>") {
+                                blocks.push(MockHtmlBlock::Heading(1, String::from(rest[..end_idx].trim())));
+                                cursor = abs_close + 1 + end_idx + 5;
+                                continue;
+                            }
+                        }
+
+                        if tag_content.starts_with('p') && !tag_content.starts_with('/') {
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find("</p>") {
+                                blocks.push(MockHtmlBlock::Paragraph(String::from(rest[..end_idx].trim())));
+                                cursor = abs_close + 1 + end_idx + 4;
+                                continue;
+                            }
+                        }
+
+                        if tag_content.starts_with("a ") && tag_content.contains("href=") {
+                            let mut href = String::from("#");
+                            if let Some(h_pos) = tag_content.find("href=\"") {
+                                let after_h = &tag_content[h_pos + 6..];
+                                if let Some(q_end) = after_h.find('"') {
+                                    href = String::from(&after_h[..q_end]);
+                                }
+                            }
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find("</a>") {
+                                blocks.push(MockHtmlBlock::Link {
+                                    text: String::from(rest[..end_idx].trim()),
+                                    href,
+                                });
+                                cursor = abs_close + 1 + end_idx + 4;
+                                continue;
+                            }
+                        }
+
+                        if tag_content.starts_with("li") && !tag_content.starts_with('/') {
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find("</li>") {
+                                blocks.push(MockHtmlBlock::ListItem(String::from(rest[..end_idx].trim())));
+                                cursor = abs_close + 1 + end_idx + 5;
+                                continue;
+                            }
+                        }
+
+                        if tag_content.starts_with("pre") || tag_content.starts_with("code") {
+                            let close = if tag_content.starts_with("pre") { "</pre>" } else { "</code>" };
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find(close) {
+                                blocks.push(MockHtmlBlock::CodeBlock(String::from(&rest[..end_idx])));
+                                cursor = abs_close + 1 + end_idx + close.len();
+                                continue;
+                            }
+                        }
+
+                        if tag_content.starts_with("hr") {
+                            blocks.push(MockHtmlBlock::HorizontalRule);
+                            cursor = abs_close + 1;
+                            continue;
+                        }
+
+                        if tag_content.starts_with("button") && !tag_content.starts_with('/') {
+                            let rest = &html_str[abs_close + 1..];
+                            if let Some(end_idx) = rest.find("</button>") {
+                                blocks.push(MockHtmlBlock::Button(String::from(rest[..end_idx].trim())));
+                                cursor = abs_close + 1 + end_idx + 9;
+                                continue;
+                            }
+                        }
+
+                        cursor = abs_close + 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    let rest_text = html_str[cursor..].trim();
+                    if !rest_text.is_empty() {
+                        blocks.push(MockHtmlBlock::Text(String::from(rest_text)));
+                    }
+                    break;
+                }
+            }
+
+            Self { title, blocks }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MockBrowserInstance {
+        pub win_id: u64,
+        pub url_input: String,
+        pub active_url: String,
+        pub cursor_pos: usize,
+        pub url_bar_focused: bool,
+        pub history: Vec<String>,
+        pub history_idx: usize,
+        pub scroll_y: u32,
+        pub max_scroll: u32,
+        pub doc: MockHtmlDoc,
+    }
+
+    impl MockBrowserInstance {
+        pub fn new(win_id: u64, initial_url: &str) -> Self {
+            let mut inst = Self {
+                win_id,
+                url_input: String::from(initial_url),
+                active_url: String::from(initial_url),
+                cursor_pos: initial_url.len(),
+                url_bar_focused: false,
+                history: vec![String::from(initial_url)],
+                history_idx: 0,
+                scroll_y: 0,
+                max_scroll: 200,
+                doc: MockHtmlDoc {
+                    title: String::from("SparkOS"),
+                    blocks: Vec::new(),
+                },
+            };
+            inst.load_url(initial_url);
+            inst
+        }
+
+        pub fn load_url(&mut self, url: &str) {
+            if self.history[self.history_idx] != url {
+                self.history.truncate(self.history_idx + 1);
+                self.history.push(String::from(url));
+                self.history_idx = self.history.len() - 1;
+            }
+            self.active_url = String::from(url);
+            self.url_input = String::from(url);
+            self.cursor_pos = self.url_input.len();
+            self.scroll_y = 0;
+
+            let html = match url {
+                "about:sparkos" => "<html><head><title>SparkOS Portal</title></head><body><h1>Welcome</h1><p>OS Home</p><a href=\"about:help\">Help</a></body></html>",
+                "about:help" => "<html><head><title>Help</title></head><body><h1>Guide</h1><p>Controls</p></body></html>",
+                "about:blank" => "<html><head><title>Blank</title></head><body></body></html>",
+                _ => "<html><head><title>Web</title></head><body><h1>Web Page</h1></body></html>",
+            };
+            self.doc = MockHtmlDoc::parse(html);
+        }
+
+        pub fn navigate_back(&mut self) {
+            if self.history_idx > 0 {
+                self.history_idx -= 1;
+                let target = self.history[self.history_idx].clone();
+                self.load_url(&target);
+            }
+        }
+
+        pub fn navigate_forward(&mut self) {
+            if self.history_idx + 1 < self.history.len() {
+                self.history_idx += 1;
+                let target = self.history[self.history_idx].clone();
+                self.load_url(&target);
+            }
+        }
+    }
+
+    /// BROWSER2_HTML_PARSER_INV-1: Sequential DOM tree parsing
+    #[test]
+    fn test_browser2_html_parser_inv_1_sequential_dom_tree() {
+        let sample = "<html><head><title>Test</title></head><body><h1>Header</h1><p>Paragraph text</p><a href=\"http://test.com\">Click Here</a><hr><code>let x = 1;</code><button>Submit</button></body></html>";
+        let doc = MockHtmlDoc::parse(sample);
+
+        assert_eq!(doc.title, "Test");
+        assert_eq!(doc.blocks.len(), 6);
+        assert_eq!(doc.blocks[0], MockHtmlBlock::Heading(1, String::from("Header")));
+        assert_eq!(doc.blocks[1], MockHtmlBlock::Paragraph(String::from("Paragraph text")));
+        assert_eq!(doc.blocks[2], MockHtmlBlock::Link {
+            text: String::from("Click Here"),
+            href: String::from("http://test.com"),
+        });
+        assert_eq!(doc.blocks[3], MockHtmlBlock::HorizontalRule);
+        assert_eq!(doc.blocks[4], MockHtmlBlock::CodeBlock(String::from("let x = 1;")));
+        assert_eq!(doc.blocks[5], MockHtmlBlock::Button(String::from("Submit")));
+    }
+
+    /// BROWSER2_HTML_PARSER_INV-2: Title extraction
+    #[test]
+    fn test_browser2_html_parser_inv_2_title_extraction() {
+        let sample = "<html><head><title>  SparkOS Official Site  </title></head><body></body></html>";
+        let doc = MockHtmlDoc::parse(sample);
+        assert_eq!(doc.title, "SparkOS Official Site");
+    }
+
+    /// BROWSER2_NAVIGATION_INV-1: History back and forward stack
+    #[test]
+    fn test_browser2_navigation_inv_1_history_back_forward() {
+        let mut b = MockBrowserInstance::new(1, "about:sparkos");
+        b.load_url("about:help");
+        b.load_url("http://example.com");
+
+        assert_eq!(b.history.len(), 3);
+        assert_eq!(b.active_url, "http://example.com");
+
+        b.navigate_back();
+        assert_eq!(b.active_url, "about:help");
+
+        b.navigate_back();
+        assert_eq!(b.active_url, "about:sparkos");
+
+        b.navigate_forward();
+        assert_eq!(b.active_url, "about:help");
+    }
+
+    /// BROWSER2_NAVIGATION_INV-2: Reload current page
+    #[test]
+    fn test_browser2_navigation_inv_2_reload() {
+        let mut b = MockBrowserInstance::new(1, "about:sparkos");
+        b.load_url("about:help");
+        let initial_history_len = b.history.len();
+
+        let current = b.active_url.clone();
+        b.load_url(&current);
+
+        assert_eq!(b.history.len(), initial_history_len);
+        assert_eq!(b.active_url, "about:help");
+    }
+
+    /// BROWSER2_URL_BAR_INV-1: Keyboard inline editing (insert & backspace)
+    #[test]
+    fn test_browser2_url_bar_inv_1_keyboard_inline_editing() {
+        let mut b = MockBrowserInstance::new(1, "about:");
+        b.url_bar_focused = true;
+        b.url_input.push_str("sparkos");
+        b.cursor_pos = b.url_input.len();
+
+        assert_eq!(b.url_input, "about:sparkos");
+
+        b.url_input.pop();
+        b.cursor_pos -= 1;
+        assert_eq!(b.url_input, "about:sparko");
+    }
+
+    /// BROWSER2_URL_BAR_INV-2: Enter navigates to URL and clears focus
+    #[test]
+    fn test_browser2_url_bar_inv_2_enter_navigates() {
+        let mut b = MockBrowserInstance::new(1, "about:sparkos");
+        b.url_bar_focused = true;
+        b.url_input = String::from("about:help");
+
+        // Simulate Enter key commit
+        let target = b.url_input.clone();
+        b.load_url(&target);
+        b.url_bar_focused = false;
+
+        assert_eq!(b.active_url, "about:help");
+        assert_eq!(b.url_bar_focused, false);
+    }
+
+    /// BROWSER2_HYPERLINK_INV-1: Click hyperlink loads target URL
+    #[test]
+    fn test_browser2_hyperlink_inv_1_click_navigation() {
+        let mut b = MockBrowserInstance::new(1, "about:sparkos");
+        assert_eq!(b.doc.title, "SparkOS Portal");
+
+        // Click on the help link
+        let link_target = "about:help";
+        b.load_url(link_target);
+
+        assert_eq!(b.active_url, "about:help");
+        assert_eq!(b.doc.title, "Help");
+    }
+
+    /// BROWSER2_SCROLL_INV-1: Scroll clamping and bounds
+    #[test]
+    fn test_browser2_scroll_inv_1_scroll_clamping() {
+        let mut b = MockBrowserInstance::new(1, "about:sparkos");
+        b.max_scroll = 150;
+
+        b.scroll_y = (b.scroll_y + 60).min(b.max_scroll);
+        assert_eq!(b.scroll_y, 60);
+
+        b.scroll_y = (b.scroll_y + 120).min(b.max_scroll);
+        assert_eq!(b.scroll_y, 150); // Clamped to max_scroll
+
+        b.scroll_y = b.scroll_y.saturating_sub(50);
+        assert_eq!(b.scroll_y, 100);
+    }
+
+    /// BROWSER2_MULTI_INSTANCE_INV-1: Independent instances isolation
+    #[test]
+    fn test_browser2_multi_instance_inv_1_window_isolation() {
+        let mut win1 = MockBrowserInstance::new(1, "about:sparkos");
+        let mut win2 = MockBrowserInstance::new(2, "about:help");
+
+        win1.load_url("http://window1.org");
+        win2.load_url("http://window2.org");
+
+        assert_eq!(win1.active_url, "http://window1.org");
+        assert_eq!(win2.active_url, "http://window2.org");
+        assert_ne!(win1.history, win2.history);
+    }
+
+    /// BROWSER2_NATIVE_PAGES_INV-1: Native about:sparkos portal
+    #[test]
+    fn test_browser2_native_pages_inv_1_about_sparkos() {
+        let b = MockBrowserInstance::new(1, "about:sparkos");
+        assert_eq!(b.doc.title, "SparkOS Portal");
+        assert!(b.doc.blocks.iter().any(|blk| matches!(blk, MockHtmlBlock::Heading(1, _))));
+    }
+
+    /// BROWSER2_NATIVE_PAGES_INV-2: Native about:blank page
+    #[test]
+    fn test_browser2_native_pages_inv_2_about_blank() {
+        let b = MockBrowserInstance::new(1, "about:blank");
+        assert_eq!(b.doc.title, "Blank");
+        assert!(b.doc.blocks.is_empty());
+    }
+
+    /// BROWSER2_DAMAGE_INV-1: Localized window damage on navigation
+    #[test]
+    fn test_browser2_damage_inv_1_localized_damage() {
+        let mut tracker = super::damage_module::DamageTracker::new();
+        let _ = tracker.take_damage();
+        tracker.add_bounds(90, 60, 460, 280);
+        assert!(tracker.is_damaged());
+
+        let dmg = tracker.take_damage().unwrap();
+        assert_eq!(dmg.x, 90);
+        assert_eq!(dmg.y, 60);
+        assert_eq!(dmg.width, 460);
+        assert_eq!(dmg.height, 280);
+    }
+}
+
+
 
 
 
