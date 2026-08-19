@@ -1089,7 +1089,11 @@ pub fn spawn_browser_app(name: &str) -> Result<u64, &'static str> {
     let manifest = crate::permission::AppManifest::new("browser", alloc::vec![crate::permission::AppPermission::NetworkAccess]);
     crate::permission::PERMISSION_MANAGER.lock().register_process_permissions(pid, &manifest);
 
-    let surf_id = crate::surface::create_surface_for_pid(pid, BROWSER_WIDTH, BROWSER_HEIGHT)?;
+    let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
+    if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
+        s.width = BROWSER_WIDTH;
+        s.height = BROWSER_HEIGHT;
+    }
     let win_id = crate::wm::WM.lock()
         .create_window_with_meta(pid, surf_id, 90, 60, BROWSER_WIDTH, BROWSER_HEIGHT, String::from("Google - Browser"), crate::app_registry::AppIcon::Browser)
         .map_err(|_| "window creation failed")?;

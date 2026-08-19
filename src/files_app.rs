@@ -725,7 +725,11 @@ pub fn spawn_files_app(name: &str) -> Result<u64, &'static str> {
         alloc::vec![],
     );
 
-    let surf_id = crate::surface::create_surface_for_pid(pid, FILES_WIDTH, FILES_HEIGHT)?;
+    let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
+    if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
+        s.width = FILES_WIDTH;
+        s.height = FILES_HEIGHT;
+    }
     let (win_x, win_y) = {
         let count = crate::wm::WM.lock().windows.len() as i32;
         (50 + ((count * 30) % 200), 50 + ((count * 25) % 150))

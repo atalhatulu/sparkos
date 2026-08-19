@@ -175,3 +175,78 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
 
     Ok(pid)
 }
+
+/// Re-renders the application content to its surface matching the new window width and height
+pub fn rerender_app_for_window(window_id: u64, width: u32, height: u32) {
+    let (surface_id, owner_pid) = {
+        let wm = crate::wm::WM.lock();
+        if let Some(w) = wm.windows.iter().find(|w| w.window_id == window_id) {
+            (w.surface_id, w.owner_pid)
+        } else {
+            return;
+        }
+    };
+
+    let surf_ptr = {
+        let mut reg = crate::surface::SURFACE_REGISTRY.write();
+        if let Some(surf) = reg.iter_mut().find(|s| s.surface_id == surface_id || s.owner_pid == owner_pid) {
+            surf.width = width.min(crate::surface::MAX_SURFACE_WIDTH);
+            surf.height = height.min(crate::surface::MAX_SURFACE_HEIGHT);
+            unsafe { (crate::gui::PHYS_OFFSET + surf.shmem_phys_addr) as *mut u32 }
+        } else {
+            return;
+        }
+    };
+
+    // 1. Files.app
+    {
+        let mut files = crate::files_app::FILES_INSTANCES.lock();
+        if let Some(st) = files.get_mut(&window_id) {
+            st.render_to_surface(surf_ptr, width, height);
+            return;
+        }
+    }
+    // 2. Editor.app
+    {
+        let editors = crate::editor_app::EDITOR_INSTANCES.lock();
+        if let Some(st) = editors.get(&window_id) {
+            st.render_to_surface(surf_ptr, width, height);
+            return;
+        }
+    }
+    // 3. Browser.app
+    {
+        let mut browsers = crate::browser_app::BROWSER_INSTANCES.lock();
+        if let Some(st) = browsers.get_mut(&window_id) {
+            st.render_to_surface(surf_ptr, width, height);
+            return;
+        }
+    }
+    // 4. Taskmgr.app
+    {
+        let taskmgrs = crate::taskmgr_app::TASKMGR_INSTANCES.lock();
+        if let Some(st) = taskmgrs.get(&window_id) {
+            st.render_to_surface(surf_ptr, width, height);
+            return;
+        }
+    }
+    // 5. Settings.app
+    {
+        let settings = crate::settings_app::SETTINGS_INSTANCES.lock();
+        if let Some(st) = settings.get(&window_id) {
+            st.render_to_surface(surf_ptr, width, height);
+            return;
+        }
+    }
+    // 6. Terminal.app
+    {
+        let mut terminals = crate::terminal_app::TERMINAL_INSTANCES.lock();
+        if let Some(st) = terminals.get_mut(&window_id) {
+            st.width = width;
+            st.height = height;
+            st.render_to_surface(surf_ptr, width, height);
+            return;
+        }
+    }
+}
+

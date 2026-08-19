@@ -1221,7 +1221,11 @@ pub fn spawn_editor_app(name: &str, file_to_open: Option<&str>) -> Result<u64, &
         alloc::vec![],
     );
 
-    let surf_id = crate::surface::create_surface_for_pid(pid, EDITOR_WIDTH, EDITOR_HEIGHT)?;
+    let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
+    if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
+        s.width = EDITOR_WIDTH;
+        s.height = EDITOR_HEIGHT;
+    }
     let (win_x, win_y) = {
         let count = crate::wm::WM.lock().windows.len() as i32;
         (60 + ((count * 30) % 200), 50 + ((count * 25) % 150))

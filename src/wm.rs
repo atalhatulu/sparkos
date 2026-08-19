@@ -436,6 +436,7 @@ impl WindowManager {
             }
             (win.x, win.y, win.width, win.height)
         };
+        crate::app_registry::rerender_app_for_window(window_id, win_w, win_h);
         self.mark_window_damage(win_x, win_y, win_w, win_h);
         self.mark_top_bar_damage();
         self.raise_to_top_internal(window_id)
@@ -465,6 +466,7 @@ impl WindowManager {
             old_geom
         };
 
+        crate::app_registry::rerender_app_for_window(window_id, max_w / 2, work_h);
         let min_x = old_x.min(0) - 4;
         let min_y = old_y.min(WORK_AREA_TOP) - 4;
         let max_bw = (old_w.max(max_w / 2)) + (old_x - 0).abs() as u32 + 8;
@@ -499,6 +501,7 @@ impl WindowManager {
             old_geom
         };
 
+        crate::app_registry::rerender_app_for_window(window_id, target_w, work_h);
         let min_x = old_x.min(target_x) - 4;
         let min_y = old_y.min(WORK_AREA_TOP) - 4;
         let max_bw = (old_w.max(target_w)) + (old_x - target_x).abs() as u32 + 8;
@@ -514,37 +517,41 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
-        let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
-            .ok_or(WmError::NotFound)?;
+        let (new_w, new_h) = {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
+                .ok_or(WmError::NotFound)?;
 
-        if win.owner_pid != caller_pid {
-            return Err(WmError::PermissionDenied);
-        }
-
-        if win.state == WindowState::Maximized {
-            // Restore to Normal geometry
-            let (nx, ny, nw, nh) = win.normal_geom;
-            win.x = nx.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
-            win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + 20)) as i32);
-            win.width = nw.clamp(MIN_WINDOW_WIDTH, max_w);
-            win.height = nh.clamp(MIN_WINDOW_HEIGHT, work_h);
-            win.state = WindowState::Normal;
-            win.prev_state = WindowState::Normal;
-            win.saved_geom = None;
-        } else {
-            // Preserve normal geometry before maximizing
-            if win.state == WindowState::Normal {
-                win.normal_geom = (win.x, win.y, win.width, win.height);
+            if win.owner_pid != caller_pid {
+                return Err(WmError::PermissionDenied);
             }
-            win.saved_geom = Some(win.normal_geom);
-            win.x = 0;
-            win.y = WORK_AREA_TOP;
-            win.width = max_w;
-            win.height = work_h;
-            win.state = WindowState::Maximized;
-            win.prev_state = WindowState::Normal;
-        }
 
+            if win.state == WindowState::Maximized {
+                // Restore to Normal geometry
+                let (nx, ny, nw, nh) = win.normal_geom;
+                win.x = nx.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
+                win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + 20)) as i32);
+                win.width = nw.clamp(MIN_WINDOW_WIDTH, max_w);
+                win.height = nh.clamp(MIN_WINDOW_HEIGHT, work_h);
+                win.state = WindowState::Normal;
+                win.prev_state = WindowState::Normal;
+                win.saved_geom = None;
+            } else {
+                // Preserve normal geometry before maximizing
+                if win.state == WindowState::Normal {
+                    win.normal_geom = (win.x, win.y, win.width, win.height);
+                }
+                win.saved_geom = Some(win.normal_geom);
+                win.x = 0;
+                win.y = WORK_AREA_TOP;
+                win.width = max_w;
+                win.height = work_h;
+                win.state = WindowState::Maximized;
+                win.prev_state = WindowState::Normal;
+            }
+            (win.width, win.height)
+        };
+
+        crate::app_registry::rerender_app_for_window(window_id, new_w, new_h);
         self.raise_to_top_internal(window_id)
     }
 
@@ -555,45 +562,49 @@ impl WindowManager {
         let max_h = unsafe { crate::gui::VESA.height as u32 };
         let work_h = max_h.saturating_sub(WORK_AREA_TOP as u32);
 
-        let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
-            .ok_or(WmError::NotFound)?;
+        let (new_w, new_h) = {
+            let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
+                .ok_or(WmError::NotFound)?;
 
-        if win.owner_pid != caller_pid {
-            return Err(WmError::PermissionDenied);
-        }
+            if win.owner_pid != caller_pid {
+                return Err(WmError::PermissionDenied);
+            }
 
-        if win.state == WindowState::Fullscreen {
-            // Revert to prev_state (either Maximized or Normal)
-            if win.prev_state == WindowState::Maximized {
-                win.x = 0;
-                win.y = WORK_AREA_TOP;
-                win.width = max_w;
-                win.height = work_h;
-                win.state = WindowState::Maximized;
+            if win.state == WindowState::Fullscreen {
+                // Revert to prev_state (either Maximized or Normal)
+                if win.prev_state == WindowState::Maximized {
+                    win.x = 0;
+                    win.y = WORK_AREA_TOP;
+                    win.width = max_w;
+                    win.height = work_h;
+                    win.state = WindowState::Maximized;
+                } else {
+                    let (nx, ny, nw, nh) = win.normal_geom;
+                    win.x = nx.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
+                    win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + 20)) as i32);
+                    win.width = nw.clamp(MIN_WINDOW_WIDTH, max_w);
+                    win.height = nh.clamp(MIN_WINDOW_HEIGHT, max_h);
+                    win.state = WindowState::Normal;
+                    win.saved_geom = None;
+                }
+                win.prev_state = WindowState::Normal;
             } else {
-                let (nx, ny, nw, nh) = win.normal_geom;
-                win.x = nx.clamp(0, (max_w.saturating_sub(MIN_WINDOW_WIDTH)) as i32);
-                win.y = ny.clamp(WORK_AREA_TOP, (max_h.saturating_sub(MIN_WINDOW_HEIGHT + 20)) as i32);
-                win.width = nw.clamp(MIN_WINDOW_WIDTH, max_w);
-                win.height = nh.clamp(MIN_WINDOW_HEIGHT, max_h);
-                win.state = WindowState::Normal;
-                win.saved_geom = None;
+                // Save state before entering Fullscreen
+                win.prev_state = win.state;
+                if win.state == WindowState::Normal {
+                    win.normal_geom = (win.x, win.y, win.width, win.height);
+                }
+                win.saved_geom = Some(win.normal_geom);
+                win.x = 0;
+                win.y = 0;
+                win.width = max_w;
+                win.height = max_h;
+                win.state = WindowState::Fullscreen;
             }
-            win.prev_state = WindowState::Normal;
-        } else {
-            // Save state before entering Fullscreen
-            win.prev_state = win.state;
-            if win.state == WindowState::Normal {
-                win.normal_geom = (win.x, win.y, win.width, win.height);
-            }
-            win.saved_geom = Some(win.normal_geom);
-            win.x = 0;
-            win.y = 0;
-            win.width = max_w;
-            win.height = max_h;
-            win.state = WindowState::Fullscreen;
-        }
+            (win.width, win.height)
+        };
 
+        crate::app_registry::rerender_app_for_window(window_id, new_w, new_h);
         self.raise_to_top_internal(window_id)
     }
 
@@ -1497,6 +1508,8 @@ impl WindowManager {
                     win.normal_geom = (win.x, win.y, win.width, win.height);
                 }
 
+                let (ww, wh) = (win.width, win.height);
+                crate::app_registry::rerender_app_for_window(wid, ww, wh);
                 let min_box_x = old_x.min(win.x) - 4;
                 let min_box_y = old_y.min(win.y) - 4;
                 let max_box_w = (old_w.max(win.width)) + (old_x - win.x).abs() as u32 + 8;
@@ -1510,7 +1523,11 @@ impl WindowManager {
             self.damage_tracker.add_bounds(0, WORK_AREA_TOP, max_w as u32, work_h);
         }
 
-        self.resizing_window = None;
+        if let Some((wid, ..)) = self.resizing_window.take() {
+            if let Some(win) = self.windows.iter().find(|w| w.window_id == wid) {
+                crate::app_registry::rerender_app_for_window(wid, win.width, win.height);
+            }
+        }
         crate::cursor::set_cursor_type(crate::cursor::CursorType::Default);
         let target_id = self.focused_window?;
         let owner_pid = self.windows.iter().find(|w| w.window_id == target_id).map(|w| w.owner_pid)?;

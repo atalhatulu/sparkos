@@ -302,7 +302,11 @@ pub fn spawn_settings_app(name: &str) -> Result<u64, &'static str> {
         alloc::vec![],
     );
 
-    let surf_id = crate::surface::create_surface_for_pid(pid, SETTINGS_WIDTH, SETTINGS_HEIGHT)?;
+    let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
+    if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
+        s.width = SETTINGS_WIDTH;
+        s.height = SETTINGS_HEIGHT;
+    }
     let win_id = crate::wm::WM.lock()
         .create_window(pid, surf_id, 80, 80, SETTINGS_WIDTH, SETTINGS_HEIGHT)
         .map_err(|_| "window creation failed")?;

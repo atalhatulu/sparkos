@@ -398,7 +398,11 @@ pub fn spawn_taskmgr_app(name: &str) -> Result<u64, &'static str> {
         alloc::vec![],
     );
 
-    let surf_id = crate::surface::create_surface_for_pid(pid, TASKMGR_WIDTH, TASKMGR_HEIGHT)?;
+    let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
+    if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
+        s.width = TASKMGR_WIDTH;
+        s.height = TASKMGR_HEIGHT;
+    }
     let (win_x, win_y) = {
         let count = crate::wm::WM.lock().windows.len() as i32;
         (70 + ((count * 30) % 200), 60 + ((count * 25) % 150))
