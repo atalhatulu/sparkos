@@ -6,7 +6,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
-use spin::{Mutex, Once};
+use spin::Once;
+use crate::sync::{IrqMutex, IrqGuard};
 
 // --- FROZEN DATA STRUCTURES ---
 
@@ -104,14 +105,14 @@ pub(crate) struct CoreState {
     objects: Vec<CapObject>,
 }
 
-// Tüm mutasyonlar TEK spinlock altındadır.
-static STATE: Mutex<Option<CoreState>> = Mutex::new(None);
+// Tüm mutasyonlar TEK spinlock altındadır (kesme güvenli).
+static STATE: IrqMutex<Option<CoreState>> = IrqMutex::new(None);
 
 pub static CSPACE_LOCK_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 pub static CSPACE_LOCK_CONTENTION: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Acquires STATE lock while profiling lock contention.
-pub(crate) fn lock_state() -> spin::MutexGuard<'static, Option<CoreState>> {
+pub(crate) fn lock_state() -> IrqGuard<'static, Option<CoreState>> {
     CSPACE_LOCK_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if let Some(guard) = STATE.try_lock() {
         return guard;
@@ -408,7 +409,7 @@ pub fn reclaim(cap: CapHandle) -> Result<()> {
 // Aşama 7.2: Lend Expiry Registry (Zamanlayıcı Tabanlı Capability İptali)
 // -----------------------------------------------------------------------------
 
-static LEND_EXPIRIES: Mutex<BTreeMap<u32, (u32, u64)>> = Mutex::new(BTreeMap::new());
+static LEND_EXPIRIES: IrqMutex<BTreeMap<u32, (u32, u64)>> = IrqMutex::new(BTreeMap::new());
 
 /// Aşama 7.2: Lend Expiry (Timer-Temelli Süreli Capability Ödünç Verme).
 pub fn lend_with_expiry(parent: CapHandle, req: Rights, expiry_tick: u64) -> Result<CapHandle> {
@@ -600,7 +601,7 @@ pub fn object_identity(cap: CapHandle) -> Result<(ObjectKind, u32)> {
 // process, hiçbir cihaza bağlı olmadan TÜM port aralıklarına erişim isteyebilirdi.
 // Bu kayıt port erişimini yalnızca bağlı Device nesnelerine kısıtlar.
 
-static DEVICE_PORT_BINDINGS: Mutex<BTreeMap<u32, (u16, u16)>> = Mutex::new(BTreeMap::new());
+static DEVICE_PORT_BINDINGS: IrqMutex<BTreeMap<u32, (u16, u16)>> = IrqMutex::new(BTreeMap::new());
 
 /// Yeni bir Device capability'si oluşturur ve `[start..=end_inclusive]` port
 /// aralığına bağlar. Dönen handle MANAGE|IO yetkileri taşır; kernel bu handle'ı
