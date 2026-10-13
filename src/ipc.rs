@@ -8,40 +8,7 @@ use core::fmt::Debug;
 /// yetki ve kaynak aktarımı (Capability Transfer / Lend) destekleyen
 /// mikroçekirdek IPC katmanı.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferMode {
-    None,
-    /// Sahiplik aktarımı: kaynak eski lineage'dan tamamen koparılır, alıcı yeni root olur.
-    Transfer,
-    /// Geçici ödünç: gönderici mesaj kuyruktayken yetkiyi geri alabilir (revoke).
-    Lend,
-}
-
-/// Capability taşıyabilen mesaj zarfı
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapMessage<M> {
-    pub payload: M,
-    pub capability: Option<CapHandle>,
-    pub transfer_mode: TransferMode,
-}
-
-impl<M> CapMessage<M> {
-    pub fn new_plain(payload: M) -> Self {
-        CapMessage {
-            payload,
-            capability: None,
-            transfer_mode: TransferMode::None,
-        }
-    }
-
-    pub fn new_with_cap(payload: M, cap: CapHandle, mode: TransferMode) -> Self {
-        CapMessage {
-            payload,
-            capability: Some(cap),
-            transfer_mode: mode,
-        }
-    }
-}
+pub use spark_abi::ipc::{CapMessage, TransferMode, SERVICE_DEVICE_FD};
 
 /// Capability-gated Typed IPC Kanalı
 pub struct CapChannel<M> {

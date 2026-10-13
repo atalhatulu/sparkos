@@ -1,0 +1,7 @@
+[package]
+name = "spark-abi"
+version = "0.1.0"
+edition = "2021"
+description = "Common ABI and shared definitions for SparkOS kernel and userspace"
+
+[dependencies]

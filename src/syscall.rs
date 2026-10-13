@@ -2,77 +2,8 @@ use crate::serial_println;
 use crate::cap::Rights;
 use crate::syscall_cap;
 
-pub const SYS_EXIT: u64 = 1;
-pub const SYS_WRITE: u64 = 4;
-pub const SYS_READ: u64 = 0;
-pub const SYS_OPEN: u64 = 2;
-pub const SYS_CLOSE: u64 = 3;
-pub const SYS_LSEEK: u64 = 8;
-/// Cooperative user→kernel yield. A Ring 3 app calls this during a long loop so
-/// the kernel executor can poll other tasks (timer, IPC, input) instead of
-/// freezing them for the full app run. Semantics identical to SYS_EXIT's return
-/// path (resume at user.rs `2:` label via KERNEL_RSP/KERNEL_RIP); the app is
-/// relaunched at its saved resume point by the async loop in `user.rs`.
-pub const SYS_YIELD: u64 = 9;
-
-// Socket syscalls (Linux-compatible numbers).
-pub const SYS_SOCKET: u64 = 10;
-pub const SYS_CONNECT: u64 = 11;
-pub const SYS_SEND: u64 = 12;
-pub const SYS_RECV: u64 = 13;
-
-// Process syscalls (Linux-compatible numbers).
-pub const SYS_FORK: u64 = 14;
-pub const SYS_EXEC: u64 = 15;
-pub const SYS_WAITPID: u64 = 16;
-
-// Microkernel IPC & Device Port syscalls (Aşama 4 & 5).
-pub const SYS_IPC_SEND: u64 = 20;
-pub const SYS_IPC_RECV: u64 = 21;
-pub const SYS_IOPERM: u64 = 22;
-/// Non-blocking IPC alımı (Aşama 5): kuyruk boşsa EAGAIN döner, CPU'yu kilitlemez.
-pub const SYS_IPC_TRY_RECV: u64 = 23;
-/// User-space servis: adres alanına yeni bir endpoint oluşturur (Aşama 5.2).
-/// Başarılıysa endpoint id (ep_id) döner; bu id aynı zamanda çağıranın
-/// cap_table'ındaki fd'dir — servis IPC okumak için onu kullanır.
-pub const SYS_IPC_CREATE_ENDPOINT: u64 = 24;
-/// User-space servis: bir cihaz capability'siyle IRQ'yu kendi endpoint'ine bağlar
-/// (Aşama 5.2). Device cap üzerinde MANAGE hakkı + endpoint'te WRITE gerekir.
-pub const SYS_IPC_BIND_IRQ: u64 = 25;
-pub const SYS_MAP_DMA: u64 = 26;
-pub const SYS_NET_SEND_FRAME: u64 = 27;
-pub const SYS_NET_RECV_FRAME: u64 = 28;
-pub const SYS_IPC_CANCEL: u64 = 29;
-/// Aşama 6.3: netdrv bir DMA bölgesi içindeki alt-aralığı (ör. RX ring'de gelen
-/// frame) üst yığına zero-copy ulaştırmak için bir "buffer capability" üretir.
-/// dma_fd üzerinden (MAP|DMA haklı) bir ObjectKind::Memory slot cap oluşturulur;
-/// bu cap SLOT_MAP'te o bölgenin fiziksel adresi + offset/len ile kaydedilir.
-/// Return: yeni slot cap'inin fd'si (>= 1000); hata -13 (EACCES) / -14 (EFAULT).
-pub const SYS_IPC_CREATE_SLOT: u64 = 30;
-pub const SYS_CREATE_SURFACE: u64 = 31;
-pub const SYS_PRESENT_SURFACE: u64 = 32;
-pub const SYS_DESTROY_SURFACE: u64 = 33;
-pub const SYS_CREATE_WINDOW: u64 = 34;
-pub const SYS_DESTROY_WINDOW: u64 = 35;
-pub const SYS_MOVE_WINDOW: u64 = 36;
-pub const SYS_MINIMIZE_WINDOW: u64 = 37;
-pub const SYS_RESTORE_WINDOW: u64 = 38;
-pub const SYS_POLL_EVENT: u64 = 39;
-pub const SYS_SETAFFINITY: u64 = 40;
-pub const SYS_GETAFFINITY: u64 = 41;
-pub const SYS_MKDIR: u64 = 42;
-pub const SYS_STAT: u64 = 43;
-pub const SYS_KILL: u64 = 44;
-pub const SYS_SIGACTION: u64 = 45;
-pub const SYS_SIGPROCMASK: u64 = 46;
-
-// Standard errno style return code: -(EFAULT). Negative errno values are
-// returned to the user as their unsigned encoding.
-const EFAULT: u64 = (-14i64) as u64;
-// EACCES (permission denied) — Asama 2: capability gate'i reddettiğinde döner.
-const EACCES: u64 = (-13i64) as u64;
-// EAGAIN (would block) — non-blocking IPC recv, kuyruk boşken döner.
-const EAGAIN: u64 = (-11i64) as u64;
+pub use spark_abi::syscall::*;
+pub use spark_abi::errno::{EACCES_RET as EACCES, EAGAIN_RET as EAGAIN, EFAULT_RET as EFAULT};
 
 pub fn init() {
     serial_println!("[OK] Syscall dispatcher initialized");

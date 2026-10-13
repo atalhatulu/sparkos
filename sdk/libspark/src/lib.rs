@@ -10,49 +10,9 @@
 // Canonical Syscall Numbers (int 0x80 ABI)
 // -----------------------------------------------------------------------------
 
-pub const SYS_READ: u64 = 0;
-pub const SYS_EXIT: u64 = 1;
-pub const SYS_OPEN: u64 = 2;
-pub const SYS_CLOSE: u64 = 3;
-pub const SYS_WRITE: u64 = 4;
-pub const SYS_LSEEK: u64 = 8;
-pub const SYS_YIELD: u64 = 9;
-
-pub const SYS_SOCKET: u64 = 10;
-pub const SYS_CONNECT: u64 = 11;
-pub const SYS_SEND: u64 = 12;
-pub const SYS_RECV: u64 = 13;
-
-pub const SYS_FORK: u64 = 14;
-pub const SYS_EXEC: u64 = 15;
-pub const SYS_WAITPID: u64 = 16;
-
-pub const SYS_IPC_SEND: u64 = 20;
-pub const SYS_IPC_RECV: u64 = 21;
-pub const SYS_IOPERM: u64 = 22;
-pub const SYS_IPC_TRY_RECV: u64 = 23;
-pub const SYS_IPC_CREATE_ENDPOINT: u64 = 24;
-pub const SYS_IPC_BIND_IRQ: u64 = 25;
-pub const SYS_MAP_DMA: u64 = 26;
-pub const SYS_IPC_CANCEL: u64 = 29;
-pub const SYS_IPC_CREATE_SLOT: u64 = 30;
-
-pub const SYS_CREATE_SURFACE: u64 = 31;
-pub const SYS_PRESENT_SURFACE: u64 = 32;
-pub const SYS_DESTROY_SURFACE: u64 = 33;
-pub const SYS_CREATE_WINDOW: u64 = 34;
-pub const SYS_DESTROY_WINDOW: u64 = 35;
-pub const SYS_MOVE_WINDOW: u64 = 36;
-pub const SYS_MINIMIZE_WINDOW: u64 = 37;
-pub const SYS_RESTORE_WINDOW: u64 = 38;
-pub const SYS_POLL_EVENT: u64 = 39;
-pub const SYS_SETAFFINITY: u64 = 40;
-pub const SYS_GETAFFINITY: u64 = 41;
-pub const SYS_MKDIR: u64 = 42;
-pub const SYS_STAT: u64 = 43;
-pub const SYS_KILL: u64 = 44;
-pub const SYS_SIGACTION: u64 = 45;
-pub const SYS_SIGPROCMASK: u64 = 46;
+pub use spark_abi::syscall::*;
+pub use spark_abi::cap::{CapError, CapHandle, ObjectKind, Rights};
+pub use spark_abi::ipc::{CapMessage, TransferMode, SERVICE_DEVICE_FD};
 
 // -----------------------------------------------------------------------------
 // Standard Error Codes

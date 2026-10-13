@@ -15,6 +15,7 @@ uart_16550 = "0.2"
 spin = { version = "0.9", features = ["once", "rwlock", "mutex", "spin_mutex"] }
 crossbeam-queue = { version = "0.3.8", default-features = false, features = ["alloc"] }
 linked_list_allocator = "0.10"
+spark-abi = { path = "spark-abi" }
 
 [package.metadata.bootimage]
 run-command = ["qemu-system-x86_64", "-drive", "format=raw,file={}", "-serial", "stdio", "-m", "256M", "-enable-kvm"]

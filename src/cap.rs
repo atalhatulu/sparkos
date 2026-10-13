@@ -9,72 +9,7 @@ use alloc::collections::BTreeMap;
 use spin::Once;
 use crate::sync::{IrqMutex, IrqGuard};
 
-// --- FROZEN DATA STRUCTURES ---
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CapError {
-    Invalid,
-    Revoked,
-    NoRights,
-    NotFound,
-    Exhausted,
-    AlreadyExists,
-}
-
-pub type Result<T> = core::result::Result<T, CapError>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CapHandle {
-    pub slot: u32,
-    pub generation: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rights(pub u32);
-
-impl Rights {
-    pub const READ: Rights     = Rights(1 << 0);
-    pub const WRITE: Rights    = Rights(1 << 1);
-    pub const MAP: Rights      = Rights(1 << 2);
-    pub const IO: Rights       = Rights(1 << 3);
-    pub const DMA: Rights      = Rights(1 << 4);
-    pub const TRANSFER: Rights = Rights(1 << 5);
-    pub const GRANT: Rights    = Rights(1 << 6);
-    pub const DESTROY: Rights  = Rights(1 << 7);
-    pub const EXECUTE: Rights  = Rights(1 << 8);
-    pub const MANAGE: Rights   = Rights(1 << 9);
-
-    pub fn empty() -> Self { Rights(0) }
-    pub fn all() -> Self { Rights(0x3FF) }
-
-    pub fn contains(&self, other: Rights) -> bool {
-        (self.0 & other.0) == other.0
-    }
-}
-
-impl core::ops::BitAnd for Rights {
-    type Output = Self;
-    fn bitand(self, rhs: Self) -> Self {
-        Rights(self.0 & rhs.0)
-    }
-}
-
-impl core::ops::BitOr for Rights {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Rights(self.0 | rhs.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ObjectKind {
-    Memory,
-    Device,
-    Endpoint,
-    Generic,
-    Fd,
-    Process,
-}
+pub use spark_abi::cap::{CapError, CapHandle, ObjectKind, Result, Rights};
 
 pub struct CapNode {
     pub parent: Option<u32>,

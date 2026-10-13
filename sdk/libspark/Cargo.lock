@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "libspark"
 version = "0.1.0"
+dependencies = [
+ "spark-abi",
+]
+
+[[package]]
+name = "spark-abi"
+version = "0.1.0"
