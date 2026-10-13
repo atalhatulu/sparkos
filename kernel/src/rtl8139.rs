@@ -47,7 +47,7 @@ impl Rtl8139 {
             }
 
             // 4. Rx Buffer Baslangic Adresini Ayarla (RBSTART - 0x30)
-            let phys_addr = (self.rx_buffer.as_ptr() as u64) - crate::gui::PHYS_OFFSET;
+            let phys_addr = (self.rx_buffer.as_ptr() as u64) - crate::memory::PHYS_OFFSET;
             let mut rbstart: Port<u32> = Port::new(self.io_base + 0x30);
             rbstart.write(phys_addr as u32);
 
@@ -72,7 +72,7 @@ impl Rtl8139 {
 
     pub fn send_packet(&mut self, data: &[u8]) {
         // 1. Sanal adresi Fiziksel adrese cevir (QEMU DMA icin)
-        let phys_addr = (data.as_ptr() as u64) - unsafe { crate::gui::PHYS_OFFSET };
+        let phys_addr = (data.as_ptr() as u64) - unsafe { crate::memory::PHYS_OFFSET };
         
         // 2. TSADx (Transmit Start Address) - Verinin fiziksel adresini yaz
         let tsad_port = self.io_base + 0x20 + (self.tx_cur as u16 * 4);

@@ -79,6 +79,7 @@ impl NetworkManager {
     }
 
     /// Renders network system tray popup if open
+    #[cfg(feature = "legacy-desktop")]
     pub fn render_popup(&self, screen_w: u16, top_bar_h: u16) {
         if !self.popup_open { return; }
 

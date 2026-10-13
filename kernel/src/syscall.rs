@@ -151,12 +151,14 @@ pub extern "C" fn syscall_dispatcher(
         SYS_NET_RECV_FRAME => sys_net_recv_frame(arg1, arg2),
         SYS_IPC_CANCEL => sys_ipc_cancel(arg1),
         SYS_IPC_CREATE_SLOT => sys_ipc_create_slot(arg1, arg2, arg3),
+        #[cfg(feature = "legacy-desktop")]
         SYS_CREATE_SURFACE => {
             match crate::surface::create_surface(arg1 as u32, arg2 as u32) {
                 Ok(id) => id,
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_PRESENT_SURFACE => {
             let x = ((arg2 >> 48) & 0xFFFF) as u32;
             let y = ((arg2 >> 32) & 0xFFFF) as u32;
@@ -167,12 +169,14 @@ pub extern "C" fn syscall_dispatcher(
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_DESTROY_SURFACE => {
             match crate::surface::destroy_surface(arg1) {
                 Ok(_) => 0,
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_CREATE_WINDOW => {
             let pid = crate::task::process::current_pid();
             match crate::wm::WM.lock().create_window(pid, arg1, arg2 as i32, arg3 as i32, arg4 as u32, arg5 as u32) {
@@ -180,6 +184,7 @@ pub extern "C" fn syscall_dispatcher(
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_DESTROY_WINDOW => {
             let pid = crate::task::process::current_pid();
             let res = crate::wm::WM.lock().destroy_window(pid, arg1);
@@ -194,6 +199,7 @@ pub extern "C" fn syscall_dispatcher(
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_MOVE_WINDOW => {
             let pid = crate::task::process::current_pid();
             match crate::wm::WM.lock().move_window(pid, arg1, arg2 as i32, arg3 as i32) {
@@ -201,6 +207,7 @@ pub extern "C" fn syscall_dispatcher(
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_MINIMIZE_WINDOW => {
             let pid = crate::task::process::current_pid();
             match crate::wm::WM.lock().minimize_window(pid, arg1) {
@@ -208,6 +215,7 @@ pub extern "C" fn syscall_dispatcher(
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_RESTORE_WINDOW => {
             let pid = crate::task::process::current_pid();
             match crate::wm::WM.lock().restore_window(pid, arg1) {
@@ -215,6 +223,7 @@ pub extern "C" fn syscall_dispatcher(
                 Err(_) => u64::MAX,
             }
         }
+        #[cfg(feature = "legacy-desktop")]
         SYS_POLL_EVENT => {
             let pid = crate::task::process::current_pid();
             if let Some(ev) = crate::input::INPUT_QUEUES.lock().get_mut(&pid).and_then(|q| q.pop()) {
@@ -230,6 +239,13 @@ pub extern "C" fn syscall_dispatcher(
             } else {
                 0
             }
+        }
+        #[cfg(not(feature = "legacy-desktop"))]
+        SYS_CREATE_SURFACE | SYS_PRESENT_SURFACE | SYS_DESTROY_SURFACE |
+        SYS_CREATE_WINDOW | SYS_DESTROY_WINDOW | SYS_MOVE_WINDOW |
+        SYS_MINIMIZE_WINDOW | SYS_RESTORE_WINDOW | SYS_POLL_EVENT => {
+            // TODO(Faz5): desktop & surface syscalls routed to user-space compositor service
+            u64::MAX
         }
         SYS_SETAFFINITY => {
             let pid = if arg1 == 0 { crate::task::process::current_pid() } else { arg1 };

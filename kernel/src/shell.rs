@@ -121,7 +121,12 @@ impl Shell {
             }
 
             // 2. PS/2 Keyboard (Only consumed by CLI when GUI is NOT active)
-            if !crate::display::is_gui_active() {
+            #[cfg(feature = "legacy-desktop")]
+            let gui_active = crate::display::is_gui_active();
+            #[cfg(not(feature = "legacy-desktop"))]
+            let gui_active = false;
+
+            if !gui_active {
                 while let Some(key) = crate::keyboard::read_key() {
                     got_input = true;
                     match key {
@@ -293,7 +298,14 @@ impl Shell {
         if let Some(file_name) = cmd.strip_prefix("edit ") {
             let file_name = file_name.trim();
             let resolved = crate::fs::resolve_path(&self.cwd, file_name);
+            #[cfg(feature = "legacy-desktop")]
             crate::editor::run_editor(&resolved, file_name).await;
+            #[cfg(not(feature = "legacy-desktop"))]
+            {
+                let _ = (resolved, file_name);
+                // TODO(Faz5): Editör Ring 3 kullanıcı alanı uygulaması olacak.
+                crate::serial_println!("[SHELL] Editor requires legacy-desktop feature");
+            }
             return;
         }
         
@@ -761,25 +773,34 @@ impl Shell {
                 }
             }
             "gui" | "desktop" => {
-                crate::gui::init(None);
-                crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
-                
-                drop(w);
+                #[cfg(feature = "legacy-desktop")]
+                {
+                    // TODO(Faz5): Desktop Ring 3 kullanıcı alanı servisi olarak başlatılacak.
+                    crate::gui::init(None);
+                    crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
+                    
+                    drop(w);
 
-                // Spawn Desktop V1 applications (Terminal & Files)
-                let spawn_res = crate::task::process::spawn_desktop_v1_apps();
+                    // Spawn Desktop V1 applications (Terminal & Files)
+                    let spawn_res = crate::task::process::spawn_desktop_v1_apps();
 
-                // Mark full damage for initial desktop environment paint
-                crate::wm::WM.lock().mark_full_damage();
+                    // Mark full damage for initial desktop environment paint
+                    crate::wm::WM.lock().mark_full_damage();
 
-                w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
+                    w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
 
-                if let Ok((pa, pb, _)) = spawn_res {
-                    w.set_color(Color::LightGreen, Color::Black);
-                    writeln!(w, "[DESKTOP] SparkOS Desktop baslatildi (Terminal PID {}, Files PID {}).", pa, pb).unwrap();
-                } else {
+                    if let Ok((pa, pb, _)) = spawn_res {
+                        w.set_color(Color::LightGreen, Color::Black);
+                        writeln!(w, "[DESKTOP] SparkOS Desktop baslatildi (Terminal PID {}, Files PID {}).", pa, pb).unwrap();
+                    } else {
+                        w.set_color(Color::LightRed, Color::Black);
+                        writeln!(w, "HATA: Desktop uygulamalari baslatilamadi.").unwrap();
+                    }
+                }
+                #[cfg(not(feature = "legacy-desktop"))]
+                {
                     w.set_color(Color::LightRed, Color::Black);
-                    writeln!(w, "HATA: Desktop uygulamalari baslatilamadi.").unwrap();
+                    writeln!(w, "HATA: Desktop modu icin 'legacy-desktop' ozelligi gereklidir.").unwrap();
                 }
             }
             _ if cmd.starts_with("kill ") => {

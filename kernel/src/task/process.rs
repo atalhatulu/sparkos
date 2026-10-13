@@ -650,6 +650,7 @@ impl PendingProcess {
 impl Drop for PendingProcess {
     fn drop(&mut self) {
         let Some(pid) = self.pid else { return; };
+        #[cfg(feature = "legacy-desktop")]
         crate::surface::cleanup_surfaces_for_pid(pid);
         if !release_process_address_space(pid) { return; }
         let mut sched = SCHEDULER.lock();
@@ -1219,6 +1220,7 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) {
 /// Release private page tables only after switching out of the process.
 /// The PCB stays present while surface quotas are returned.
 pub fn release_process_address_space(pid: u64) -> bool {
+    #[cfg(feature = "legacy-desktop")]
     if crate::surface::SURFACE_REGISTRY.read().iter().any(|s| s.owner_pid == pid) {
         return false; // A failed surface unmap must retain its owner page tables.
     }
@@ -1254,9 +1256,13 @@ pub fn exit_current() -> ! {
     // alive until it finishes, but never hold SCHEDULER across those calls.
     let exiting_pid = SCHEDULER.lock().current;
     if let Some(pid) = exiting_pid {
-        crate::surface::cleanup_surfaces_for_pid(pid);
-        crate::wm::cleanup_windows_for_pid(pid);
-        crate::input::cleanup_input_for_pid(pid);
+        #[cfg(feature = "legacy-desktop")]
+        {
+            // TODO(Faz5): Desktop kaynakları Ring 3 IPC ile temizlenecek.
+            crate::surface::cleanup_surfaces_for_pid(pid);
+            crate::wm::cleanup_windows_for_pid(pid);
+            crate::input::cleanup_input_for_pid(pid);
+        }
         release_process_address_space(pid);
     }
 
@@ -1759,7 +1765,7 @@ where
     // üzerinden yazılır; kullanıcı sanal adresi kernel CR3 içinde bulunmaz.
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(b"SVC UP\r\n".as_ptr(), data_ptr.add(8), 8);
@@ -1916,7 +1922,7 @@ pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
     // servis tarafından kendisi yazılır.)
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(b"[SERDRV] alive\r\n".as_ptr(), data_ptr.add(0x10), 16);
@@ -2289,7 +2295,7 @@ pub fn spawn_net_service(name: &str, kern_ep_id: u32, ep_writer: crate::cap::Cap
     // driver at runtime only after the frame is verified. Offsets never overlap.
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(NETDRV_FAIL_MAP.as_ptr(), data_ptr.add(0x10), NETDRV_FAIL_MAP.len());
@@ -2487,7 +2493,7 @@ pub fn spawn_disk_service(name: &str) -> Result<u64, &'static str> {
     // (SPFS superblock magic) — a pre-seeded message is never printed unconditionally.
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2564,7 +2570,7 @@ pub fn spawn_fs_service(name: &str) -> Result<u64, &'static str> {
 
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2867,7 +2873,7 @@ pub fn spawn_netsvc(
 
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(NETSVC_RX_VERIFIED.as_ptr(), data_ptr.add(0xA0), NETSVC_RX_VERIFIED.len());
@@ -2937,7 +2943,7 @@ pub fn spawn_user_shell(name: &str) -> Result<u64, &'static str> {
 
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -3003,7 +3009,7 @@ pub fn spawn_display_server(name: &str) -> Result<u64, &'static str> {
 
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -3069,7 +3075,7 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
 
     let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
         .ok_or("Service data page missing")?;
-    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
+    let data_ptr = (unsafe { crate::memory::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -3099,6 +3105,7 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
 // Desktop V1: Multi-Process User-Space Window & Surface Isolation
 // -----------------------------------------------------------------------------
 
+#[cfg(feature = "legacy-desktop")]
 /// Emit x86-64 machine code for `live_demo_app` (Persistent Event-Loop GUI runtime validation).
 ///
 /// Behavior:
@@ -3150,6 +3157,7 @@ pub fn live_demo_machine_code() -> Vec<u8> {
     c
 }
 
+#[cfg(feature = "legacy-desktop")]
 /// Spawns a persistent Ring-3 GUI `live_demo_app` with its own CR3, Surface, and Window.
 pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
     let address_space = crate::memory::AddressSpaceBuilder::new()?;
@@ -3186,6 +3194,7 @@ pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
     Ok(pid)
 }
 
+#[cfg(feature = "legacy-desktop")]
 /// Spawns the live desktop applications (terminal, files) for interactive GUI usage.
 pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
     let pid_term = crate::terminal_app::spawn_terminal_app("terminal.app")?;

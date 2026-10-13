@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = ["legacy-desktop", "legacy-net", "legacy-fs-inkernel"]
+legacy-desktop = []
+legacy-net = []
+legacy-fs-inkernel = []
 kernel-regression = []
 perf-metrics = []
 bench = []

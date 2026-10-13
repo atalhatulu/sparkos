@@ -2,7 +2,7 @@ use core::mem::size_of;
 use alloc::vec::Vec;
 
 fn phys_to_virt(phys: u64) -> u64 {
-    unsafe { phys + crate::gui::PHYS_OFFSET }
+    unsafe { phys + crate::memory::PHYS_OFFSET }
 }
 
 #[repr(C, packed)]

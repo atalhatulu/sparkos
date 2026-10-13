@@ -94,10 +94,17 @@ pub fn execute_command(cmd: &str) -> ShellResponse {
             ShellResponse::from_str(0, mem_text)
         }
         "theme" => {
-            crate::theme::THEME_MANAGER.lock().toggle_theme();
-            let new_theme = crate::theme::THEME_MANAGER.lock().current_theme.name;
-            let msg = format!("Active theme changed to: {}", new_theme);
-            ShellResponse::from_str(0, &msg)
+            #[cfg(feature = "legacy-desktop")]
+            {
+                crate::theme::THEME_MANAGER.lock().toggle_theme();
+                let new_theme = crate::theme::THEME_MANAGER.lock().current_theme.name;
+                let msg = format!("Active theme changed to: {}", new_theme);
+                ShellResponse::from_str(0, &msg)
+            }
+            #[cfg(not(feature = "legacy-desktop"))]
+            {
+                ShellResponse::from_str(1, "theme command requires legacy-desktop feature")
+            }
         }
         "pkg" => {
             let out = crate::pkg_service::PACKAGE_MANAGER.lock().execute_pkg_command(&args);

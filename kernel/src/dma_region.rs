@@ -127,7 +127,7 @@ impl DmaRegion {
         let first_phys = first_frame.start_address();
 
         // Kernel görünümü: fiziksel bellek ofseti üzerinden doğrudan sanal adres
-        let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+        let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
         let kern_virt = VirtAddr::new(phys_offset + first_phys.as_u64());
 
         // Belleği sıfırla (güvenlik: eski çekirdek verileri sürücüye sızamaz)
@@ -300,7 +300,7 @@ pub fn resolve_slot_cap(
     }
     let entry = lookup_slot(object_idx).ok_or(crate::cap::CapError::NotFound)?;
     #[cfg(target_os = "none")]
-    let base = unsafe { crate::gui::PHYS_OFFSET };
+    let base = unsafe { crate::memory::PHYS_OFFSET };
     #[cfg(not(target_os = "none"))]
     let base = 0u64; // host test: işaretçi yalnızca ofset mantığını doğrular
     let ptr = (base + entry.region_phys + entry.offset as u64) as *mut u8;

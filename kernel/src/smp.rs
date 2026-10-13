@@ -202,7 +202,7 @@ pub fn run_live_tlb_shootdown_adversarial_demo() {
         None => return,
     };
     let phys_addr = frame.start_address().as_u64();
-    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+    let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
     unsafe {
         let ptr = (phys_offset + phys_addr) as *mut u32;
         ptr.write_volatile(initial_value);
@@ -252,7 +252,7 @@ pub fn current_cpu_id() -> usize {
 
 /// Sets up the complete 16-bit real mode -> 32-bit protected mode -> 64-bit long mode AP trampoline at 0x8000.
 pub fn setup_ap_trampoline(trampoline_addr: u32, cpu_id: usize, apic_id: u8) {
-    let trampoline_virt = unsafe { (trampoline_addr as u64) + crate::gui::PHYS_OFFSET };
+    let trampoline_virt = unsafe { (trampoline_addr as u64) + crate::memory::PHYS_OFFSET };
     spin::Lazy::force(&crate::gdt::PER_CPU_GDT);
     let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
     let cr3_val = cr3_frame.start_address().as_u64();
@@ -434,7 +434,7 @@ pub fn start_ap(cpu_id: usize, apic_id: u8, trampoline_addr: u32) {
     drop(guard);
 
     // Wait for AP core to confirm Long Mode execution
-    let trampoline_virt = unsafe { (trampoline_addr as u64) + crate::gui::PHYS_OFFSET };
+    let trampoline_virt = unsafe { (trampoline_addr as u64) + crate::memory::PHYS_OFFSET };
     let mut ap_boot_timeout = 10_000_000usize;
     let mut ap_confirmed = false;
     while ap_boot_timeout > 0 {
@@ -496,7 +496,7 @@ pub fn init_smp() {
     };
     
     let lapic_base_phys = madt.local_apic_addr as u64;
-    let lapic_base_virt = unsafe { lapic_base_phys + crate::gui::PHYS_OFFSET };
+    let lapic_base_virt = unsafe { lapic_base_phys + crate::memory::PHYS_OFFSET };
     
     let mut bsp_lapic = LocalApic::new(lapic_base_virt);
     bsp_lapic.enable_lapic();
@@ -652,7 +652,7 @@ pub fn run_per_cpu_run_queue_positive_test() {
     crate::serial_println!("[PER-CPU-SCHED] Enqueued PID 101 -> Assigned to CPU {}", target_1);
     crate::serial_println!("[PER-CPU-SCHED] Synchronizing CPU 0 and CPU 1 at barrier gate (zero log print during loop)...");
 
-    let trampoline_virt = unsafe { 0x8000u64 + crate::gui::PHYS_OFFSET };
+    let trampoline_virt = unsafe { 0x8000u64 + crate::memory::PHYS_OFFSET };
 
     // Publish shared handle to low memory
     if let Ok(shared_root) = crate::cap::create_object(crate::cap::ObjectKind::Memory) {

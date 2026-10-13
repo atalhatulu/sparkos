@@ -72,11 +72,19 @@ pub async fn keyboard_task() {
                 _ => {}
             }
 
-            let modifiers = (if is_ctrl || crate::keyboard::is_ctrl_pressed() { crate::input::MOD_CTRL } else { 0 })
-                | (if is_shift || crate::keyboard::is_shift_pressed() { crate::input::MOD_SHIFT } else { 0 })
-                | (if is_alt || crate::keyboard::is_alt_pressed() { crate::input::MOD_ALT } else { 0 });
+            // TODO(Faz5): keyboard dispatch to user-space input service
+            #[cfg(feature = "legacy-desktop")]
+            {
+                let modifiers = (if is_ctrl || crate::keyboard::is_ctrl_pressed() { crate::input::MOD_CTRL } else { 0 })
+                    | (if is_shift || crate::keyboard::is_shift_pressed() { crate::input::MOD_SHIFT } else { 0 })
+                    | (if is_alt || crate::keyboard::is_alt_pressed() { crate::input::MOD_ALT } else { 0 });
 
-            crate::input::dispatch_keyboard_event(key_code, pressed, modifiers);
+                crate::input::dispatch_keyboard_event(key_code, pressed, modifiers);
+            }
+            #[cfg(not(feature = "legacy-desktop"))]
+            {
+                let _ = (is_ctrl, is_shift, is_alt, pressed, key_code);
+            }
         }
         let _ = is_extended;
         is_extended = false;

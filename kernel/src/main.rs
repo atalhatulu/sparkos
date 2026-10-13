@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+#[cfg(feature = "legacy-desktop")]
 pub mod ui;
 extern crate alloc;
 
@@ -17,6 +18,7 @@ pub mod memory;
 pub mod frame_pool;
 pub mod perf;
 pub mod perf_histogram;
+#[cfg(feature = "legacy-desktop")]
 pub mod surface_raster;
 #[cfg(feature = "kernel-regression")]
 mod regression;
@@ -28,8 +30,10 @@ pub mod task;
 pub mod ata;
 pub mod gdt;
 pub mod font;
+#[cfg(feature = "legacy-desktop")]
 pub mod gui;
 pub mod mouse;
+#[cfg(feature = "legacy-desktop")]
 pub mod editor;
 pub mod pci;
 pub mod rtl8139;
@@ -42,6 +46,7 @@ pub mod irq_mutex;
 pub mod ipc;
 pub mod fd;
 pub mod syscall_storage;
+#[cfg(feature = "legacy-desktop")]
 pub mod display;
 pub mod usb;
 pub mod net_socket;
@@ -57,42 +62,67 @@ pub mod klog;
 pub mod panic;
 pub mod ktrace;
 pub mod app;
+#[cfg(feature = "legacy-desktop")]
 pub mod surface;
+#[cfg(feature = "legacy-desktop")]
 pub mod wm;
+#[cfg(feature = "legacy-desktop")]
 pub mod input;
 pub mod pkg;
 pub mod service;
 pub mod auth;
+#[cfg(feature = "legacy-desktop")]
 pub mod app_registry;
+#[cfg(feature = "legacy-desktop")]
 pub mod cursor;
 pub mod shell_service;
+#[cfg(feature = "legacy-desktop")]
 pub mod terminal_app;
+#[cfg(feature = "legacy-desktop")]
 pub mod theme;
+#[cfg(feature = "legacy-desktop")]
 pub mod files_app;
+#[cfg(feature = "legacy-desktop")]
 pub mod app_manager;
+#[cfg(feature = "legacy-desktop")]
 pub mod notification;
+#[cfg(feature = "legacy-desktop")]
 pub mod settings_app;
+#[cfg(feature = "legacy-desktop")]
 pub mod taskmgr_app;
+#[cfg(feature = "legacy-desktop")]
 pub mod damage;
+#[cfg(feature = "legacy-desktop")]
 pub mod event;
+#[cfg(feature = "legacy-desktop")]
 pub mod animation;
 pub mod permission;
+#[cfg(feature = "legacy-desktop")]
 pub mod text;
 pub mod pkg_service;
 pub mod network_service;
+#[cfg(feature = "legacy-desktop")]
 pub mod browser_app;
 pub mod gpu;
 pub mod gpu_virtio;
 pub mod store_service;
 pub mod network_manager;
+#[cfg(feature = "legacy-desktop")]
 pub mod system_bar;
+#[cfg(feature = "legacy-desktop")]
 pub mod desktop;
 pub mod crash_reporter;
+#[cfg(feature = "legacy-desktop")]
 pub mod sysmon_app;
+#[cfg(feature = "legacy-desktop")]
 pub mod clipboard;
+#[cfg(feature = "legacy-desktop")]
 pub mod editor_app;
+#[cfg(feature = "legacy-desktop")]
 pub mod launcher;
+#[cfg(feature = "legacy-desktop")]
 pub mod dock;
+#[cfg(feature = "legacy-desktop")]
 pub mod icons;
 
 #[panic_handler]
@@ -107,6 +137,7 @@ entry_point!(kernel_main);
 
 async fn clock_task() {
     loop {
+        #[cfg(feature = "legacy-desktop")]
         if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
             let sw = unsafe { crate::gui::VESA.width as u32 };
             // Üst panelin sağ saat / sistem HUD alanını hasar olarak işaretle
@@ -114,6 +145,15 @@ async fn clock_task() {
             let hud_x = sw.saturating_sub(hud_w);
             crate::wm::WM.lock().mark_damage(hud_x as i32, 0, hud_w, crate::wm::DOCK_HEIGHT as u32 + 2);
         } else {
+            let current_tick = crate::interrupts::get_tick();
+            let seconds = current_tick / 1000;
+            let mut time_str = alloc::string::String::new();
+            core::fmt::write(&mut time_str, format_args!(" UP: {:04}s ", seconds)).unwrap();
+            let mut w = crate::vga_buffer::WRITE_LOCK.lock();
+            w.write_at(0, 69, &time_str, crate::vga_buffer::Color::Yellow, crate::vga_buffer::Color::Blue);
+        }
+        #[cfg(not(feature = "legacy-desktop"))]
+        {
             let current_tick = crate::interrupts::get_tick();
             let seconds = current_tick / 1000;
             let mut time_str = alloc::string::String::new();
@@ -331,37 +371,48 @@ async fn disk_demo() {
         }
     }
 
-    // Faz 11: Ring-3 Display Server (`displaysvc`) & Surface Shmem Compositor
-    match crate::task::process::spawn_display_server("displaysvc") {
-        Ok(pid) => {
-            crate::serial_println!("[DISPLAYSVC] displaysvc pid={} entering (Ring 3)", pid);
-            crate::task::process::enter_service(pid);
-            crate::serial_println!("[DISPLAYSVC] demo complete (Ring-3 Framebuffer Display Server verified).");
+    #[cfg(feature = "legacy-desktop")]
+    {
+        // Faz 11: Ring-3 Display Server (`displaysvc`) & Surface Shmem Compositor
+        match crate::task::process::spawn_display_server("displaysvc") {
+            Ok(pid) => {
+                crate::serial_println!("[DISPLAYSVC] displaysvc pid={} entering (Ring 3)", pid);
+                crate::task::process::enter_service(pid);
+                crate::serial_println!("[DISPLAYSVC] demo complete (Ring-3 Framebuffer Display Server verified).");
+            }
+            Err(e) => {
+                crate::serial_println!("[DISPLAYSVC] spawn failed: {}", e);
+            }
         }
-        Err(e) => {
-            crate::serial_println!("[DISPLAYSVC] spawn failed: {}", e);
-        }
-    }
 
-    // Faz 12: Ring-3 Window Manager & Compositor (`wm`)
-    match crate::task::process::spawn_window_manager("wm") {
-        Ok(pid) => {
-            crate::serial_println!("[WM] wm pid={} entering (Ring 3)", pid);
-            crate::task::process::enter_service(pid);
-            crate::serial_println!("[WM] demo complete (Ring-3 Window Manager & Compositor verified).");
-        }
-        Err(e) => {
-            crate::serial_println!("[WM] spawn failed: {}", e);
+        // Faz 12: Ring-3 Window Manager & Compositor (`wm`)
+        match crate::task::process::spawn_window_manager("wm") {
+            Ok(pid) => {
+                crate::serial_println!("[WM] wm pid={} entering (Ring 3)", pid);
+                crate::task::process::enter_service(pid);
+                crate::serial_println!("[WM] demo complete (Ring-3 Window Manager & Compositor verified).");
+            }
+            Err(e) => {
+                crate::serial_println!("[WM] spawn failed: {}", e);
+            }
         }
     }
 }
 
 async fn boot_orchestrator() {
-    // Otomatik olarak GUI Desktop Ortamını Başlat
-    crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
-    let _ = crate::task::process::spawn_desktop_v1_apps();
-    crate::wm::WM.lock().mark_full_damage();
-    crate::serial_println!("[DESKTOP] Auto-booted SparkOS GUI Desktop Environment.");
+    #[cfg(feature = "legacy-desktop")]
+    {
+        // Otomatik olarak GUI Desktop Ortamını Başlat
+        crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
+        let _ = crate::task::process::spawn_desktop_v1_apps();
+        crate::wm::WM.lock().mark_full_damage();
+        crate::serial_println!("[DESKTOP] Auto-booted SparkOS GUI Desktop Environment.");
+    }
+    #[cfg(not(feature = "legacy-desktop"))]
+    {
+        crate::vga_buffer::GUI_MODE.store(false, core::sync::atomic::Ordering::Relaxed);
+        crate::serial_println!("[CLI] Booted in Headless Serial Console mode (legacy-desktop disabled).");
+    }
 
     let boot_ms = crate::interrupts::get_tick();
     crate::metric!("boot_ms", boot_ms);
@@ -392,7 +443,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("[OK] Serial port ready");
     serial_println!("[OK] Phys mem offset: {:#x}", boot_info.physical_memory_offset);
     unsafe {
-        gui::PHYS_OFFSET = boot_info.physical_memory_offset;
+        memory::PHYS_OFFSET = boot_info.physical_memory_offset;
+        #[cfg(feature = "legacy-desktop")]
+        {
+            gui::PHYS_OFFSET = boot_info.physical_memory_offset;
+        }
     }
     
     // Heap (GUI buffer için önce heap başlatılmalı)
@@ -400,6 +455,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Dedicated user-space frame pool (syscall/user izolasyonu için)
     memory::init_user_memory(&boot_info.memory_map);
     // GUI Backbuffer ve VESA ilklendirmesi
+    #[cfg(feature = "legacy-desktop")]
     gui::init(None);
 
     // VGA çıktı
@@ -535,6 +591,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     executor.spawn(task::Task::new("clock", clock_task()));
     executor.spawn(task::Task::new("mouse", mouse::mouse_task()));
     executor.spawn(task::Task::new("keyboard", task::keyboard::keyboard_task()));
+    #[cfg(feature = "legacy-desktop")]
     executor.spawn(task::Task::new("compositor", wm::compositor_task()));
 
     // Boot dizisini tamamlayıp ardından interaktif shell'i açık tutan ana görev

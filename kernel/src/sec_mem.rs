@@ -31,7 +31,7 @@ const USER_ADDR_LIMIT: u64 = 0x0000_0000_8000_0000;
 fn active_l4() -> *const PageTable {
     let (l4_frame, _) = Cr3::read();
     let phys = l4_frame.start_address().as_u64();
-    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+    let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
     VirtAddr::new(phys_offset.wrapping_add(phys)).as_ptr()
 }
 
@@ -43,19 +43,19 @@ fn walk_page(page: Page) -> Option<PageTableFlags> {
     if !p4.flags().contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) {
         return None;
     }
-    let p3 = unsafe { &*VirtAddr::new(crate::gui::PHYS_OFFSET.wrapping_add(p4.addr().as_u64())).as_ptr::<PageTable>() };
+    let p3 = unsafe { &*VirtAddr::new(crate::memory::PHYS_OFFSET.wrapping_add(p4.addr().as_u64())).as_ptr::<PageTable>() };
     let p3e = &p3[page.p3_index()];
     if !p3e.flags().contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
         || p3e.flags().contains(PageTableFlags::HUGE_PAGE) {
         return None;
     }
-    let p2 = unsafe { &*VirtAddr::new(crate::gui::PHYS_OFFSET.wrapping_add(p3e.addr().as_u64())).as_ptr::<PageTable>() };
+    let p2 = unsafe { &*VirtAddr::new(crate::memory::PHYS_OFFSET.wrapping_add(p3e.addr().as_u64())).as_ptr::<PageTable>() };
     let p2e = &p2[page.p2_index()];
     if !p2e.flags().contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
         || p2e.flags().contains(PageTableFlags::HUGE_PAGE) {
         return None;
     }
-    let p1 = unsafe { &*VirtAddr::new(crate::gui::PHYS_OFFSET.wrapping_add(p2e.addr().as_u64())).as_ptr::<PageTable>() };
+    let p1 = unsafe { &*VirtAddr::new(crate::memory::PHYS_OFFSET.wrapping_add(p2e.addr().as_u64())).as_ptr::<PageTable>() };
     let p1e = &p1[page.p1_index()];
     if !p1e.flags().contains(PageTableFlags::PRESENT) {
         return None;

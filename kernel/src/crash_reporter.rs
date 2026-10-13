@@ -3,6 +3,7 @@
 //! Provides kernel-level fault capture, isolated process termination, graphical error
 //! modal rendering, diagnostic overlay support, and non-blocking recovery.
 
+#[cfg(feature = "legacy-desktop")]
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -74,6 +75,7 @@ impl CrashReporter {
     }
 
     /// Renders crash modal on top of desktop if an active crash occurred
+    #[cfg(feature = "legacy-desktop")]
     pub fn render_crash_modal(&self, screen_w: u16, screen_h: u16) {
         if let Some(crash) = &self.active_crash {
             let mw = 260u16;

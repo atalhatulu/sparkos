@@ -131,14 +131,23 @@ pub fn handle_interrupt() {
             let x = MOUSE_X.load(Ordering::Relaxed) as i16 + dx;
             let y = MOUSE_Y.load(Ordering::Relaxed) as i16 + dy;
             
-            let max_w = unsafe { crate::gui::VESA.width };
-            let max_h = unsafe { crate::gui::VESA.height };
-            crate::cursor::update_mouse_input(x, y, left_click, max_w, max_h);
-            let cstate = crate::cursor::get_cursor_state();
-            
-            crate::perf::mouse_irq();
-            MOUSE_X.store(cstate.x, Ordering::Relaxed);
-            MOUSE_Y.store(cstate.y, Ordering::Relaxed);
+            // TODO(Faz5): mouse routing moved to user-space input service
+            #[cfg(feature = "legacy-desktop")]
+            {
+                let max_w = unsafe { crate::gui::VESA.width };
+                let max_h = unsafe { crate::gui::VESA.height };
+                crate::cursor::update_mouse_input(x, y, left_click, max_w, max_h);
+                let cstate = crate::cursor::get_cursor_state();
+                
+                crate::perf::mouse_irq();
+                MOUSE_X.store(cstate.x, Ordering::Relaxed);
+                MOUSE_Y.store(cstate.y, Ordering::Relaxed);
+            }
+            #[cfg(not(feature = "legacy-desktop"))]
+            {
+                MOUSE_X.store(x.max(0) as u16, Ordering::Relaxed);
+                MOUSE_Y.store(y.max(0) as u16, Ordering::Relaxed);
+            }
         }
         _ => state.cycle = 0,
     }
@@ -146,30 +155,40 @@ pub fn handle_interrupt() {
 
 
 pub async fn mouse_task() {
-    let mut last_x = 320;
-    let mut last_y = 180;
-    let mut last_click = false;
-    
-    loop {
-        let cx = MOUSE_X.load(Ordering::Relaxed);
-        let cy = MOUSE_Y.load(Ordering::Relaxed);
-        let click = MOUSE_LEFT_CLICK.load(Ordering::Relaxed);
+    #[cfg(feature = "legacy-desktop")]
+    {
+        let mut last_x = 320;
+        let mut last_y = 180;
+        let mut last_click = false;
         
-        let moved = cx != last_x || cy != last_y;
-        
-        if crate::vga_buffer::GUI_MODE.load(Ordering::Relaxed) {
-            if click && !last_click {
-                crate::input::route_mouse_down(cx as i32, cy as i32);
-            } else if !click && last_click {
-                crate::input::route_mouse_up(cx as i32, cy as i32);
-            } else if moved {
-                crate::input::route_mouse_move(cx as i32, cy as i32, last_x as i32, last_y as i32);
+        loop {
+            let cx = MOUSE_X.load(Ordering::Relaxed);
+            let cy = MOUSE_Y.load(Ordering::Relaxed);
+            let click = MOUSE_LEFT_CLICK.load(Ordering::Relaxed);
+            
+            let moved = cx != last_x || cy != last_y;
+            
+            // TODO(Faz5): mouse event routing to user-space input service
+            if crate::vga_buffer::GUI_MODE.load(Ordering::Relaxed) {
+                if click && !last_click {
+                    crate::input::route_mouse_down(cx as i32, cy as i32);
+                } else if !click && last_click {
+                    crate::input::route_mouse_up(cx as i32, cy as i32);
+                } else if moved {
+                    crate::input::route_mouse_move(cx as i32, cy as i32, last_x as i32, last_y as i32);
+                }
             }
+            
+            last_x = cx;
+            last_y = cy;
+            last_click = click;
+            crate::task::yield_now().await;
         }
-        
-        last_x = cx;
-        last_y = cy;
-        last_click = click;
-        crate::task::yield_now().await;
+    }
+    #[cfg(not(feature = "legacy-desktop"))]
+    {
+        loop {
+            crate::task::yield_now().await;
+        }
     }
 }

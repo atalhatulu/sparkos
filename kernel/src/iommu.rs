@@ -117,25 +117,25 @@ impl ContextEntry {
 
 /// Reads a 32-bit MMIO register from an IOMMU unit (uncached).
 pub unsafe fn read_iommu_reg32(base_phys: u64, offset: u64) -> u32 {
-    let virt = crate::gui::PHYS_OFFSET + base_phys + offset;
+    let virt = crate::memory::PHYS_OFFSET + base_phys + offset;
     core::ptr::read_volatile(virt as *const u32)
 }
 
 /// Reads a 64-bit MMIO register from an IOMMU unit (uncached).
 pub unsafe fn read_iommu_reg64(base_phys: u64, offset: u64) -> u64 {
-    let virt = crate::gui::PHYS_OFFSET + base_phys + offset;
+    let virt = crate::memory::PHYS_OFFSET + base_phys + offset;
     core::ptr::read_volatile(virt as *const u64)
 }
 
 /// Writes a 32-bit MMIO register to an IOMMU unit (uncached).
 pub unsafe fn write_iommu_reg32(base_phys: u64, offset: u64, val: u32) {
-    let virt = crate::gui::PHYS_OFFSET + base_phys + offset;
+    let virt = crate::memory::PHYS_OFFSET + base_phys + offset;
     core::ptr::write_volatile(virt as *mut u32, val);
 }
 
 /// Writes a 64-bit MMIO register to an IOMMU unit (uncached).
 pub unsafe fn write_iommu_reg64(base_phys: u64, offset: u64, val: u64) {
-    let virt = crate::gui::PHYS_OFFSET + base_phys + offset;
+    let virt = crate::memory::PHYS_OFFSET + base_phys + offset;
     core::ptr::write_volatile(virt as *mut u64, val);
 }
 
@@ -414,7 +414,7 @@ fn build_iommu_tables() -> Option<u64> {
     // 1. Allocate 4KB Root Table (256 RootEntry)
     let root_frame = crate::memory::user_alloc_frame()?;
     let root_phys = root_frame.start_address().as_u64();
-    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+    let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
     let root_virt = (phys_offset + root_phys) as *mut RootEntry;
     unsafe {
         core::ptr::write_bytes(root_virt as *mut u8, 0, 4096);
@@ -474,7 +474,7 @@ pub fn map_iommu_dma_range(phys_addr: u64, pages: u64) {
         None => return,
     };
 
-    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+    let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
     let pml4_virt = (phys_offset + pml4_phys) as *mut u64;
 
     for i in 0..pages {
@@ -539,7 +539,7 @@ pub fn map_iommu_dma_range(phys_addr: u64, pages: u64) {
 
 /// Builds a 4-level page table identity-mapping the RTL8139 DMA region with Read + Write permissions.
 fn build_second_level_paging_for_dma() -> Option<u64> {
-    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+    let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
 
     let pml4_frame = crate::memory::user_alloc_frame()?;
     let pml4_phys = pml4_frame.start_address().as_u64();
