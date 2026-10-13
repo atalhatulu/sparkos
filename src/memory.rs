@@ -3,7 +3,6 @@ use x86_64::{
     PhysAddr, VirtAddr,
 };
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
-use spin::Mutex;
 use alloc::vec::Vec;
 
 pub static mut VGA_VIRT_ADDR: u64 = 0;
@@ -68,7 +67,7 @@ pub fn is_user_range(ptr: u64, len: usize) -> bool {
 // Faz 25: Virtual Memory Evolution — Reclaimable Physical Frame Allocator
 // ---------------------------------------------------------------------------
 
-static USER_FRAME_ALLOC: Mutex<Option<crate::frame_pool::FramePool>> = Mutex::new(None);
+static USER_FRAME_ALLOC: crate::sync::IrqMutex<Option<crate::frame_pool::FramePool>> = crate::sync::IrqMutex::new(None);
 
 #[cfg(feature = "kernel-regression")]
 static FAIL_ALLOCATION_AFTER: core::sync::atomic::AtomicIsize = core::sync::atomic::AtomicIsize::new(-1);
@@ -592,7 +591,7 @@ pub fn map_user_region_in_cr3(cr3: u64, virt: u64, len: u64, writable: bool) -> 
 // Faz 37: Copy-on-Write (CoW) & Demand Paging Subsystem
 // -----------------------------------------------------------------------------
 
-static COW_PAGES: spin::Mutex<alloc::collections::BTreeMap<(u64, u64), PhysAddr>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+static COW_PAGES: crate::sync::IrqMutex<alloc::collections::BTreeMap<(u64, u64), PhysAddr>> = crate::sync::IrqMutex::new(alloc::collections::BTreeMap::new());
 
 /// Registers a virtual page as Copy-on-Write for a given CR3.
 pub fn register_cow_page(cr3: u64, virt: u64, original_phys: PhysAddr) {

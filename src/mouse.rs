@@ -1,5 +1,5 @@
 use x86_64::instructions::port::Port;
-use spin::Mutex;
+use crate::sync::IrqMutex;
 use core::sync::atomic::{AtomicU16, AtomicBool, Ordering};
 
 pub static MOUSE_X: AtomicU16 = AtomicU16::new(320);
@@ -13,7 +13,7 @@ pub struct MouseState {
     packet: [u8; 3],
 }
 
-pub static MOUSE: Mutex<MouseState> = Mutex::new(MouseState {
+pub static MOUSE: IrqMutex<MouseState> = IrqMutex::new(MouseState {
     cycle: 0,
     packet: [0; 3],
 });

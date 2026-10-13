@@ -3,7 +3,6 @@
 //! Provides cursor state tracking, pluggable 16x16 monochrome cursor bitmaps,
 //! bounds clamping, and top-layer compositor rendering without modifying client surface memory.
 
-use spin::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorType {
@@ -36,7 +35,7 @@ impl CursorState {
     }
 }
 
-pub static CURSOR: Mutex<CursorState> = Mutex::new(CursorState::new());
+pub static CURSOR: crate::sync::IrqMutex<CursorState> = crate::sync::IrqMutex::new(CursorState::new());
 
 // ---------------------------------------------------------------------------
 // 16x16 Monochrome Cursor Bitmaps

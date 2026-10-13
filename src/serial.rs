@@ -1,7 +1,7 @@
-use spin::Mutex;
+use crate::sync::IrqMutex;
 use uart_16550::SerialPort;
 
-pub static SERIAL: Mutex<Option<SerialPort>> = Mutex::new(None);
+pub static SERIAL: IrqMutex<Option<SerialPort>> = IrqMutex::new(None);
 
 pub struct SerialWriter;
 

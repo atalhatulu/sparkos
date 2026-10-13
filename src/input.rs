@@ -6,7 +6,6 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
-use spin::Mutex;
 
 pub const MOD_CTRL: u8 = 1;
 pub const MOD_SHIFT: u8 = 2;
@@ -157,12 +156,12 @@ impl EventQueue {
     }
 }
 
-pub static INPUT_QUEUES: Mutex<BTreeMap<u64, EventQueue>> = Mutex::new(BTreeMap::new());
+pub static INPUT_QUEUES: crate::sync::IrqMutex<BTreeMap<u64, EventQueue>> = crate::sync::IrqMutex::new(BTreeMap::new());
 
 // Built-in apps consume input synchronously. Their stub Ring-3 processes do not
 // poll SYS_POLL_EVENT, so duplicating events into queues only fills them forever.
 // Lock order: KERNEL_INPUT_OWNERS -> INPUT_QUEUES; neither calls WM or scheduler.
-pub(crate) static KERNEL_INPUT_OWNERS: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+pub(crate) static KERNEL_INPUT_OWNERS: crate::sync::IrqMutex<BTreeSet<u64>> = crate::sync::IrqMutex::new(BTreeSet::new());
 
 pub fn register_kernel_input_owner(pid: u64) {
     let mut owners = KERNEL_INPUT_OWNERS.lock();

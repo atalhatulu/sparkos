@@ -5,7 +5,6 @@
 
 use alloc::format;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemHealthState {
@@ -131,4 +130,4 @@ impl CrashReporter {
     }
 }
 
-pub static CRASH_REPORTER: Mutex<CrashReporter> = Mutex::new(CrashReporter::new());
+pub static CRASH_REPORTER: crate::sync::IrqMutex<CrashReporter> = crate::sync::IrqMutex::new(CrashReporter::new());

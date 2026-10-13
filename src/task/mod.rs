@@ -15,7 +15,7 @@ pub mod process;
 pub use yield_now::yield_now;
 
 pub static PROCESS_LIST: spin::Lazy<Mutex<BTreeMap<u64, String>>> = spin::Lazy::new(|| Mutex::new(BTreeMap::new()));
-pub static KILLED_PROCESSES: spin::Lazy<Mutex<alloc::vec::Vec<u64>>> = spin::Lazy::new(|| Mutex::new(alloc::vec::Vec::new()));
+pub static KILLED_PROCESSES: spin::Lazy<crate::sync::IrqMutex<alloc::vec::Vec<u64>>> = spin::Lazy::new(|| crate::sync::IrqMutex::new(alloc::vec::Vec::new()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TaskId(pub u64);

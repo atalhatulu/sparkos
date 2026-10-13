@@ -10,7 +10,6 @@
 use crate::klog::LogLevel;
 use core::arch::asm;
 use core::fmt;
-use spin::Mutex;
 
 pub const RING_CAP: usize = 512;
 pub const DATA_CAP: usize = 128;
@@ -75,7 +74,7 @@ impl RingBuffer {
     }
 }
 
-pub static TRACE_RING: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
+pub static TRACE_RING: crate::sync::IrqMutex<RingBuffer> = crate::sync::IrqMutex::new(RingBuffer::new());
 
 /// Kucuk, alloc-free format buffer'i.
 struct BufWriter<'a> {

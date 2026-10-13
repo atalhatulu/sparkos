@@ -28,7 +28,7 @@ impl PerCpuState {
     }
 }
 
-pub static CPU_STATES: Mutex<[PerCpuState; MAX_CPUS]> = Mutex::new([PerCpuState::empty(); MAX_CPUS]);
+pub static CPU_STATES: crate::sync::IrqMutex<[PerCpuState; MAX_CPUS]> = crate::sync::IrqMutex::new([PerCpuState::empty(); MAX_CPUS]);
 
 pub struct LocalApic {
     base_addr: u64,
@@ -94,7 +94,7 @@ pub static TLB_SHOOTDOWN: TlbShootdownRequest = TlbShootdownRequest {
     in_progress: AtomicBool::new(false),
 };
 
-pub static TLB_SHOOTDOWN_LOCK: Mutex<()> = Mutex::new(());
+pub static TLB_SHOOTDOWN_LOCK: crate::sync::IrqMutex<()> = crate::sync::IrqMutex::new(());
 
 /// Sends an EOI (End of Interrupt) to the Local APIC.
 pub fn lapic_eoi() {
@@ -579,15 +579,15 @@ impl PerCpuRunQueue {
     }
 }
 
-pub static RUN_QUEUES: [Mutex<PerCpuRunQueue>; MAX_CPUS] = [
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
-    Mutex::new(PerCpuRunQueue::new()),
+pub static RUN_QUEUES: [crate::sync::IrqMutex<PerCpuRunQueue>; MAX_CPUS] = [
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
+    crate::sync::IrqMutex::new(PerCpuRunQueue::new()),
 ];
 
 pub static RR_TARGET_CPU: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

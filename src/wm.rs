@@ -5,7 +5,6 @@
 //! Application Launcher, Application Registry, and Icon Rendering.
 
 use alloc::vec::Vec;
-use spin::Mutex;
 
 pub const WORK_AREA_TOP: i32 = 24;
 pub const DOCK_HEIGHT: u16 = 24;
@@ -2008,7 +2007,7 @@ impl WindowManager {
     }
 }
 
-pub static WM: Mutex<WindowManager> = Mutex::new(WindowManager::new());
+pub static WM: crate::sync::IrqMutex<WindowManager> = crate::sync::IrqMutex::new(WindowManager::new());
 
 /// Public helper to clean up windows on process exit
 pub fn cleanup_windows_for_pid(pid: u64) {

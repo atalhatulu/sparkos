@@ -182,12 +182,12 @@ impl fmt::Write for VgaWriter {
     }
 }
 
-pub static WRITE_LOCK: spin::Lazy<spin::Mutex<VgaWriter>> = spin::Lazy::new(|| {
+pub static WRITE_LOCK: spin::Lazy<crate::sync::IrqMutex<VgaWriter>> = spin::Lazy::new(|| {
     let vga_addr = unsafe {
         let addr = crate::memory::VGA_VIRT_ADDR;
         if addr == 0 { 0xB8000 as *mut u8 } else { addr as *mut u8 }
     };
-    spin::Mutex::new(VgaWriter {
+    crate::sync::IrqMutex::new(VgaWriter {
         column: 0,
         row: 0,
         color: ColorCode::new(Color::White, Color::Black),
