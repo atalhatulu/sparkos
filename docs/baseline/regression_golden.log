@@ -1,0 +1,339 @@
+[OK] Serial port ready
+[OK] Phys mem offset: 0x18000000000
+[OK] Modern Memory Allocator Init: 0x1800095d000 - 0x1800395d000 (48 MB)
+ SparkOS v0.1 - Rust x86_64                        
+=====================================================
+[OK] Virtual Memory (Paging) Initialized
+[OK] Paging Test: Virtual Address 0x1000 successfully mapped to a physical frame!
+[OK] VGA mapped
+[OK] RTL8139 Network Card Initialized
+ SparkOS v0.1 - Rust x86_64                        
+=====================================================
+[OK] Memory: 247 MB usable
+ Bellek: 247 MB usable                              
+[OK] Initializing GDT/TSS...
+[SMP] CPU 0: TSS loaded (selector=0x28, tss_addr=0x307bc0, rsp0=0x345ca0)
+[OK] Initializing IDT...
+[interrupts] IDT loaded
+[OK] IDT loaded
+[OK] Syscall dispatcher initialized
+[OK] Capability core initialized (root capability slot=1, gen=1)
+[OK] Initializing PIC...
+[interrupts] PIC remapped to IRQ base 32
+[OK] PIC remapped
+[OK] Initializing PS/2 Mouse...
+[OK] Initializing timer...
+[interrupts] PIT timer: 1000 Hz (divisor=1193)
+[OK] Timer (1000 Hz) ready
+SMP: Local APIC initialized at 0x180fee00000, BSP APIC ID: 0
+SMP: Found CPU APIC ID 0 (BSP: true)
+[SMP] CPU 0: BSP online (apic_id=0)
+SMP: Found CPU APIC ID 1 (BSP: false)
+SMP: Found I/O APIC ID 0 at 0xfec00000
+SMP: Total CPUs: 2
+SMP: Booting AP CPU 1 (apic_id=1, trampoline=0x8000)...
+[SMP] AP CPU 1 Long Mode startup confirmation: true (Marker: 0x11112222)
+[SMP] CPU 1: AP online (apic_id=1)
+[SMP] CPU 1: long mode initialized
+[SMP] CPU 1: per-cpu state initialized
+[SMP] CPU 1: TSS ready (selector=0x28, tss_addr=0x309c30, rsp0=0x34aca0)
+[IOMMU] No ACPI DMAR Table found (Hardware IOMMU disabled or emulated standard platform)
+[OK] Enabling interrupts...
+[OK] Interrupts enabled
+
+[OK] Loading filesystem from ATA disk...
+[FS] seeded 10 binaries, 2 text config files
+[REGRESSION] START
+[SURFACE] Process 1 created surface 1 (slot 0, 64x64, vma 0x70000000, phys 0x3961000)
+[SURFACE] Process 2 created surface 2 (slot 0, 64x64, vma 0x70000000, phys 0x3967000)
+[SURFACE] Process 1 destroyed surface 1 (slot 0 reclaimed)
+[SURFACE] Process 2 destroyed surface 2 (slot 0 reclaimed)
+[REGRESSION] PASS surface isolation, ownership and reclaim
+[REGRESSION] PASS OOM rollback including partial mapping
+[REGRESSION] PASS mapping collision rollback and CR3 cleanup
+[SURFACE] Process 3 created surface 3 (slot 0, 1x1, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 3 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 4 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 4 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 5 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 5 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 6 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 6 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 7 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 7 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 8 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 8 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 9 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 9 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 10 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 10 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 11 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 11 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 12 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 12 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 13 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 13 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 14 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 14 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 15 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 15 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 16 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 16 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 17 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 17 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 18 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 18 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 19 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 19 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 20 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 20 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 21 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 21 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 22 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 22 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 23 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 23 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 24 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 24 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 25 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 25 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 26 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 26 (slot 0 reclaimed)
+[SURFACE] Process 3 created surface 27 (slot 0, 1280x720, vma 0x70000000, phys 0x395f000)
+[SURFACE] Process 3 destroyed surface 27 (slot 0 reclaimed)
+[REGRESSION] PASS quota rollback and repeated large surface reuse
+[REGRESSION] PASS failed app launch rolls back PCB, CR3 and backing
+[SURFACE] Process 7 created surface 28 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 7 created Window 1 (surface 28, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 7, Entry 0x40000000, Surface 28, Window 1)
+[SURFACE] Process 7 destroyed surface 28 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 1
+[PERM-MGR] Cleared permissions for PID 7
+[WM] Process 7 destroyed Window 1 (Surface 28 cleaned, Remaining windows: false)
+[SURFACE] Process 8 created surface 29 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 8 created Window 2 (surface 29, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 8, Entry 0x40000000, Surface 29, Window 2)
+[SURFACE] Process 8 destroyed surface 29 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 2
+[PERM-MGR] Cleared permissions for PID 8
+[WM] Process 8 destroyed Window 2 (Surface 29 cleaned, Remaining windows: false)
+[SURFACE] Process 9 created surface 30 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 9 created Window 3 (surface 30, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 9, Entry 0x40000000, Surface 30, Window 3)
+[SURFACE] Process 9 destroyed surface 30 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 3
+[PERM-MGR] Cleared permissions for PID 9
+[WM] Process 9 destroyed Window 3 (Surface 30 cleaned, Remaining windows: false)
+[SURFACE] Process 10 created surface 31 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 10 created Window 4 (surface 31, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 10, Entry 0x40000000, Surface 31, Window 4)
+[SURFACE] Process 10 destroyed surface 31 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 4
+[PERM-MGR] Cleared permissions for PID 10
+[WM] Process 10 destroyed Window 4 (Surface 31 cleaned, Remaining windows: false)
+[SURFACE] Process 11 created surface 32 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 11 created Window 5 (surface 32, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 11, Entry 0x40000000, Surface 32, Window 5)
+[SURFACE] Process 11 destroyed surface 32 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 5
+[PERM-MGR] Cleared permissions for PID 11
+[WM] Process 11 destroyed Window 5 (Surface 32 cleaned, Remaining windows: false)
+[SURFACE] Process 12 created surface 33 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 12 created Window 6 (surface 33, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 12, Entry 0x40000000, Surface 33, Window 6)
+[SURFACE] Process 12 destroyed surface 33 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 6
+[PERM-MGR] Cleared permissions for PID 12
+[WM] Process 12 destroyed Window 6 (Surface 33 cleaned, Remaining windows: false)
+[SURFACE] Process 13 created surface 34 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 13 created Window 7 (surface 34, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 13, Entry 0x40000000, Surface 34, Window 7)
+[SURFACE] Process 13 destroyed surface 34 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 7
+[PERM-MGR] Cleared permissions for PID 13
+[WM] Process 13 destroyed Window 7 (Surface 34 cleaned, Remaining windows: false)
+[SURFACE] Process 14 created surface 35 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 14 created Window 8 (surface 35, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'regression-terminal' (PID 14, Entry 0x40000000, Surface 35, Window 8)
+[SURFACE] Process 14 destroyed surface 35 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 8
+[PERM-MGR] Cleared permissions for PID 14
+[WM] Process 14 destroyed Window 8 (Surface 35 cleaned, Remaining windows: false)
+[REGRESSION] PASS real terminal open, resize, composite and close x8
+[[EXEC]] process 'regression-hello' pid=15 enqueued (CR3 isolated)
+[SCHED-RUN] pid=15
+[CR3-SWITCH] pid=15 cr3=0x395d000
+[USER-ENTER] pid=15 cr3=0x395d000 rip=0x40000000 rsp=0x7fff0000 cs=0x23 ss=0x1b
+[USER-EXEC] pid=15 reached entrypoint
+[SYSCALL] pid=15 num=4 arg1=0x1
+Hello, World![USER PRINT (fd 1)]: Hello, World!
+[SYSCALL] pid=15 num=1 arg1=0x0
+[SYSCALL] sys_exit(0) called from Ring 3
+[PROC] pid 15 ('regression-hello') exiting with status 0
+[[EXEC]] process 'regression-hello' pid=16 enqueued (CR3 isolated)
+[SCHED-RUN] pid=16
+[CR3-SWITCH] pid=16 cr3=0x395d000
+[USER-ENTER] pid=16 cr3=0x395d000 rip=0x40000000 rsp=0x7fff0000 cs=0x23 ss=0x1b
+[USER-EXEC] pid=16 reached entrypoint
+[SYSCALL] pid=16 num=4 arg1=0x1
+Hello, World![USER PRINT (fd 1)]: Hello, World!
+[SYSCALL] pid=16 num=1 arg1=0x0
+[SYSCALL] sys_exit(0) called from Ring 3
+[PROC] pid 16 ('regression-hello') exiting with status 0
+[REGRESSION] PASS ELF Ring-3 write/exit and address-space reclaim x2
+[[EXEC]] process 'regression-surface-syscalls' pid=17 enqueued (CR3 isolated)
+[SCHED-RUN] pid=17
+[CR3-SWITCH] pid=17 cr3=0x395d000
+[USER-ENTER] pid=17 cr3=0x395d000 rip=0x40000000 rsp=0x7fff0000 cs=0x23 ss=0x1b
+[USER-EXEC] pid=17 reached entrypoint
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 36 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x24
+[SURFACE] Process 17 destroyed surface 36 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 37 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x25
+[SURFACE] Process 17 destroyed surface 37 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 38 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x26
+[SURFACE] Process 17 destroyed surface 38 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 39 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x27
+[SURFACE] Process 17 destroyed surface 39 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 40 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x28
+[SURFACE] Process 17 destroyed surface 40 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 41 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x29
+[SURFACE] Process 17 destroyed surface 41 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 42 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x2a
+[SURFACE] Process 17 destroyed surface 42 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 43 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x2b
+[SURFACE] Process 17 destroyed surface 43 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 44 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x2c
+[SURFACE] Process 17 destroyed surface 44 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 45 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x2d
+[SURFACE] Process 17 destroyed surface 45 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 46 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x2e
+[SURFACE] Process 17 destroyed surface 46 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 47 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x2f
+[SURFACE] Process 17 destroyed surface 47 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 48 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x30
+[SURFACE] Process 17 destroyed surface 48 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 49 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x31
+[SURFACE] Process 17 destroyed surface 49 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 50 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x32
+[SURFACE] Process 17 destroyed surface 50 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 51 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x33
+[SURFACE] Process 17 destroyed surface 51 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 52 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x34
+[SURFACE] Process 17 destroyed surface 52 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 53 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x35
+[SURFACE] Process 17 destroyed surface 53 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 54 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x36
+[SURFACE] Process 17 destroyed surface 54 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=31 arg1=0x40
+[SURFACE] Process 17 created surface 55 (slot 0, 64x64, vma 0x70000000, phys 0x3964000)
+[SYSCALL] pid=17 num=33 arg1=0x37
+[SURFACE] Process 17 destroyed surface 55 (slot 0 reclaimed)
+[SYSCALL] pid=17 num=1 arg1=0x0
+[SYSCALL] sys_exit(0) called from Ring 3
+[PROC] pid 17 ('regression-surface-syscalls') exiting with status 0
+[REGRESSION] PASS Ring-3 surface create/write/destroy/reuse x20
+[SURFACE] Process 18 created surface 56 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 18 created Window 9 (surface 56, [60, 50, 420, 260], FOCUSED)
+[APP-REGISTRY] Successfully launched 'close-regression' (PID 18, Entry 0x40000000, Surface 56, Window 9)
+[SURFACE] Process 18 destroyed surface 56 (slot 0 reclaimed)
+[EDITOR] Cleaned up Editor state for Window 9
+[PERM-MGR] Cleared permissions for PID 18
+[WM] Process 18 destroyed Window 9 (Surface 56 cleaned, Remaining windows: false)
+[REGRESSION] PASS editor repeated close/cancel/discard and launcher keyboard damage
+[SURFACE] Process 19 created surface 57 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 19 created Window 10 (surface 57, [80, 80, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'settings-first' (PID 19, Entry 0x40000000, Surface 57, Window 10)
+[SURFACE] Process 20 created surface 58 (slot 0, 1280x720, vma 0x70000000, phys 0x3cf5000)
+[WM] Process 20 created Window 11 (surface 58, [80, 80, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'settings-second' (PID 20, Entry 0x40000000, Surface 58, Window 11)
+[THEME] Active theme changed to: Spark Light
+[THEME] Active theme changed to: Spark Dark
+[SURFACE] Process 20 destroyed surface 58 (slot 0 reclaimed)
+[SETTINGS] Cleaned up Settings state for Window 11
+[PERM-MGR] Cleared permissions for PID 20
+[WM] Process 20 destroyed Window 11 (Surface 58 cleaned, Remaining windows: false)
+[SURFACE] Process 19 destroyed surface 57 (slot 0 reclaimed)
+[SETTINGS] Cleaned up Settings state for Window 10
+[PERM-MGR] Cleared permissions for PID 19
+[WM] Process 19 destroyed Window 10 (Surface 57 cleaned, Remaining windows: false)
+[REGRESSION] PASS Settings mouse/keyboard, multi-window theme and System resize
+[SURFACE] Process 21 created surface 59 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 21 created Window 12 (surface 59, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'compositor-regression' (PID 21, Entry 0x40000000, Surface 59, Window 12)
+[SURFACE] Process 21 destroyed surface 59 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 12
+[PERM-MGR] Cleared permissions for PID 21
+[WM] Process 21 destroyed Window 12 (Surface 59 cleaned, Remaining windows: false)
+[REGRESSION] PASS compositor pixels: bounding=445176, regions=512, windows=1, exact image and idle skip
+[SURFACE] Process 22 created surface 60 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 22 created Window 13 (surface 60, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'input-delivery-regression' (PID 22, Entry 0x40000000, Surface 60, Window 13)
+[SURFACE] Process 22 destroyed surface 60 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 13
+[PERM-MGR] Cleared permissions for PID 22
+[WM] Process 22 destroyed Window 13 (Surface 60 cleaned, Remaining windows: false)
+[INPUT] Cleaned up event queue for terminating PID 23
+[REGRESSION] PASS direct built-in input avoids duplicate queues; userspace delivery preserved
+[SURFACE] Process 24 created surface 61 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 24 created Window 14 (surface 61, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'live-resize-regression' (PID 24, Entry 0x40000000, Surface 61, Window 14)
+[SURFACE] Process 24 destroyed surface 61 (slot 0 reclaimed)
+[TERMINAL] Cleaned up Terminal state for Window 14
+[PERM-MGR] Cleared permissions for PID 24
+[WM] Process 24 destroyed Window 14 (Surface 61 cleaned, Remaining windows: false)
+[REGRESSION] PASS live resize coalesces input per frame and flushes final geometry
+[REGRESSION] ALL PASS
+[OK] Starting shell task (Async)...
+[SURFACE] Process 25 created surface 62 (slot 0, 1280x720, vma 0x70000000, phys 0x3966000)
+[WM] Process 25 created Window 15 (surface 62, [40, 40, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'terminal.app' (PID 25, Entry 0x40000000, Surface 62, Window 15)
+[SURFACE] Process 26 created surface 63 (slot 0, 1280x720, vma 0x70000000, phys 0x3cf5000)
+[WM] Process 26 created Window 16 (surface 63, [80, 75, 440, 280], FOCUSED)
+[APP-REGISTRY] Successfully launched 'files.app' (PID 26, Entry 0x40000000, Surface 63, Window 16)
+[DESKTOP] Auto-booted SparkOS GUI Desktop Environment.
+
+================================================================
+  SparkOS x86_64 Mikrocekirdek Baslatildi (GUI Aktif).
+  Komutlari listelemek icin 'help' yazabilirsiniz.
+================================================================
+
+SparkOS CLI Modu Baslatildi.
+sparkos / > [DESKTOP] First frame presented.

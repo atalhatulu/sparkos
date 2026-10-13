@@ -1,0 +1,8 @@
+Toplam derleme uyarisi: 0 (mevcut allow direktifleri altinda)
+
+Modul bazli allow direktifleri:
+- src/task/process.rs: #![allow(function_casts_as_integer)], #![allow(dead_code)], #![allow(unreachable_code)], #![allow(clippy::unnecessary_unsafe)]
+- src/klog.rs: #![allow(dead_code)]
+- src/ktrace.rs: #![allow(dead_code)]
+- src/panic.rs: #![allow(dead_code)]
+- src/perf.rs: #![allow(dead_code)]
