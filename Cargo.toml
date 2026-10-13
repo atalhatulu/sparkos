@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "spark-abi",
+    "libspark",
     "kernel",
 ]
 default-members = ["kernel"]

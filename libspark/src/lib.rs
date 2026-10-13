@@ -1,10 +1,15 @@
 #![no_std]
-
-//! # libspark — Official SparkOS Userspace SDK
+//! SparkOS Official Userspace SDK & Runtime Library (`libspark`)
 //!
-//! SparkOS kullanıcı alanı (Ring 3) uygulamaları geliştirmek için resmî SDK kütüphanesi.
-//! Çekirdek iç yapısını bilmeye gerek kalmadan standart ABI (`int 0x80`) üzerinden
-//! sistem çağrıları ve kullanıcı alanı arabirimleri sağlar.
+//! Provides userspace system call wrappers (int 0x80 ABI), standard data types,
+//! libspark_ui widget framework, and font helpers.
+
+extern crate alloc;
+
+pub mod sysapi;
+pub mod font;
+pub mod libspark_ui;
+pub mod lib_userspace;
 
 // -----------------------------------------------------------------------------
 // Canonical Syscall Numbers (int 0x80 ABI)

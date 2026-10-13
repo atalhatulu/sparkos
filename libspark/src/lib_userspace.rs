@@ -6,11 +6,7 @@
 //! Compile with (hypothetical separate Cargo project):
 //! `cargo rustc --target x86_64-unknown-none -- -C relocation-model=pie`
 
-#![no_std]
-#![no_main]
-
 use core::arch::asm;
-use core::panic::PanicInfo;
 
 /// Raw system call wrapper for `int 0x80`
 #[inline(always)]
@@ -44,12 +40,4 @@ pub extern "C" fn _start() -> ! {
     let msg = b"Hello from SparkOS userspace!\n";
     sys_write(1, msg);
     sys_exit(0);
-}
-
-// Note: In a real standalone crate, we would need our own panic handler.
-// We provide one here for completeness of a no_std binary.
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    unsafe { syscall(1, 1, 0, 0) }; // sys_exit(1)
-    loop {}
 }

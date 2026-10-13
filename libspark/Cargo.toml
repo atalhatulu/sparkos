@@ -6,4 +6,5 @@ authors = ["SparkOS Team"]
 description = "Official Userspace SDK & Runtime Library for SparkOS"
 
 [dependencies]
-spark-abi = { path = "../../spark-abi" }
+spark-abi = { path = "../spark-abi" }
+spin = { version = "0.9", features = ["mutex"] }
