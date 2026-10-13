@@ -36,3 +36,7 @@ pub fn init_heap(phys_mem_offset: u64, memory_map: &bootloader::bootinfo::Memory
     crate::serial_println!("[OK] Modern Memory Allocator Init: {:#x} - {:#x} ({} MB)",
         virt_start, virt_start + heap_size, heap_size / 1024 / 1024);
 }
+
+pub fn heap_used_kb() -> usize {
+    ALLOCATOR.lock().used() / 1024
+}

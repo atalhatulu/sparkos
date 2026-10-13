@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 kernel-regression = []
 perf-metrics = []
+bench = []
 
 [dependencies]
 bootloader = { version = "0.9", features = ["map_physical_memory", "recursive_page_table"] }

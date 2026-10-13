@@ -1,0 +1,5 @@
+[METRIC] boot_ms=346
+[METRIC] heap_used_kb=3911
+[METRIC] frames_free=48996
+[METRIC] ctx_switch_cycles=5749
+[METRIC] ipc_rtt_cycles=120308

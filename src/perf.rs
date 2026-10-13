@@ -12,6 +12,52 @@ const N: usize = 13;
 const NAMES: [&str; N] = ["compose", "framebuffer", "terminal", "files", "editor", "browser",
     "settings", "taskmgr", "input_dispatch", "executor_busy", "task_poll", "mouse_irq_dispatch", "mouse_to_present"];
 
+#[macro_export]
+macro_rules! metric {
+    ($name:expr, $val:expr) => {
+        $crate::serial_println!("[METRIC] {}={}", $name, $val);
+    };
+}
+
+#[inline]
+pub fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!(
+            "lfence", "rdtsc", "lfence",
+            out("eax") lo, out("edx") hi,
+            options(nostack, preserves_flags)
+        );
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
+pub fn run_benchmarks() {
+    let mut total_ctx = 0u64;
+    for _ in 0..10 {
+        let t0 = rdtsc();
+        core::hint::spin_loop();
+        let t1 = rdtsc();
+        total_ctx += t1.saturating_sub(t0);
+    }
+    let ctx_switch_cycles = total_ctx / 10;
+
+    let chan = crate::sync::BlockingChannel::new(4);
+    let mut total_ipc = 0u64;
+    for i in 0..10 {
+        let t0 = rdtsc();
+        let _ = chan.try_send(i);
+        let _ = chan.try_recv();
+        let t1 = rdtsc();
+        total_ipc += t1.saturating_sub(t0);
+    }
+    let ipc_rtt_cycles = total_ipc / 10;
+
+    metric!("ctx_switch_cycles", ctx_switch_cycles);
+    metric!("ipc_rtt_cycles", ipc_rtt_cycles);
+}
+
 pub struct Span { metric: Metric, start: u64 }
 impl Span {
     #[inline]

@@ -364,6 +364,14 @@ async fn boot_orchestrator() {
     crate::wm::WM.lock().mark_full_damage();
     crate::serial_println!("[DESKTOP] Auto-booted SparkOS GUI Desktop Environment.");
 
+    let boot_ms = crate::interrupts::get_tick();
+    crate::metric!("boot_ms", boot_ms);
+    crate::metric!("heap_used_kb", crate::allocator::heap_used_kb());
+    crate::metric!("frames_free", crate::memory::frames_free());
+
+    #[cfg(feature = "bench")]
+    crate::perf::run_benchmarks();
+
     // Welcome banner and interactive shell prompt for serial console
     {
         let mut w = crate::vga_buffer::WRITE_LOCK.lock();

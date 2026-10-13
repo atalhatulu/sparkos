@@ -142,6 +142,11 @@ pub fn get_memory_stats() -> (u64, u64) {
     USER_FRAME_ALLOC.lock().as_ref().map(|pool| pool.stats()).unwrap_or((0, 0))
 }
 
+pub fn frames_free() -> u64 {
+    let (allocated, total) = get_memory_stats();
+    total.saturating_sub(allocated) / 4096
+}
+
 /// Maps a freshly allocated page into the active address space.
 pub fn map_user_page(virt: u64, writable: bool) -> Result<u64, &'static str> {
     if !is_canonical(virt) || virt < USER_ADDR_BASE || virt >= USER_ADDR_LIMIT {
