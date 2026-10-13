@@ -1167,52 +1167,52 @@ pub struct SeededBlob {
 pub const SEEDED_BINARIES: &[SeededBlob] = &[
     SeededBlob {
         path: "/bin/hello",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "hello.elf userland binary",
     },
     SeededBlob {
         path: "/bin/echo",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "echo.elf userland binary",
     },
     SeededBlob {
         path: "/bin/cat",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "cat.elf userland binary",
     },
     SeededBlob {
         path: "/bin/ls",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "ls.elf userland binary",
     },
     SeededBlob {
         path: "/bin/touch",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "touch.elf userland binary",
     },
     SeededBlob {
         path: "/bin/mkdir",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "mkdir.elf userland binary",
     },
     SeededBlob {
         path: "/bin/rm",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "rm.elf userland binary",
     },
     SeededBlob {
         path: "/bin/ping",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "ping.elf userland binary",
     },
     SeededBlob {
         path: "/bin/host",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "host.elf userland binary",
     },
     SeededBlob {
         path: "/bin/fetch",
-        data: include_bytes!("../fixtures/hello.elf"),
+        data: include_bytes!("../../fixtures/hello.elf"),
         desc: "fetch.elf userland binary",
     },
 ];

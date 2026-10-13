@@ -131,7 +131,7 @@ pub fn run() {
     }
     crate::serial_println!("[REGRESSION] PASS real terminal open, resize, composite and close x8");
 
-    let hello = include_bytes!("../fixtures/hello.elf");
+    let hello = include_bytes!("../../fixtures/hello.elf");
     for _ in 0..2 {
         let pid = process::exec_elf_proc("regression-hello", hello).unwrap();
         process::enter_service(pid);
@@ -142,7 +142,7 @@ pub fn run() {
         dispose(pid);
     }
     crate::serial_println!("[REGRESSION] PASS ELF Ring-3 write/exit and address-space reclaim x2");
-    let pid = process::exec_elf_proc("regression-surface-syscalls", include_bytes!("../fixtures/surface_probe.elf")).unwrap();
+    let pid = process::exec_elf_proc("regression-surface-syscalls", include_bytes!("../../fixtures/surface_probe.elf")).unwrap();
     process::enter_service(pid);
     assert!(x86_64::instructions::interrupts::are_enabled());
     assert_eq!(process::SCHEDULER.lock().get_process(pid).unwrap().exit_code, 0);
