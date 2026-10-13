@@ -230,6 +230,23 @@ impl Condvar {
         }
     }
 
+    pub fn wait_irq<'a, T>(&self, guard: IrqGuard<'a, T>, mutex: &'a IrqMutex<T>) -> IrqGuard<'a, T> {
+        let gen = self.generation.load(Ordering::SeqCst);
+        drop(guard);
+        loop {
+            if self.generation.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            x86_64::instructions::hlt();
+        }
+        loop {
+            if let Some(g) = mutex.try_lock() {
+                return g;
+            }
+            x86_64::instructions::hlt();
+        }
+    }
+
     pub fn notify_one(&self) {
         if let Some(waker) = self.wakers.lock().pop_front() {
             waker.wake();
@@ -246,9 +263,9 @@ impl Condvar {
     }
 }
 
-/// 5. BlockingChannel — Blocking channel for IPC
+/// 5. BlockingChannel — Blocking channel for IPC (IrqMutex-protected)
 pub struct BlockingChannel<M> {
-    buffer: SpinMutex<VecDeque<M>>,
+    buffer: IrqMutex<VecDeque<M>>,
     cond: Condvar,
     capacity: usize,
 }
@@ -256,7 +273,7 @@ pub struct BlockingChannel<M> {
 impl<M> BlockingChannel<M> {
     pub const fn new(capacity: usize) -> Self {
         BlockingChannel {
-            buffer: SpinMutex::new(VecDeque::new()),
+            buffer: IrqMutex::new(VecDeque::new()),
             cond: Condvar::new(),
             capacity,
         }
@@ -265,7 +282,7 @@ impl<M> BlockingChannel<M> {
     pub fn send(&self, msg: M) {
         let mut guard = self.buffer.lock();
         while guard.len() >= self.capacity {
-            guard = self.cond.wait(guard, &self.buffer);
+            guard = self.cond.wait_irq(guard, &self.buffer);
         }
         guard.push_back(msg);
         self.cond.notify_one();
@@ -288,7 +305,7 @@ impl<M> BlockingChannel<M> {
                 self.cond.notify_one();
                 return msg;
             }
-            guard = self.cond.wait(guard, &self.buffer);
+            guard = self.cond.wait_irq(guard, &self.buffer);
         }
     }
     

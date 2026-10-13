@@ -152,12 +152,13 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crossbeam_queue::ArrayQueue;
-use spin::{Mutex, Once};
+use spin::Once;
+use crate::sync::IrqMutex;
 
 pub type RawCapChannel = CapChannel<Vec<u8>>;
 
-pub static ENDPOINTS: Mutex<BTreeMap<u32, RawCapChannel>> = Mutex::new(BTreeMap::new());
-pub static ENDPOINT_OWNERS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
+pub static ENDPOINTS: IrqMutex<BTreeMap<u32, RawCapChannel>> = IrqMutex::new(BTreeMap::new());
+pub static ENDPOINT_OWNERS: IrqMutex<BTreeMap<u32, u32>> = IrqMutex::new(BTreeMap::new());
 
 /// Monotonik (asla yeniden kullanılmayan) endpoint ID kaynağı.
 static NEXT_EP_ID: AtomicU32 = AtomicU32::new(8);
@@ -326,7 +327,7 @@ pub struct IrqBinding {
 
 /// Bağlı IRQ → hedef eşlemesi. IRQ numarasına (PIC 0..15) anahtarlı.
 /// CapObject payload taşımadığı için (Task #4 deseni) bu kayıt kernel tarafında tutulur.
-static IRQ_BINDINGS: Mutex<BTreeMap<u8, IrqBinding>> = Mutex::new(BTreeMap::new());
+static IRQ_BINDINGS: IrqMutex<BTreeMap<u8, IrqBinding>> = IrqMutex::new(BTreeMap::new());
 /// IRQ handler'ın spinlock almadan (relaxed atomic load) kontrol ettiği "bağ var mı"
 /// kapısı. Bağ yokken her IRQ olayı tek atomic load ile no-op'tur.
 static IRQ_BINDINGS_NONEMPTY: AtomicBool = AtomicBool::new(false);
