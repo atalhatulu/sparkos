@@ -109,6 +109,11 @@ impl<T> Drop for IrqSafeSpinlockGuard<'_, T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Faz 0.4: IrqMutex<T> — Kesme güvenli spin kilidi
+// ---------------------------------------------------------------------------
+pub use crate::irq_mutex::*;
+
 /// 2. Mutex — Built on top of spin::Mutex, provides a std::sync::Mutex like lock() that uses hlt to wait
 pub struct Mutex<T> {
     inner: SpinMutex<T>,

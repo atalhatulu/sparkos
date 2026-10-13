@@ -6,6 +6,9 @@ extern crate alloc;
 #[path = "../../../src/cap.rs"]
 mod cap;
 
+#[path = "../../../src/irq_mutex.rs"]
+pub mod irq_mutex;
+
 // Re-export for tests to reference.
 pub use cap::*;
 

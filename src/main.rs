@@ -38,6 +38,7 @@ pub mod user;
 pub mod elf;
 pub mod syscall;
 pub mod sync;
+pub mod irq_mutex;
 pub mod ipc;
 pub mod fd;
 pub mod syscall_storage;
