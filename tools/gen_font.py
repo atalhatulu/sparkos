@@ -1,6 +1,11 @@
+import os
 import re
 
-with open('font.h', 'r') as f:
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_H = os.path.join(SCRIPT_DIR, "font.h")
+TARGET_RS = os.path.join(SCRIPT_DIR, "font_ascii.rs")
+
+with open(FONT_H, "r") as f:
     content = f.read()
 
 # Extract the array content
@@ -19,6 +24,6 @@ for i in range(128):
 
 rust_array += "];\n"
 
-with open('src/font.rs', 'w') as f:
+with open(TARGET_RS, "w") as f:
     f.write(rust_array)
 

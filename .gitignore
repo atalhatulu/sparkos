@@ -8,6 +8,7 @@ Cargo.lock
 # Logs and debug output
 *.log
 qemu.log
+output.txt
 
 # IDEs and Editors
 .idea/

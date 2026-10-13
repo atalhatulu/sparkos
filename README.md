@@ -149,7 +149,8 @@ sparkos/
 │   ├── headers/            # C/Rust ABI Başlık Dosyaları (sparkos_abi.h)
 │   ├── linker/             # Bağımsız ELF Linker Scripti (app.ld)
 │   └── examples/           # Örnek Ring 3 Uygulamaları (sh, cat, echo, ls, wm)
-└── TECHNICAL_DEBT.md       # Teknik Borç Takibi ve Çözüm Planları
+├── tools/                  # Test ve geliştirme araçları (qemu_smoke.py, gen_font.py, font.h)
+├── TECHNICAL_DEBT.md       # Teknik Borç Takibi ve Çözüm Planları
 ```
 
 ---
