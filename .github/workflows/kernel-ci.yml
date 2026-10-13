@@ -35,6 +35,12 @@ jobs:
             dd if=/dev/zero of=disk.img bs=1M count=64
           fi
 
+      - name: Check architectural module dependency boundaries
+        run: ./tools/check_deps.sh
+
+      - name: Verify headless build (no default features)
+        run: cargo check --no-default-features
+
       - name: Build bootimage with kernel-regression
         run: cargo bootimage --features kernel-regression
 
