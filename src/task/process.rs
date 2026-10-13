@@ -37,7 +37,6 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use spin::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants / defaults
@@ -78,6 +77,8 @@ pub const SIGSTOP: u32 = 19;
 /// pid 0 is reserved for the idle process.
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 
+use crate::sync::IrqMutex;
+
 /// Master flag: is the preemptive scheduler running?
 static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Ticks left in the current process's quantum.
@@ -86,7 +87,7 @@ static TICKS_LEFT: AtomicU64 = AtomicU64::new(0);
 static SCHED_TICK: AtomicU64 = AtomicU64::new(0);
 
 /// The scheduler core state.
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::uninit());
+pub static SCHEDULER: IrqMutex<Scheduler> = IrqMutex::new(Scheduler::uninit());
 
 /// Cooperative-resume slot (Aşama 5.2). A Ring-3 service entered via
 /// [`enter_service`] saves the executor's kernel context here; when the service
@@ -95,7 +96,7 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::uninit());
 /// cooperative service holds the CPU (preemption stays off), so the value lives
 /// on the CPU unguarded during the service run; the Mutex only serializes the
 /// brief set/take windows around the switch.
-pub static EXECUTOR_RESUME: Mutex<Option<RegisterContext>> = Mutex::new(None);
+pub static EXECUTOR_RESUME: IrqMutex<Option<RegisterContext>> = IrqMutex::new(None);
 
 /// Reference to the dynamically-allocated idle kernel-stack array. Kept so the
 /// idle process's `ctx.rsp` stays valid for the kernel's lifetime.
@@ -411,7 +412,7 @@ impl PerCpuScheduler {
     }
 }
 
-pub static PER_CPU_SCHEDULER: spin::Mutex<[PerCpuScheduler; crate::gdt::MAX_CPUS]> = spin::Mutex::new([
+pub static PER_CPU_SCHEDULER: IrqMutex<[PerCpuScheduler; crate::gdt::MAX_CPUS]> = IrqMutex::new([
     PerCpuScheduler::new(0),
     PerCpuScheduler::new(1),
     PerCpuScheduler::new(2),
