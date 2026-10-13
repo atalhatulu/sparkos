@@ -1,0 +1,54 @@
+name: Kernel CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  regression:
+    name: Build & QEMU Headless Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install QEMU and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+
+      - name: Install bootimage
+        run: cargo install bootimage
+
+      - name: Ensure disk image exists
+        run: |
+          if [ ! -f disk.img ] || [ ! -s disk.img ]; then
+            dd if=/dev/zero of=disk.img bs=1M count=64
+          fi
+
+      - name: Build bootimage with kernel-regression
+        run: cargo bootimage --features kernel-regression
+
+      - name: Run QEMU headless regression smoke test
+        run: |
+          python3 tools/qemu_smoke.py \
+            --image target/x86_64-unknown-none/debug/bootimage-sparkos.bin \
+            --disk disk.img \
+            --output scratch/ci_test \
+            --regression
+
+      - name: Verify regression golden log matches
+        run: |
+          grep "\[REGRESSION\] PASS" scratch/ci_test/serial.log > current_regression.log
+          echo "Current regression passes:"
+          cat current_regression.log
+          grep "\[REGRESSION\] ALL PASS" scratch/ci_test/serial.log
