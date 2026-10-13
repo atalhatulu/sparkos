@@ -442,6 +442,21 @@ pub fn expire_lent_capabilities(current_tick: u64) -> usize {
     count
 }
 
+static LEND_EXPIRY_PENDING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// IRQ içinde çağrılır; kilit almaz, sadece atomik tick kaydeder.
+pub fn mark_lend_expiry_pending(current_tick: u64) {
+    LEND_EXPIRY_PENDING.store(current_tick, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Scheduler veya thread döngüsü içinde çağrılır; bekleyen lending revoke'larını işler.
+pub fn poll_pending_lend_expiries() {
+    let tick = LEND_EXPIRY_PENDING.swap(0, core::sync::atomic::Ordering::Relaxed);
+    if tick != 0 {
+        expire_lent_capabilities(tick);
+    }
+}
+
 pub fn close(cap: CapHandle) -> Result<()> {
     let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;

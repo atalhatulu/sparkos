@@ -85,6 +85,8 @@ static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 static TICKS_LEFT: AtomicU64 = AtomicU64::new(0);
 /// Total scheduler timer ticks (preemptive clock).
 static SCHED_TICK: AtomicU64 = AtomicU64::new(0);
+/// Faz 0.6: Timer IRQ'sunda SCHEDULER meşgul olduğu için atlanan tick sayısı.
+pub static TICKS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 /// The scheduler core state.
 pub static SCHEDULER: IrqMutex<Scheduler> = IrqMutex::new(Scheduler::uninit());
@@ -1082,6 +1084,10 @@ pub fn timer_tick() {
         TICKS_LEFT.store(left - 1, Ordering::Relaxed);
         return;
     }
+    if SCHEDULER.is_locked() {
+        TICKS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     schedule();
 }
 
@@ -1098,6 +1104,9 @@ pub fn timer_tick() {
 /// mid-`switch_context` and returns normally, unwinding the timer IRQ and
 /// restoring the exact state.
 pub fn schedule() {
+    // Faz 0.6: Timer IRQ'sunda ertelenen ödünç capability iadelerini işle
+    crate::cap::poll_pending_lend_expiries();
+
     // Requeue current to the back and pick the next ready process.
     let (cur_ctx, next_ctx) = {
         let mut s = SCHEDULER.lock();

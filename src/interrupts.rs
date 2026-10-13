@@ -409,8 +409,8 @@ static TICK: AtomicU64 = AtomicU64::new(0);
 extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
     let current_tick = TICK.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Aşama 7.2: Lend Expiry — süresi dolan ödünç capability'leri otomatik iptal (revoke) et.
-    crate::cap::expire_lent_capabilities(current_tick);
+    // Faz 0.6: Lend Expiry hafifletildi — IRQ içinde kilit almaz, atomik bayrak koyar
+    crate::cap::mark_lend_expiry_pending(current_tick);
 
     // Preemptive timer hook: drives the round-robin process scheduler when
     // it has been armed (default off, so existing behavior is unchanged).

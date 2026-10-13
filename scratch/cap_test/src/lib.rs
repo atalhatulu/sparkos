@@ -79,6 +79,7 @@ pub mod gui {
 
 // Minimal `sync` module stub: ipc.rs `use crate::sync::BlockingChannel`.
 pub mod sync {
+    pub use crate::irq_mutex::{IrqMutex, IrqGuard};
     use alloc::collections::VecDeque;
     use spin::Mutex;
     pub struct BlockingChannel<T> {
