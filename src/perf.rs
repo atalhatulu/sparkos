@@ -1,14 +1,15 @@
 //! Opt-in BSP desktop telemetry. No allocations or serial output in the hot path.
 //! F9 starts a fresh recording; F10 freezes it and prints a snapshot to serial.
 //! Durations are PIT-calibrated TSC estimates; framebuffer completion is not scanout.
-#![allow(dead_code)]
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub enum Metric {
     Compose, Framebuffer, Terminal, Files, Editor, Browser, Settings, TaskMgr,
     InputDispatch, ExecutorBusy, TaskPoll, MouseIrqToDispatch, MouseToPresent,
 }
+#[cfg(feature = "perf-metrics")]
 const N: usize = 13;
+#[cfg(feature = "perf-metrics")]
 const NAMES: [&str; N] = ["compose", "framebuffer", "terminal", "files", "editor", "browser",
     "settings", "taskmgr", "input_dispatch", "executor_busy", "task_poll", "mouse_irq_dispatch", "mouse_to_present"];
 

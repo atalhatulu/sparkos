@@ -25,10 +25,6 @@
 //! * [`exit_current`] — terminate the running process (never returns).
 //! * [`set_preemption_enabled`] / [`preemption_enabled`] / [`get_tick`].
 
-#![allow(function_casts_as_integer)]
-#![allow(dead_code)]
-#![allow(unreachable_code)]
-#![allow(clippy::unnecessary_unsafe)]
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -811,7 +807,7 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
             r14: 0,
             r15: 0,
             rsp: kstack_top - 8,
-            rip: kernel_thread_stub as usize as u64,
+            rip: kernel_thread_stub as *const () as usize as u64,
             cr3: 0, // kernel threads run in the shared kernel address space
         };
         s.ready.push_back(pid);
@@ -882,7 +878,7 @@ pub fn create_user_process_with_caps(
             r14: 0,
             r15: 0,
             rsp: kstack_top - 8,
-            rip: user_process_stub as usize as u64,
+            rip: user_process_stub as *const () as usize as u64,
             cr3: 0, // kernel CR3 during trampoline; enter_user_current loads user_cr3 right before iretq
         };
         s.ready.push_back(pid);
@@ -970,17 +966,17 @@ fn enter_user_current() -> ! {
         let mut s = SCHEDULER.lock();
         let pid = match s.current {
             Some(p) => p,
-            None => return idle_forever(),
+            None => idle_forever(),
         };
         let p = match s.table.get_mut(&pid) {
             Some(p) => p,
-            None => return idle_forever(),
+            None => idle_forever(),
         };
         let krsp = p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64;
         // Kernel continuation: if the user process traps/exits, the kernel
         // returns to user_resume_trap (parked path for now).
         p.kernel_rsp = krsp;
-        p.kernel_rip = user_resume_trap as usize as u64;
+        p.kernel_rip = user_resume_trap as *const () as usize as u64;
         (
             pid,
             p.user_rip,
@@ -1149,7 +1145,6 @@ pub fn schedule() {
                         let idle_ctx: *const RegisterContext = &idle_proc.ctx;
                         drop(s);
                         jump_to_initial(idle_ctx);
-                        unreachable!();
                     } else {
                         drop(s);
                         loop {
@@ -1436,7 +1431,7 @@ pub fn fork_current() -> i64 {
     np.ctx = RegisterContext {
         rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
         rsp: np.kernel_stack.as_ptr() as u64 + np.kernel_stack.len() as u64,
-        rip: user_process_stub as usize as u64,
+        rip: user_process_stub as *const () as usize as u64,
         cr3: child_cr3, // child runs in its cloned address space
     };
     {
@@ -2688,7 +2683,7 @@ fn alloc_idle() {
         r14: 0,
         r15: 0,
         rsp: stack_top,
-        rip: kernel_thread_stub as usize as u64,
+        rip: kernel_thread_stub as *const () as usize as u64,
         cr3: 0, // idle runs in the shared kernel address space
     };
     let mut s = SCHEDULER.lock();

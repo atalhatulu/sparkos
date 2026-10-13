@@ -5,7 +5,6 @@
 //! return adreslerini toplar. Kullanilana kadar main.rs tarafindan
 //! gosterilmeyen infra modulu — bu yuzden dead_code uyarilari bastirildi.
 
-#![allow(dead_code)]
 
 use crate::klog::LogLevel;
 use core::arch::asm;

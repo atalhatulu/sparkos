@@ -5,7 +5,6 @@
 //! Kullanilana kadar main.rs tarafindan gosterilmeyen infra modulu —
 //! bu yuzden dead_code uyarilari bastirildi.
 
-#![allow(dead_code)]
 
 use core::fmt;
 use core::fmt::Write;
