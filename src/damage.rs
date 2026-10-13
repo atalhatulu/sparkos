@@ -77,9 +77,11 @@ impl DamageRegion {
     }
 }
 
-/// Accumulates dirty rectangles during frame lifecycle.
+/// Accumulates dirty rectangles during frame lifecycle (Multi-rect Dirty Tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DamageTracker {
+    pub rects: [DamageRegion; 4],
+    pub count: usize,
     pub current_damage: Option<DamageRegion>,
     pub force_full_redraw: bool,
 }
@@ -87,18 +89,62 @@ pub struct DamageTracker {
 impl DamageTracker {
     pub const fn new() -> Self {
         Self {
+            rects: [DamageRegion::empty(); 4],
+            count: 0,
             current_damage: None,
             force_full_redraw: true, // Initial boot frame requires full paint
         }
     }
 
-    /// Adds a damage rectangle to the accumulated dirty region.
+    /// Adds a damage rectangle to the accumulated dirty regions with smart multi-rect isolation.
     pub fn add_rect(&mut self, rect: DamageRegion) {
         if rect.is_empty() { return; }
+
+        // Genel bounding box'ı daima güncelle (geriye uyumluluk ve tekil kırpma için)
         self.current_damage = match self.current_damage {
             Some(curr) => Some(curr.union(&rect)),
             None => Some(rect),
         };
+
+        // Merge only when the bounding rectangle costs no more than two draws.
+        // Restart after merging so overlapping chains do not leave duplicate work.
+        let mut pending = rect;
+        let mut i = 0;
+        while i < self.count {
+            let merged = self.rects[i].union(&pending);
+            if merged.area() <= self.rects[i].area() + pending.area() {
+                pending = merged;
+                self.count -= 1;
+                self.rects[i] = self.rects[self.count];
+                i = 0;
+            } else { i += 1; }
+        }
+        if self.count < self.rects.len() {
+            self.rects[self.count] = pending;
+            self.count += 1;
+        } else {
+            // Bounded storage: choose the merge introducing the least extra area.
+            let best = (0..self.count).min_by_key(|&i|
+                self.rects[i].union(&pending).area().saturating_sub(self.rects[i].area())).unwrap();
+            self.rects[best] = self.rects[best].union(&pending);
+        }
+    }
+
+    /// Drain bounded regions without filling the unchanged space between them.
+    pub fn take_regions(&mut self, screen_w: u32, screen_h: u32) -> ([DamageRegion; 4], usize) {
+        let mut result = [DamageRegion::empty(); 4];
+        let mut count = 0;
+        if self.force_full_redraw {
+            result[0] = DamageRegion::new(0, 0, screen_w, screen_h);
+            count = 1;
+        } else {
+            for rect in &self.rects[..self.count] {
+                let clipped = rect.clamp_to_screen(screen_w, screen_h);
+                if !clipped.is_empty() { result[count] = clipped; count += 1; }
+            }
+        }
+        self.reset();
+        (result, count)
     }
 
     /// Adds damage by coordinates and dimensions.
@@ -116,6 +162,7 @@ impl DamageTracker {
     pub fn take_damage(&mut self) -> Option<DamageRegion> {
         let is_full = self.force_full_redraw;
         self.force_full_redraw = false;
+        self.count = 0;
         let dmg = self.current_damage.take();
         if is_full {
             #[cfg(not(test))]
@@ -157,6 +204,50 @@ impl DamageTracker {
 
     pub fn reset(&mut self) {
         self.current_damage = None;
+        self.count = 0;
         self.force_full_redraw = false;
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+
+    #[test]
+    fn separated_damage_does_not_fill_gap() {
+        let mut tracker = DamageTracker::new();
+        tracker.reset();
+        tracker.add_bounds(101, 180, 16, 16);
+        tracker.add_bounds(1001, 650, 16, 16);
+        let (regions, count) = tracker.take_regions(1280, 720);
+        assert_eq!(count, 2);
+        assert_eq!(regions[..count].iter().map(|r| r.area()).sum::<u64>(), 512);
+        assert!(!tracker.is_damaged());
+    }
+
+    #[test]
+    fn bounded_regions_cover_every_input_even_after_overflow() {
+        let mut tracker = DamageTracker::new();
+        tracker.reset();
+        for n in 0..12 { tracker.add_bounds(n * 80, n * 40, 10, 10); }
+        let (regions, count) = tracker.take_regions(1280, 720);
+        assert!(count <= 4);
+        for n in 0..12 {
+            for (dx, dy) in [(0, 0), (9, 9)] {
+                assert!(regions[..count].iter().any(|r| r.contains_point(n * 80 + dx, n * 40 + dy)));
+            }
+        }
+    }
+
+    #[test]
+    fn full_damage_and_offscreen_regions_are_consumed() {
+        let mut tracker = DamageTracker::new();
+        assert_eq!(tracker.take_regions(800, 600).0[0], DamageRegion::new(0, 0, 800, 600));
+        tracker.add_bounds(-10, -10, 20, 20);
+        tracker.add_bounds(2000, 2000, 10, 10);
+        let (regions, count) = tracker.take_regions(800, 600);
+        assert_eq!(count, 1);
+        assert_eq!(regions[0], DamageRegion::new(0, 0, 10, 10));
+        assert_eq!(tracker.take_regions(800, 600).1, 0);
     }
 }

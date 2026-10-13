@@ -1,16 +1,19 @@
 # SparkOS
 
-Rust ile sıfırdan (`no_std`, `no_main`) yazılmış, **Capability-Based (CSpace)** güvenlik modeline, **Per-Process CR3 İzolasyonuna**, **Intel IOMMU (VT-d) Donanım DMA Korumasına**, **SMP Çok Çekirdekli Work-Stealing Çizelgeleyicisine** ve **Mikroçekirdek Servis Mimarisine** sahip x86_64 işletim sistemi.
+Rust ile `no_std` / `no_main` olarak geliştirilen deneysel x86_64 işletim sistemi.
+Capability/IPC altyapısı, süreç başına özel kullanıcı sayfa tabloları, SPFS ve grafik masaüstü içerir.
 
-> **Mevcut Sürüm:** v0.30.0 (Architecture Freeze #7)  
-> **Doğrulama Durumu:** 265 / 265 Host Invariant Testi Başarılı (%100 Geçiş)  
-> **Donanım ve Emülasyon:** QEMU `-M q35,kernel-irqchip=split -device intel-iommu -smp 2` / Bare-Metal x86_64
+> **Güncel durum (2026-10-13):** Bellek ve GUI yaşam döngüsü sağlamlaştırması uygulanmıştır.
+> Compositor ve yerleşik masaüstü uygulamalarının esas mantığı hâlen kernel içinde çalışır.
+> Aşağıdaki Freeze bölümleri tasarım hedeflerini ve geçmiş çalışmaların kayıtlarını içerir;
+> tam userspace mikroçekirdek, üretim düzeyi SMP ve biçimsel güvenlik kanıtı olarak okunmamalıdır.
+> Doğrulama kapsamı, yeniden çalıştırma komutları ve açık işler: [Hardening notları](docs/HARDENING.md).
 
 ---
 
 ## 1. Mimari Genel Bakış
 
-SparkOS, monolitik çekirdeklerin getirdiği güvenlik ve hata yayılımı risklerini ortadan kaldırmak amacıyla katı bir mikroçekirdek (microkernel) felsefesiyle tasarlanmıştır. Çekirdek alanı yalnızca temel bellek yönetimi, capability yönlendirmesi, kesme dağıtımı ve per-CPU iş çizelgelemeden sorumludur.
+SparkOS’un hedefi capability tabanlı bir mikroçekirdektir. Aşağıdaki diyagram hedef servis ayrımını gösterir; mevcut masaüstü ve bazı sürücüler henüz Ring 0 içindedir.
 
 ```text
 +-------------------------------------------------------------------------------+

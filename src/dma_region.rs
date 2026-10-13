@@ -120,18 +120,11 @@ impl DmaRegion {
             return Err(DmaError::OutOfFrames);
         }
 
-        // İlk frame'i ayır (RTL8139 gibi cihazlar ardışık fiziksel belleğe ihtiyaç duyar)
-        let first_frame = crate::memory::user_alloc_frame().ok_or(DmaError::OutOfFrames)?;
+        // The frame pool also recycles pages: consecutive single allocations
+        // are not guaranteed to be physically adjacent.
+        let first_frame = crate::memory::user_alloc_contiguous_frames(pages as usize)
+            .ok_or(DmaError::OutOfFrames)?;
         let first_phys = first_frame.start_address();
-
-        if !is_page_aligned(first_phys.as_u64()) {
-            return Err(DmaError::NotPageAligned);
-        }
-
-        // Kalan sayfaları tahsis et (bump allocator ardışık çerçeveler üretir)
-        for _ in 1..pages {
-            let _ = crate::memory::user_alloc_frame().ok_or(DmaError::OutOfFrames)?;
-        }
 
         // Kernel görünümü: fiziksel bellek ofseti üzerinden doğrudan sanal adres
         let phys_offset = unsafe { crate::gui::PHYS_OFFSET };

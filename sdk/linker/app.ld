@@ -1,14 +1,14 @@
 /*
  * SparkOS Standard Userspace Linker Script
  * Target: x86_64 ELF Executable
- * Base Address: 0x400000 (4 MB)
+ * Base Address: 0x40000000 (1 GiB)
  */
 
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x400000;
+    . = 0x40000000;
 
     .text : ALIGN(4K) {
         *(.text._start)

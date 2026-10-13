@@ -170,3 +170,87 @@ pub fn fs_path_exists(path: &str) -> bool {
 pub fn fs_path_size(path: &str) -> Result<usize, &'static str> {
     crate::fs::get_file_size_from_path(path)
 }
+
+/// Linux-style stat buffer (minimal 32-byte layout for SparkOS Ring 3)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatBuf {
+    pub st_size: u64,
+    pub st_mode: u32,  // 0x4000 = Directory (S_IFDIR), 0x8000 = Regular File (S_IFREG)
+    pub st_ino: u32,
+    pub st_dev: u32,
+    pub _reserved: [u8; 12],
+}
+
+pub fn sys_mkdir(path_ptr: u64) -> u64 {
+    let path_buf = match crate::sec_mem::validate_user_ptr(path_ptr, MAX_PATH) {
+        Ok(b) => b,
+        Err(_) => return EFAULT,
+    };
+    let len = match user_strn_len(path_buf, MAX_PATH) {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+
+    if let Ok(path) = core::str::from_utf8(&path_buf[..len]) {
+        match crate::fs::mkdir(path) {
+            Ok(_) => 0,
+            Err(e) => {
+                crate::serial_println!("[SYSCALL] sys_mkdir Error: {}", e);
+                u64::MAX
+            }
+        }
+    } else {
+        u64::MAX
+    }
+}
+
+pub fn sys_stat(path_ptr: u64, stat_ptr: u64) -> u64 {
+    let path_buf = match crate::sec_mem::validate_user_ptr(path_ptr, MAX_PATH) {
+        Ok(b) => b,
+        Err(_) => return EFAULT,
+    };
+    let len = match user_strn_len(path_buf, MAX_PATH) {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+
+    let stat_slice = match crate::sec_mem::validate_user_ptr_mut(stat_ptr, core::mem::size_of::<StatBuf>()) {
+        Ok(b) => b,
+        Err(_) => return EFAULT,
+    };
+
+    if let Ok(path) = core::str::from_utf8(&path_buf[..len]) {
+        if crate::fs::is_dir(path) {
+            let stat = StatBuf {
+                st_size: 4096,
+                st_mode: 0x4000 | 0o755, // S_IFDIR | rwxr-xr-x
+                st_ino: 1,
+                st_dev: 0,
+                _reserved: [0; 12],
+            };
+            unsafe {
+                let stat_bytes = core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<StatBuf>());
+                stat_slice.copy_from_slice(stat_bytes);
+            }
+            0
+        } else if let Ok(size) = crate::fs::get_file_size(path) {
+            let stat = StatBuf {
+                st_size: size as u64,
+                st_mode: 0x8000 | 0o644, // S_IFREG | rw-r--r--
+                st_ino: 2,
+                st_dev: 0,
+                _reserved: [0; 12],
+            };
+            unsafe {
+                let stat_bytes = core::slice::from_raw_parts(&stat as *const _ as *const u8, core::mem::size_of::<StatBuf>());
+                stat_slice.copy_from_slice(stat_bytes);
+            }
+            0
+        } else {
+            u64::MAX
+        }
+    } else {
+        u64::MAX
+    }
+}

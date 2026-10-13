@@ -268,7 +268,7 @@ impl NetworkService {
     }
 
     /// Feeds incoming TCP segments from RTL8139 driver to bound sockets
-    pub fn dispatch_incoming_tcp(&mut self, src_ip: Ipv4Addr, src_port: u16, dst_port: u16, seq: u32, payload: &[u8]) {
+    pub fn dispatch_incoming_tcp(&mut self, _src_ip: Ipv4Addr, _src_port: u16, dst_port: u16, seq: u32, payload: &[u8]) {
         for sock in self.tcp_sockets.values_mut() {
             if sock.local_port == dst_port {
                 sock.ack_num = seq.wrapping_add(payload.len().max(1) as u32);

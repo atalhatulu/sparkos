@@ -24,23 +24,27 @@ pub fn calculate_checksum(data: &[u8]) -> u16 {
 // Real ARP resolution: discover + cache instead of a hardcoded gateway MAC.
 // ---------------------------------------------------------------------------
 
-/// A single learned IP -> MAC mapping in the ARP cache.
+/// A single learned IP -> MAC mapping in the ARP cache with TTL timestamp.
 #[derive(Debug, Clone, Copy)]
-struct ArpEntry {
-    ip: Ipv4Addr,
-    mac: [u8; 6],
+pub struct ArpEntry {
+    pub ip: Ipv4Addr,
+    pub mac: [u8; 6],
+    pub timestamp: u64, // Tick count / epoch for RFC 826 timeout expiration
 }
 
 /// Static ARP cache. Small, bounded table of recently resolved hosts.
-static ARP_CACHE: Mutex<Vec<ArpEntry>> = Mutex::new(Vec::new());
+pub static ARP_CACHE: Mutex<Vec<ArpEntry>> = Mutex::new(Vec::new());
 
 /// MAC broadcast address used for ARP requests and unknown-IP fallback.
-const MAC_BROADCAST: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+pub const MAC_BROADCAST: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
 /// Source IP of this host (QEMU default user-net address).
-const MY_IP: Ipv4Addr = [10, 0, 2, 15];
+pub const MY_IP: Ipv4Addr = [10, 0, 2, 15];
 
-fn arp_cache_lookup(ip: &Ipv4Addr) -> Option<[u8; 6]> {
+/// ARP entry time-to-live (e.g. 60,000 ms / 60s)
+pub const ARP_ENTRY_TTL_MS: u64 = 60_000;
+
+pub fn arp_cache_lookup(ip: &Ipv4Addr) -> Option<[u8; 6]> {
     let cache = ARP_CACHE.lock();
     for e in cache.iter() {
         if &e.ip == ip {
@@ -50,19 +54,32 @@ fn arp_cache_lookup(ip: &Ipv4Addr) -> Option<[u8; 6]> {
     None
 }
 
-fn arp_cache_insert(ip: Ipv4Addr, mac: [u8; 6]) {
+pub fn arp_cache_insert_with_time(ip: Ipv4Addr, mac: [u8; 6], current_time: u64) {
     let mut cache = ARP_CACHE.lock();
     // Refresh an existing entry or append a new one (evict oldest if full).
     for e in cache.iter_mut() {
         if e.ip == ip {
             e.mac = mac;
+            e.timestamp = current_time;
             return;
         }
     }
     if cache.len() >= 32 {
         cache.remove(0);
     }
-    cache.push(ArpEntry { ip, mac });
+    cache.push(ArpEntry { ip, mac, timestamp: current_time });
+}
+
+pub fn arp_cache_insert(ip: Ipv4Addr, mac: [u8; 6]) {
+    arp_cache_insert_with_time(ip, mac, 0);
+}
+
+/// Evicts expired ARP cache entries based on current monotonic timestamp.
+pub fn arp_cache_prune_expired(current_time: u64) -> usize {
+    let mut cache = ARP_CACHE.lock();
+    let initial_len = cache.len();
+    cache.retain(|e| e.timestamp == 0 || (current_time.saturating_sub(e.timestamp) < ARP_ENTRY_TTL_MS));
+    initial_len - cache.len()
 }
 
 /// Build and send an ARP request frame for `target_ip`, broadcast so any host
@@ -348,6 +365,83 @@ pub fn send_tcp_syn_seq(src_port: u16, dest: crate::net_socket::SocketAddr, iscn
 pub fn send_tcp_ack(src_port: u16, dest: crate::net_socket::SocketAddr, seq: u32, ack: u32) {
     let tcp = build_tcp_packet(src_port, dest.port, dest.ip, seq, ack, tcp_flags::ACK, &[]);
     send_tcp_segment(dest, &tcp);
+}
+
+/// Send a TCP FIN to initiate connection teardown (RFC 793).
+pub fn send_tcp_fin(src_port: u16, dest: crate::net_socket::SocketAddr, seq: u32, ack: u32) {
+    let tcp = build_tcp_packet(src_port, dest.port, dest.ip, seq, ack, tcp_flags::FIN | tcp_flags::ACK, &[]);
+    send_tcp_segment(dest, &tcp);
+}
+
+/// Send a TCP RST to reset/reject an invalid connection.
+pub fn send_tcp_rst(src_port: u16, dest: crate::net_socket::SocketAddr, seq: u32) {
+    let tcp = build_tcp_packet(src_port, dest.port, dest.ip, seq, 0, tcp_flags::RST, &[]);
+    send_tcp_segment(dest, &tcp);
+}
+
+/// RFC 793 TCP Finite State Machine (Faz 35: Robust TCP State Machine)
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    Closed = 0,
+    Listen = 1,
+    SynSent = 2,
+    SynReceived = 3,
+    Established = 4,
+    FinWait1 = 5,
+    FinWait2 = 6,
+    CloseWait = 7,
+    Closing = 8,
+    LastAck = 9,
+    TimeWait = 10,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TcpConnectionTracker {
+    pub local_port: u16,
+    pub remote_ip: Ipv4Addr,
+    pub remote_port: u16,
+    pub state: TcpState,
+    pub snd_una: u32,
+    pub snd_nxt: u32,
+    pub rcv_nxt: u32,
+    pub snd_wnd: u16,
+}
+
+impl TcpConnectionTracker {
+    pub fn new(local_port: u16, remote_ip: Ipv4Addr, remote_port: u16, isn: u32) -> Self {
+        Self {
+            local_port,
+            remote_ip,
+            remote_port,
+            state: TcpState::SynSent,
+            snd_una: isn,
+            snd_nxt: isn + 1,
+            rcv_nxt: 0,
+            snd_wnd: 8192,
+        }
+    }
+
+    pub fn handle_syn_ack(&mut self, seq: u32, ack: u32) -> bool {
+        if self.state == TcpState::SynSent && ack == self.snd_nxt {
+            self.state = TcpState::Established;
+            self.snd_una = ack;
+            self.rcv_nxt = seq.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn handle_fin(&mut self, seq: u32) {
+        if self.state == TcpState::Established {
+            self.state = TcpState::CloseWait;
+            self.rcv_nxt = seq.wrapping_add(1);
+        } else if self.state == TcpState::FinWait1 || self.state == TcpState::FinWait2 {
+            self.state = TcpState::TimeWait;
+            self.rcv_nxt = seq.wrapping_add(1);
+        }
+    }
 }
 
 /// Send TCP data (PSH+ACK) on an established connection.

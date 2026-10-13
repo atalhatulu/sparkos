@@ -120,7 +120,8 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 pub fn spawn_sysmon_app(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for sysmon.app")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = crate::terminal_app::terminal_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
@@ -133,11 +134,12 @@ pub fn spawn_sysmon_app(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
     );
+    let pending = crate::task::process::PendingProcess::new(pid);
 
     let surf_id = crate::surface::create_surface_for_pid(pid, SYSMON_WIDTH, SYSMON_HEIGHT)?;
     let (win_x, win_y) = {
@@ -158,5 +160,7 @@ pub fn spawn_sysmon_app(name: &str) -> Result<u64, &'static str> {
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window)",
         name, pid, code_base, surf_id);
 
+    crate::input::register_kernel_input_owner(pid);
+    pending.commit();
     Ok(pid)
 }

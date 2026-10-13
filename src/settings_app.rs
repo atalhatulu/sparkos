@@ -57,6 +57,29 @@ pub static SETTINGS_STORE: Mutex<SystemSettings> = Mutex::new(SystemSettings {
     dock_auto_hide: false,
 });
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsAction { None, Redraw, ThemeChanged }
+
+pub struct SettingsLayout {
+    pub sidebar_w: u32,
+    pub nav_start_y: u32,
+    pub nav_item_h: u32,
+    pub theme_btn_x: u32,
+    pub theme_btn_y: u32,
+    pub theme_btn_w: u32,
+    pub theme_btn_h: u32,
+}
+
+pub const SETTINGS_LAYOUT: SettingsLayout = SettingsLayout {
+    sidebar_w: 110,
+    nav_start_y: 28,
+    nav_item_h: 26,
+    theme_btn_x: 120, // cx = sidebar_w + 10 = 120
+    theme_btn_y: 128, // cy (10) + 32 + 86 = 128
+    theme_btn_w: 150,
+    theme_btn_h: 24,
+};
+
 #[derive(Debug, Clone)]
 pub struct SettingsAppState {
     pub window_id: u64,
@@ -102,6 +125,7 @@ impl SettingsAppState {
             3 => SettingsCategory::Keyboard,
             _ => SettingsCategory::System,
         };
+        self.status_message = format!("Viewing {:?}", self.active_category);
     }
 
     pub fn nav_down(&mut self) {
@@ -113,61 +137,73 @@ impl SettingsAppState {
             3 => SettingsCategory::Keyboard,
             _ => SettingsCategory::System,
         };
+        self.status_message = format!("Viewing {:?}", self.active_category);
     }
 
     pub fn toggle_theme(&mut self) {
-        THEME_MANAGER.lock().toggle_theme();
+        let mut tm = THEME_MANAGER.lock();
+        tm.toggle_theme();
+        let is_dark = tm.current_mode == crate::theme::ThemeMode::SparkDark;
+        drop(tm);
         let mut store = SETTINGS_STORE.lock();
-        store.dark_theme = !store.dark_theme;
+        store.dark_theme = is_dark;
         self.status_message = format!("Theme toggled (Dark: {})", store.dark_theme);
     }
 
-    pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) {
-        // 1. Sidebar clicks (x: 0..110)
-        if local_x <= 110 {
-            let item_height = 26u32;
-            if local_y >= 36 && local_y < 36 + 5 * item_height {
-                let idx = ((local_y - 36) / item_height) as usize;
-                self.selected_nav_idx = idx;
-                self.active_category = match idx {
-                    0 => SettingsCategory::Appearance,
-                    1 => SettingsCategory::Display,
-                    2 => SettingsCategory::Desktop,
-                    3 => SettingsCategory::Keyboard,
-                    _ => SettingsCategory::System,
-                };
-                self.status_message = format!("Viewing {:?}", self.active_category);
-                return;
+    pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) -> SettingsAction {
+        let layout = &SETTINGS_LAYOUT;
+        // The four-pixel gap between rows is not a clickable category.
+        if local_x >= 6 && local_x < layout.sidebar_w - 6 && local_y >= layout.nav_start_y {
+            let offset = local_y - layout.nav_start_y;
+            let idx = (offset / layout.nav_item_h) as usize;
+            if idx < 5 && offset % layout.nav_item_h < 22 {
+                self.set_category([SettingsCategory::Appearance, SettingsCategory::Display,
+                    SettingsCategory::Desktop, SettingsCategory::Keyboard, SettingsCategory::System][idx]);
+                return SettingsAction::Redraw;
             }
         }
+        if self.active_category == SettingsCategory::Appearance
+            && local_x >= layout.theme_btn_x && local_x < layout.theme_btn_x + layout.theme_btn_w
+            && local_y >= layout.theme_btn_y && local_y < layout.theme_btn_y + layout.theme_btn_h {
+            self.toggle_theme();
+            return SettingsAction::ThemeChanged;
+        }
+        SettingsAction::None
+    }
 
-        // 2. Action buttons in content pane
-        if self.active_category == SettingsCategory::Appearance {
-            // Toggle Theme button (x: 124..264, y: 108..132)
-            if local_x >= 124 && local_x <= 264 && local_y >= 108 && local_y <= 132 {
+    pub fn handle_key_input(&mut self, key_code: u8, pressed: bool) -> SettingsAction {
+        if !pressed { return SettingsAction::None; }
+        match key_code {
+            0x48 => { self.nav_up(); SettingsAction::Redraw }
+            0x50 => { self.nav_down(); SettingsAction::Redraw }
+            0x1C | 0x39 if self.active_category == SettingsCategory::Appearance => {
                 self.toggle_theme();
+                SettingsAction::ThemeChanged
             }
+            _ => SettingsAction::None,
         }
     }
 
     pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
+        let _timing = crate::perf::Span::new(crate::perf::Metric::Settings);
         if surface_ptr.is_null() { return; }
-        let bg_color = 0x000F172A;     // Deep Navy Slate
-        let sidebar_bg = 0x00090E17;   // Darker Slate Sidebar
-        let border_col = 0x00334155;
-        let text_color = 0x00F8FAFC;
-        let accent_color = 0x0038BDF8;
-        let muted_color = 0x0094A3B8;
+        let theme = THEME_MANAGER.lock().current_theme;
+        let bg_color = theme.window_active;
+        let sidebar_bg = theme.panel_background;
+        let border_col = theme.border_color;
+        let text_color = theme.text_color;
+        let accent_color = theme.accent_color;
+        let muted_color = theme.text_muted;
 
         crate::terminal_app::clear_surface(surface_ptr, w, h, bg_color);
 
-        // 1. Left Flat Sidebar (x = 0..110)
-        let sidebar_w = 110u32;
+        // 1. Left Flat Sidebar (x = 0..sidebar_w)
+        let sidebar_w = SETTINGS_LAYOUT.sidebar_w;
         let content_h = h.saturating_sub(18);
         crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, 0, sidebar_w, content_h, sidebar_bg);
         crate::files_app::draw_surf_rect(surface_ptr, w, h, sidebar_w - 1, 0, 1, content_h, border_col);
 
-        crate::font::draw_text(surface_ptr, w, h, 10, 10, "SETTINGS", 0x0064748B, sidebar_bg);
+        crate::font::draw_text(surface_ptr, w, h, 10, 10, "SETTINGS", muted_color, sidebar_bg);
 
         let categories = [
             (SettingsCategory::Appearance, "Appearance"),
@@ -177,24 +213,24 @@ impl SettingsAppState {
             (SettingsCategory::System, "System"),
         ];
 
-        let mut cat_y = 28u32;
+        let mut cat_y = SETTINGS_LAYOUT.nav_start_y;
         for (cat, label) in categories.iter() {
             let is_active = self.active_category == *cat;
-            let item_bg = if is_active { 0x002563EB } else { 0x00131C2E };
+            let item_bg = if is_active { accent_color } else { sidebar_bg };
             let item_fg = if is_active { 0x00FFFFFF } else { muted_color };
 
             crate::files_app::draw_surf_rect(surface_ptr, w, h, 6, cat_y, sidebar_w - 12, 22, item_bg);
             crate::font::draw_text(surface_ptr, w, h, 14, cat_y + 4, label, item_fg, item_bg);
-            cat_y += 26;
+            cat_y += SETTINGS_LAYOUT.nav_item_h;
         }
 
-        // 2. Main Content Pane on Right (x = 116..w)
+        // 2. Main Content Pane on Right (x = sidebar_w + 10 .. w)
         let cx = sidebar_w + 10;
         let cy = 10u32;
         let main_w = w.saturating_sub(cx + 8);
 
         // Category Header Strip
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, cx, cy, main_w, 24, 0x001E293B);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, cx, cy, main_w, 24, sidebar_bg);
         let cat_title = match self.active_category {
             SettingsCategory::Appearance => "Appearance & Theme",
             SettingsCategory::Display => "Display & Resolution",
@@ -202,34 +238,38 @@ impl SettingsAppState {
             SettingsCategory::Keyboard => "Global Shortcuts",
             SettingsCategory::System => "System Information",
         };
-        crate::font::draw_text(surface_ptr, w, h, cx + 8, cy + 4, cat_title, accent_color, 0x001E293B);
+        crate::font::draw_text(surface_ptr, w, h, cx + 8, cy + 4, cat_title, accent_color, sidebar_bg);
 
         let card_y = cy + 32;
 
         match self.active_category {
             SettingsCategory::Appearance => {
-                let theme_name = THEME_MANAGER.lock().current_theme.name;
+                let theme_name = theme.name;
                 let theme_label = format!("Active Theme: {}", theme_name);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y, &theme_label, text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, "Accent Color: Sky Blue (#38BDF8)", text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, &format!("Accent Color: #{:06X}", accent_color), text_color, bg_color);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Window Chrome: Flat 2D Modern", muted_color, bg_color);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Top Panel: Unified Single Bar", muted_color, bg_color);
 
-                // Theme Toggle Flat Button
-                crate::files_app::draw_surf_rect(surface_ptr, w, h, cx, card_y + 86, 150, 24, 0x002563EB);
-                crate::font::draw_text(surface_ptr, w, h, cx + 12, card_y + 90, "Toggle Dark / Light", 0x00FFFFFF, 0x002563EB);
+                // Theme Toggle Flat Button (from layout)
+                let bx = SETTINGS_LAYOUT.theme_btn_x;
+                let by = SETTINGS_LAYOUT.theme_btn_y;
+                let bw = SETTINGS_LAYOUT.theme_btn_w;
+                let bh = SETTINGS_LAYOUT.theme_btn_h;
+                crate::files_app::draw_surf_rect(surface_ptr, w, h, bx, by, bw, bh, accent_color);
+                crate::font::draw_text(surface_ptr, w, h, bx + 12, by + 4, "Switch theme", 0x00FFFFFF, accent_color);
             }
             SettingsCategory::Display => {
                 let vesa_w = unsafe { crate::gui::VESA.width };
                 let vesa_h = unsafe { crate::gui::VESA.height };
-                let res_label = format!("Resolution: {}x{} @ 60 Hz", vesa_w, vesa_h);
+                let res_label = format!("Resolution: {}x{}", vesa_w, vesa_h);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y, &res_label, text_color, bg_color);
 
                 let work_h = vesa_h.saturating_sub(crate::wm::WORK_AREA_TOP as u16 + 20);
                 let work_label = format!("Work Area: {}x{}", vesa_w, work_h);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, &work_label, text_color, bg_color);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Driver: VESA Linear Framebuffer", muted_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Compositor: 60 FPS Damage Tracking", 0x0034D399, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Compositor: Damage Tracking", 0x0034D399, bg_color);
             }
             SettingsCategory::Desktop => {
                 let store = SETTINGS_STORE.lock();
@@ -248,28 +288,29 @@ impl SettingsAppState {
                 ];
                 let mut sy = card_y;
                 for (keys, desc) in shortcuts.iter() {
-                    let kline = format!("• {}:", keys);
-                    crate::font::draw_text(surface_ptr, w, h, cx, sy, &kline, 0x00F8FAFC, bg_color);
+                    let kline = format!("{}:", keys);
+                    crate::font::draw_text(surface_ptr, w, h, cx, sy, &kline, text_color, bg_color);
                     crate::font::draw_text(surface_ptr, w, h, cx + 12, sy + 14, desc, muted_color, bg_color);
                     sy += 28;
                 }
             }
             SettingsCategory::System => {
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y, "OS: SparkOS Microkernel v2.0", 0x0034D399, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, "CPU: x86_64 SMP (Preemptive)", text_color, bg_color);
-                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, "Memory: 256 MB Physical RAM", text_color, bg_color);
-                let win_count = crate::wm::WM.lock().windows.len();
-                let win_label = format!("Active Windows: {}", win_count);
-                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, &win_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 20, "Architecture: x86_64", text_color, bg_color);
+                // Rendering also runs with WM held during resize. Never re-enter WM here.
+                let (used, capacity) = crate::memory::get_memory_stats();
+                let memory_label = format!("Frame pool: {} / {} MiB", used / 1048576, capacity / 1048576);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 40, &memory_label, text_color, bg_color);
+                crate::font::draw_text(surface_ptr, w, h, cx, card_y + 60, "Built-in desktop: kernel mode", text_color, bg_color);
                 crate::font::draw_text(surface_ptr, w, h, cx, card_y + 80, "Security: Capability CSpace Model", text_color, bg_color);
             }
         }
 
         // 3. Status Bar at bottom
         let status_y = h.saturating_sub(18);
-        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, 0x001E293B);
+        crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 18, sidebar_bg);
         crate::files_app::draw_surf_rect(surface_ptr, w, h, 0, status_y, w, 1, border_col);
-        crate::font::draw_text(surface_ptr, w, h, 8, status_y + 4, &self.status_message, 0x0034D399, 0x001E293B);
+        crate::font::draw_text(surface_ptr, w, h, 8, status_y + 4, &self.status_message, accent_color, sidebar_bg);
     }
 }
 
@@ -283,7 +324,8 @@ pub fn cleanup_settings_for_window(window_id: u64) {
 }
 
 pub fn spawn_settings_app(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for settings.app")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = crate::terminal_app::terminal_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
@@ -296,11 +338,12 @@ pub fn spawn_settings_app(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
     );
+    let pending = crate::task::process::PendingProcess::new(pid);
 
     let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
     if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
@@ -325,5 +368,7 @@ pub fn spawn_settings_app(name: &str) -> Result<u64, &'static str> {
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window {})",
         name, pid, code_base, surf_id, win_id);
 
+    crate::input::register_kernel_input_owner(pid);
+    pending.commit();
     Ok(pid)
 }

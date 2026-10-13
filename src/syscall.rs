@@ -24,6 +24,7 @@ pub const SYS_RECV: u64 = 13;
 // Process syscalls (Linux-compatible numbers).
 pub const SYS_FORK: u64 = 14;
 pub const SYS_EXEC: u64 = 15;
+pub const SYS_WAITPID: u64 = 16;
 
 // Microkernel IPC & Device Port syscalls (Aşama 4 & 5).
 pub const SYS_IPC_SEND: u64 = 20;
@@ -57,6 +58,13 @@ pub const SYS_MOVE_WINDOW: u64 = 36;
 pub const SYS_MINIMIZE_WINDOW: u64 = 37;
 pub const SYS_RESTORE_WINDOW: u64 = 38;
 pub const SYS_POLL_EVENT: u64 = 39;
+pub const SYS_SETAFFINITY: u64 = 40;
+pub const SYS_GETAFFINITY: u64 = 41;
+pub const SYS_MKDIR: u64 = 42;
+pub const SYS_STAT: u64 = 43;
+pub const SYS_KILL: u64 = 44;
+pub const SYS_SIGACTION: u64 = 45;
+pub const SYS_SIGPROCMASK: u64 = 46;
 
 // Standard errno style return code: -(EFAULT). Negative errno values are
 // returned to the user as their unsigned encoding.
@@ -168,6 +176,24 @@ pub extern "C" fn syscall_dispatcher(
                 }
             }
         }
+        SYS_WAITPID => {
+            // waitpid(target_pid): check if child process has exited
+            let target_pid = arg1;
+            let mut sched = crate::task::process::SCHEDULER.lock();
+            if let Some(proc) = sched.get_process_mut(target_pid) {
+                if proc.exited || proc.reaped {
+                    let code = proc.exit_code;
+                    proc.reaped = true;
+                    code
+                } else {
+                    // Not exited yet -> return EAGAIN (-11)
+                    EAGAIN
+                }
+            } else {
+                // Process not found -> return -ENOENT (-2)
+                (-2i64) as u64
+            }
+        }
         SYS_WRITE => {
             // Asama 2: fd yazma yetkisi (Rights::WRITE=2). fd 1/2 stdio seed'li
             // oldugu icin gecer; fd>=3 icin backend yolu.
@@ -272,6 +298,42 @@ pub extern "C" fn syscall_dispatcher(
                 }
             } else {
                 0
+            }
+        }
+        SYS_SETAFFINITY => {
+            let pid = if arg1 == 0 { crate::task::process::current_pid() } else { arg1 };
+            let target_cpu = if arg2 == u64::MAX { None } else { Some(arg2 as usize) };
+            match crate::task::process::set_process_cpu_affinity(pid, target_cpu) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_GETAFFINITY => {
+            let pid = if arg1 == 0 { crate::task::process::current_pid() } else { arg1 };
+            match crate::task::process::get_process_cpu_affinity(pid) {
+                Some(Some(cpu)) => cpu as u64,
+                Some(None) => u64::MAX, // Any CPU
+                None => (-1i64) as u64,
+            }
+        }
+        SYS_MKDIR => crate::syscall_storage::sys_mkdir(arg1),
+        SYS_STAT => crate::syscall_storage::sys_stat(arg1, arg2),
+        SYS_KILL => {
+            match crate::task::process::send_signal(arg1, arg2 as u32) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_SIGACTION => {
+            match crate::task::process::register_signal_handler(arg1 as u32, arg2) {
+                Ok(_) => 0,
+                Err(_) => u64::MAX,
+            }
+        }
+        SYS_SIGPROCMASK => {
+            match crate::task::process::set_signal_mask(arg1 as u32, arg2 as u32) {
+                Ok(old_mask) => old_mask as u64,
+                Err(_) => u64::MAX,
             }
         }
         _ => {
@@ -574,6 +636,9 @@ fn sys_exit(status: u64) -> u64 {
     if crate::task::process::current_is_user_process() {
         if let Some((pid, name)) = crate::task::process::current_process_info() {
             serial_println!("[PROC] pid {} ('{}') exiting with status {}", pid, name, status);
+            if let Some(proc) = crate::task::process::SCHEDULER.lock().get_process_mut(pid) {
+                proc.exit_code = status;
+            }
         }
         crate::task::process::exit_current();
     }
@@ -591,9 +656,11 @@ fn sys_exit(status: u64) -> u64 {
     }
 }
 
-/// Cooperative yield: returns control to the kernel executor without
-/// terminating the app.
+/// Cooperative yield: yields remaining quantum and triggers round-robin schedule.
 fn sys_yield() -> u64 {
+    if crate::task::process::preemption_enabled() {
+        crate::task::process::schedule();
+    }
     0
 }
 

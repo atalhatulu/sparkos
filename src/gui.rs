@@ -86,14 +86,23 @@ pub fn init(backbuffer_ptr: Option<u64>) {
 }
 
 pub fn swap_buffers() {
+    let _timing = crate::perf::Span::new(crate::perf::Metric::Framebuffer);
     unsafe {
         if BACKBUFFER.is_null() || VESA.framebuffer.is_null() { return; }
         let total_pixels = (VESA.width as usize) * (VESA.height as usize);
-        core::ptr::copy_nonoverlapping(BACKBUFFER, VESA.framebuffer, total_pixels);
+        // Hızlı 64-bit blok kopyalama (2 piksel = 8 bayt)
+        let total_u64 = total_pixels / 2;
+        let src_u64 = BACKBUFFER as *const u64;
+        let dst_u64 = VESA.framebuffer as *mut u64;
+        core::ptr::copy_nonoverlapping(src_u64, dst_u64, total_u64);
+        if total_pixels % 2 != 0 {
+            *VESA.framebuffer.add(total_pixels - 1) = *BACKBUFFER.add(total_pixels - 1);
+        }
     }
 }
 
 pub fn flush_rect(x: u16, y: u16, w: u16, h: u16) {
+    let _timing = crate::perf::Span::new(crate::perf::Metric::Framebuffer);
     unsafe {
         if BACKBUFFER.is_null() || VESA.framebuffer.is_null() { return; }
         
@@ -102,13 +111,17 @@ pub fn flush_rect(x: u16, y: u16, w: u16, h: u16) {
         let start_x = core::cmp::min(x, VESA.width);
         let copy_width = core::cmp::min(w, VESA.width - start_x);
         
+        if copy_width == 0 || start_y >= end_y { return; }
+
+        let screen_w = VESA.width as usize;
+
         for row in start_y..end_y {
-            let offset = (row as usize) * (VESA.width as usize) + (start_x as usize);
-            core::ptr::copy_nonoverlapping(
-                BACKBUFFER.add(offset),
-                VESA.framebuffer.add(offset),
-                copy_width as usize
-            );
+            let offset = (row as usize) * screen_w + (start_x as usize);
+            let src_ptr = BACKBUFFER.add(offset);
+            let dst_ptr = VESA.framebuffer.add(offset);
+
+            // Odd x coordinates are only u32-aligned; let memcpy choose its width.
+            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_width as usize);
         }
     }
 }

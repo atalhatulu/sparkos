@@ -4,9 +4,7 @@
 //! 2D GPU wire command queue processing, resource isolation, and automatic SoftwareRenderer fallback.
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use spin::Mutex;
-use crate::gpu::{GpuBackend, GpuBackendType, GpuCommand};
 
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_DEVICE_GPU: u16 = 0x1050;

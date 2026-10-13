@@ -1,6 +1,6 @@
 # SparkOS — Technical Debt & Architectural Ledger
 **Frozen Foundation:** Architecture Freeze #5  
-**Status:** Hardened & Formally Audited  
+**Status:** Experimental; host tests and opt-in QEMU regressions (not a formal proof)
 
 ---
 
@@ -23,13 +23,21 @@
 
 ---
 
+### `TD-MED-2`: `libspark::event::next()` Blocking Event Loop
+- **Module:** `sdk/libspark/src/lib.rs` (`pub mod event`, `pub mod ipc`)
+- **Status:** **RESOLVED in Faz 31**
+- **Implementation:** Integrated `raw_syscall5` with `SYS_IPC_RECV` for true blocking IPC event reception, eliminating busy-loop CPU spin and enabling kernel idle HLT power saving.
+
+---
+
 ## 2. Active Technical Debt (Monitored)
 
-### `TD-MED-2`: `libspark::event::next()` Blocking Event Loop
-- **Module:** `sdk/libspark/src/lib.rs` (`pub mod event`)
-- **Current Behavior:** Falls back to `yield_cpu()` busy-loop when event queue is empty instead of true kernel-level blocking sleep.
-- **Resolution Plan:** Transition to blocking IPC endpoint wait (`SYS_IPC_RECV`).
-- **Target Phase:** Event Subsystem Hardening
+- **Userspace migration:** compositor and built-in app logic still run in Ring 0. Ring-3 process records do not establish app isolation by themselves.
+- **Scheduling:** `SYS_YIELD` currently returns immediately; AP startup/work-stealing demonstrations are not an integrated concurrent userspace scheduler.
+- **Fork:** user register continuation and private page copying still need a complete implementation; the current fork path is not a supported POSIX fork.
+- **SMP reclamation:** the TLB shootdown timeout is not a proof of remote acknowledgement. Concurrent execution of one address space on APs must remain unsupported until shootdown/lifetime synchronization is completed.
+- **ABI:** SDK exec/waitpid numbering reconciled with kernel (SYS_FORK=14, SYS_EXEC=15, SYS_WAITPID=16).
+- **Scope:** heap exhaustion, all driver/DMA ownership paths, and physical hardware have not been comprehensively verified. See [hardening notes](docs/HARDENING.md).
 
 ---
 
@@ -42,3 +50,14 @@
 ### `SPKG v1 Specification`:
 - **Integrity Mechanism:** FNV-1a 32-bit checksum (`calculate_checksum`).
 - **Future SPKG v2:** Ed25519 asymmetric cryptographic signatures.
+
+## 2026-10-13: Memory / GUI hardening
+
+- Fixed SIGCHLD scheduler borrow conflict that prevented the kernel build.
+- Private userspace page-table subtree; owner-only surface mappings; no one-frame fallback.
+- Central surface unmap/free/accounting; window close and process exit use the same path.
+- Contiguous recycled-frame allocation and transactional process construction.
+- Bounded/fallible ELF allocation; low kernel memory, surface/stack ranges, and page-overlapping segments rejected.
+- Actual-kernel QEMU regression feature and reproducible snapshot runner added.
+
+Historical “resolved”, “zero leak” and “formally audited” labels above are not a claim that every kernel path has been proved correct.

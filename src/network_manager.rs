@@ -3,7 +3,6 @@
 //! Provides real-time network state tracking (Ethernet, WiFi, Disconnected),
 //! capability-gated IPC access, system tray popup rendering, and offline fail-safe behavior.
 
-use alloc::string::String;
 use spin::Mutex;
 use crate::net::Ipv4Addr;
 use crate::permission::AppPermission;

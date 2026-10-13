@@ -135,6 +135,8 @@ pub fn exec_elf(elf_bytes: &[u8]) -> Result<(), &'static str> {
         crate::elf::ElfError::OverlappingSegments => "Overlapping ELF segments",
         crate::elf::ElfError::InvalidEntryPoint => "Invalid ELF entry point",
         crate::elf::ElfError::NoLoadableSegments => "No loadable segments found",
+        crate::elf::ElfError::ImageTooLarge => "ELF image exceeds load budget",
+        crate::elf::ElfError::OutOfMemory => "Insufficient memory for ELF image",
     })?;
 
     // Multi-Segment Loading: Her PT_LOAD segmentini ilgili vaddr'a haritala

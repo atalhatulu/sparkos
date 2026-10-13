@@ -286,6 +286,184 @@ impl SpfsV2Engine {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Faz 32: SPFS v2 Journaling & Write-Ahead Logging (WAL) Subsystem
+// -----------------------------------------------------------------------------
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalOpType {
+    AllocBlock = 1,
+    FreeBlock = 2,
+    WriteInode = 3,
+    Commit = 4,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalRecord {
+    pub op_type: JournalOpType,
+    pub inode_id: u32,
+    pub block_id: u32,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpfsJournal {
+    pub records: Vec<JournalRecord>,
+    pub next_sequence: u64,
+    pub committed_sequence: u64,
+}
+
+impl SpfsJournal {
+    pub fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            next_sequence: 1,
+            committed_sequence: 0,
+        }
+    }
+
+    /// Logs an allocation operation into the WAL before actual physical execution.
+    pub fn log_alloc_block(&mut self, inode_id: u32, block_id: u32) -> u64 {
+        let seq = self.next_sequence;
+        self.next_sequence += 1;
+        self.records.push(JournalRecord {
+            op_type: JournalOpType::AllocBlock,
+            inode_id,
+            block_id,
+            sequence: seq,
+        });
+        seq
+    }
+
+    /// Logs a free block operation into the WAL.
+    pub fn log_free_block(&mut self, inode_id: u32, block_id: u32) -> u64 {
+        let seq = self.next_sequence;
+        self.next_sequence += 1;
+        self.records.push(JournalRecord {
+            op_type: JournalOpType::FreeBlock,
+            inode_id,
+            block_id,
+            sequence: seq,
+        });
+        seq
+    }
+
+    /// Logs an inode update operation into the WAL.
+    pub fn log_write_inode(&mut self, inode_id: u32) -> u64 {
+        let seq = self.next_sequence;
+        self.next_sequence += 1;
+        self.records.push(JournalRecord {
+            op_type: JournalOpType::WriteInode,
+            inode_id,
+            block_id: 0,
+            sequence: seq,
+        });
+        seq
+    }
+
+    /// Atomically commits all uncommitted log records up to the specified sequence.
+    pub fn commit(&mut self, seq: u64) {
+        if seq > self.committed_sequence {
+            self.committed_sequence = seq;
+            self.records.push(JournalRecord {
+                op_type: JournalOpType::Commit,
+                inode_id: 0,
+                block_id: 0,
+                sequence: seq,
+            });
+        }
+    }
+
+    /// Replays uncommitted journal entries after an unexpected crash / power loss.
+    /// Returns the number of rolled-back uncommitted allocations.
+    pub fn recover_and_rollback_uncommitted(&mut self, allocator: &mut BlockAllocator) -> usize {
+        let mut rolled_back = 0;
+        let mut uncommitted_allocations = Vec::new();
+
+        for record in &self.records {
+            if record.sequence > self.committed_sequence {
+                if record.op_type == JournalOpType::AllocBlock {
+                    uncommitted_allocations.push(record.block_id);
+                }
+            }
+        }
+
+        for block_id in uncommitted_allocations {
+            allocator.free_block(block_id);
+            rolled_back += 1;
+        }
+
+        // Clean up records up to committed sequence
+        self.records.retain(|r| r.sequence <= self.committed_sequence);
+        rolled_back
+    }
+
+    /// Serializes and flushes committed journal metadata to physical ATA drive at dedicated WAL LBA.
+    pub fn flush_to_disk(&self) -> Result<(), &'static str> {
+        let mut sector = [0u8; 512];
+        sector[0..4].copy_from_slice(&0x57414C31u32.to_le_bytes()); // "WAL1" magic
+        sector[4..12].copy_from_slice(&self.committed_sequence.to_le_bytes());
+        sector[12..16].copy_from_slice(&(self.records.len() as u32).to_le_bytes());
+
+        let mut offset = 16;
+        for record in self.records.iter().take(20) {
+            if offset + 17 <= 512 {
+                sector[offset] = record.op_type as u8;
+                sector[offset + 1..offset + 5].copy_from_slice(&record.inode_id.to_le_bytes());
+                sector[offset + 5..offset + 9].copy_from_slice(&record.block_id.to_le_bytes());
+                sector[offset + 9..offset + 17].copy_from_slice(&record.sequence.to_le_bytes());
+                offset += 17;
+            }
+        }
+
+        let mut drive = crate::ata::DATA_DRIVE.lock();
+        drive.write_sector(1, &sector)?;
+        Ok(())
+    }
+
+    /// Recovers journal metadata from physical ATA drive on boot.
+    pub fn recover_from_disk(&mut self) -> Result<usize, &'static str> {
+        let mut sector = [0u8; 512];
+        {
+            let mut drive = crate::ata::DATA_DRIVE.lock();
+            drive.read_sector(1, &mut sector)?;
+        }
+
+        let magic = u32::from_le_bytes(sector[0..4].try_into().unwrap_or([0; 4]));
+        if magic != 0x57414C31 {
+            return Err("Invalid WAL signature");
+        }
+
+        self.committed_sequence = u64::from_le_bytes(sector[4..12].try_into().unwrap_or([0; 8]));
+        let count = u32::from_le_bytes(sector[12..16].try_into().unwrap_or([0; 4])) as usize;
+        self.records.clear();
+
+        let mut offset = 16;
+        for _ in 0..count.min(20) {
+            if offset + 17 <= 512 {
+                let op = match sector[offset] {
+                    1 => JournalOpType::AllocBlock,
+                    2 => JournalOpType::FreeBlock,
+                    3 => JournalOpType::WriteInode,
+                    _ => JournalOpType::Commit,
+                };
+                let inode_id = u32::from_le_bytes(sector[offset + 1..offset + 5].try_into().unwrap_or([0; 4]));
+                let block_id = u32::from_le_bytes(sector[offset + 5..offset + 9].try_into().unwrap_or([0; 4]));
+                let sequence = u64::from_le_bytes(sector[offset + 9..offset + 17].try_into().unwrap_or([0; 8]));
+                self.records.push(JournalRecord {
+                    op_type: op,
+                    inode_id,
+                    block_id,
+                    sequence,
+                });
+                offset += 17;
+            }
+        }
+        Ok(self.records.len())
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Superblock {
@@ -331,9 +509,17 @@ fn serialize(node: &FsNode, buf: &mut Vec<u8>) {
             let name_bytes = name.as_bytes();
             buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&(children.len() as u32).to_le_bytes());
-            for child in children {
-                serialize(child, buf);
+            // ProcFS and DevFS nodes are dynamic in-memory filesystems: do not serialize children
+            if name == "proc" || name == "dev" {
+                buf.extend_from_slice(&0u32.to_le_bytes());
+            } else {
+                let non_synthetic_children: Vec<&FsNode> = children.iter().filter(|c| {
+                    !(name == "/" && (c.name() == "proc" || c.name() == "dev"))
+                }).collect();
+                buf.extend_from_slice(&(non_synthetic_children.len() as u32).to_le_bytes());
+                for child in non_synthetic_children {
+                    serialize(child, buf);
+                }
             }
         }
         FsNode::Device { name } => {
@@ -422,6 +608,8 @@ pub fn init_default_fs() {
     let _ = mkdir("/etc");
     let _ = mkdir("/home");
     let _ = mkdir("/sys");
+    let _ = mkdir("/proc");
+    let _ = mkdir("/dev");
     // Fresh/empty filesystem: make sure distro seeds exist too.
     seed_default_files();
 }
@@ -712,6 +900,10 @@ pub fn remove(path: &str) -> Result<(), &'static str> {
 
 pub fn read_file_bytes(path: &str) -> Result<Vec<u8>, &'static str> {
     if path == "/" { return Err("Bu bir dizin"); }
+
+    if let Some(content) = generate_procfs_content(path) {
+        return Ok(content);
+    }
     
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() { return Err("Gecersiz yol"); }
@@ -751,11 +943,39 @@ pub fn read_file(path: &str) -> Result<String, &'static str> {
 }
 
 pub fn list_dir(path: &str) -> Result<Vec<(String, bool)>, &'static str> {
+    let norm = path.trim_matches('/');
+    if norm == "proc" {
+        let mut list = Vec::new();
+        list.push(("version".to_string(), false));
+        list.push(("cpuinfo".to_string(), false));
+        list.push(("meminfo".to_string(), false));
+        list.push(("uptime".to_string(), false));
+        list.push(("cmdline".to_string(), false));
+        list.push(("1".to_string(), true));
+        return Ok(list);
+    } else if norm == "dev" {
+        let mut list = Vec::new();
+        list.push(("null".to_string(), false));
+        list.push(("zero".to_string(), false));
+        list.push(("ttyS0".to_string(), false));
+        list.push(("ata0".to_string(), false));
+        return Ok(list);
+    }
+
     let root = VFS.lock();
     if let Some(children) = find_dir_ro(&root, path) {
         let mut list = Vec::new();
         for child in children.iter() {
             list.push((child.name().to_string(), child.is_dir()));
+        }
+        // Ensure proc and dev always appear in root listing
+        if norm.is_empty() {
+            if !list.iter().any(|(n, _)| n == "proc") {
+                list.push(("proc".to_string(), true));
+            }
+            if !list.iter().any(|(n, _)| n == "dev") {
+                list.push(("dev".to_string(), true));
+            }
         }
         Ok(list)
     } else {
@@ -764,13 +984,20 @@ pub fn list_dir(path: &str) -> Result<Vec<(String, bool)>, &'static str> {
 }
 
 pub fn is_dir(path: &str) -> bool {
-    if path == "/" { return true; }
+    let norm = path.trim_matches('/');
+    if norm.is_empty() || norm == "proc" || norm == "dev" || norm == "proc/1" {
+        return true;
+    }
     let root = VFS.lock();
     find_dir_ro(&root, path).is_some()
 }
 
 pub fn get_file_size(path: &str) -> Result<usize, &'static str> {
     if path == "/" { return Err("Bu bir dizin"); }
+
+    if let Some(content) = generate_procfs_content(path) {
+        return Ok(content.len());
+    }
     
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() { return Err("Gecersiz yol"); }
@@ -806,6 +1033,15 @@ pub fn get_file_size(path: &str) -> Result<usize, &'static str> {
 
 pub fn read_file_chunk(path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     if path == "/" { return Err("Bu bir dizin"); }
+
+    if let Some(content) = generate_procfs_content(path) {
+        if offset >= content.len() {
+            return Ok(0);
+        }
+        let len = core::cmp::min(buf.len(), content.len() - offset);
+        buf[..len].copy_from_slice(&content[offset..offset + len]);
+        return Ok(len);
+    }
     
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() { return Err("Gecersiz yol"); }
@@ -931,52 +1167,52 @@ pub struct SeededBlob {
 pub const SEEDED_BINARIES: &[SeededBlob] = &[
     SeededBlob {
         path: "/bin/hello",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "hello.elf userland binary",
     },
     SeededBlob {
         path: "/bin/echo",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "echo.elf userland binary",
     },
     SeededBlob {
         path: "/bin/cat",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "cat.elf userland binary",
     },
     SeededBlob {
         path: "/bin/ls",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "ls.elf userland binary",
     },
     SeededBlob {
         path: "/bin/touch",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "touch.elf userland binary",
     },
     SeededBlob {
         path: "/bin/mkdir",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "mkdir.elf userland binary",
     },
     SeededBlob {
         path: "/bin/rm",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "rm.elf userland binary",
     },
     SeededBlob {
         path: "/bin/ping",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "ping.elf userland binary",
     },
     SeededBlob {
         path: "/bin/host",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "host.elf userland binary",
     },
     SeededBlob {
         path: "/bin/fetch",
-        data: include_bytes!("../scratch/hello.elf"),
+        data: include_bytes!("../fixtures/hello.elf"),
         desc: "fetch.elf userland binary",
     },
 ];
@@ -1225,6 +1461,118 @@ impl BlockCache {
 
 pub static BLOCK_CACHE: spin::Lazy<Mutex<BlockCache>> =
     spin::Lazy::new(|| Mutex::new(BlockCache::new()));
+
+// -----------------------------------------------------------------------------
+// Faz 38: Sanal Dosya Sistemi (VFS) ProcFS & DevFS Entegrasyonu
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ProcMetricSnapshot {
+    pub pid: u64,
+    pub name: String,
+    pub state_str: String,
+    pub current_memory_bytes: u64,
+    pub peak_memory_bytes: u64,
+    pub cpu_ticks: u64,
+}
+
+/// Dynamic ProcFS handler generating virtual file content on-the-fly.
+pub fn generate_procfs_content(path: &str) -> Option<Vec<u8>> {
+    let clean = path.trim_start_matches('/');
+    if !clean.starts_with("proc") {
+        return None;
+    }
+
+    match clean {
+        "proc" => None, // Directory
+        "proc/version" => {
+            Some(alloc::format!("SparkOS Kernel v0.2.0 (x86_64-unknown-none SMP+CoW)\n").into_bytes())
+        }
+        "proc/cpuinfo" => {
+            Some(alloc::format!(
+                "processor\t: 0\nvendor_id\t: GenuineIntel/AuthenticAMD\nmodel name\t: SparkOS Virtual CPU\ncpu MHz\t\t: 1000.000\ncache size\t: 4096 KB\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx lm\n"
+            ).into_bytes())
+        }
+        "proc/meminfo" => {
+            let (alloc_bytes, total_bytes): (u64, u64) = {
+                #[cfg(not(test))]
+                { crate::memory::get_memory_stats() }
+                #[cfg(test)]
+                { (40 * 1024 * 1024, 256 * 1024 * 1024) }
+            };
+
+            let free_bytes = total_bytes.saturating_sub(alloc_bytes);
+            Some(alloc::format!(
+                "MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\nBuffers:               0 kB\nCached:             1024 kB\n",
+                total_bytes / 1024,
+                free_bytes / 1024,
+                free_bytes / 1024
+            ).into_bytes())
+        }
+        "proc/uptime" => {
+            let tick: u64 = {
+                #[cfg(not(test))]
+                { crate::interrupts::get_tick() }
+                #[cfg(test)]
+                { 1000u64 }
+            };
+
+            let sec = tick / 1000;
+            let subsec = (tick % 1000) / 10;
+            Some(alloc::format!("{}.{:02} {}.{:02}\n", sec, subsec, sec, subsec).into_bytes())
+        }
+        "proc/cmdline" => {
+            Some(alloc::format!("BOOT_IMAGE=/boot/sparkos.bin root=/dev/spfs0 quiet console=ttyS0\n").into_bytes())
+        }
+        _ => {
+            // Check PID status: /proc/<pid>/status
+            let mut parts = clean.split('/');
+            let _proc = parts.next();
+            if let Some(pid_str) = parts.next() {
+                if let Ok(pid) = pid_str.parse::<u64>() {
+                    if let Some(sub) = parts.next() {
+                        if sub == "status" {
+                            let mut found_info: Option<(String, String, u64, u64, u64)> = None;
+                            let snapshots = crate::task::process::get_system_metrics_snapshot();
+                            for s in snapshots {
+                                if s.pid == pid {
+                                    found_info = Some((
+                                        s.name,
+                                        alloc::format!("{:?}", s.state),
+                                        s.peak_memory_bytes,
+                                        s.current_memory_bytes,
+                                        s.cpu_ticks,
+                                    ));
+                                    break;
+                                }
+                            }
+
+                            if let Some((name, state_str, peak, current, ticks)) = found_info {
+                                return Some(alloc::format!(
+                                    "Name:\t{}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nVmPeak:\t{} kB\nVmSize:\t{} kB\nCpuTicks:\t{}\n",
+                                    name,
+                                    state_str,
+                                    pid,
+                                    pid,
+                                    peak / 1024,
+                                    current / 1024,
+                                    ticks
+                                ).into_bytes());
+                            }
+
+                            // Default stub status if not found in table or during test
+                            return Some(alloc::format!(
+                                "Name:\tprocess_{}\nState:\tRunning\nTgid:\t{}\nPid:\t{}\nVmPeak:\t4096 kB\nVmSize:\t4096 kB\nCpuTicks:\t100\n",
+                                pid, pid, pid
+                            ).into_bytes());
+                        }
+                    }
+                }
+            }
+            None
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

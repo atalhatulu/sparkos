@@ -22,8 +22,8 @@ impl PackageManifest {
     pub fn parse(json_str: &str) -> Result<Self, &'static str> {
         let mut name = String::from("Unknown");
         let mut version = String::from("1.0.0");
-        let mut entry = String::from("main.elf");
-        let mut icon = String::from("default.ico");
+        let entry = String::from("main.elf");
+        let icon = String::from("default.ico");
         let mut permissions = Vec::new();
 
         // Parse Name

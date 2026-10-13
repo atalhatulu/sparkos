@@ -895,13 +895,13 @@ impl EditorAppState {
         }
     }
 
-    pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32) {
+    pub fn handle_mouse_click(&mut self, local_x: u32, local_y: u32, win_w: u32, win_h: u32) {
         // Modal dialog button interaction
         if self.show_unsaved_dialog {
             let dw = 250u32;
             let dh = 104u32;
-            let dx = (EDITOR_WIDTH.saturating_sub(dw)) / 2;
-            let dy = (EDITOR_HEIGHT.saturating_sub(dh)) / 2;
+            let dx = (win_w.saturating_sub(dw)) / 2;
+            let dy = (win_h.saturating_sub(dh)) / 2;
 
             if local_y >= dy + 64 && local_y <= dy + 88 {
                 if local_x >= dx + 12 && local_x <= dx + 72 {
@@ -1006,6 +1006,7 @@ impl EditorAppState {
     }
 
     pub fn render_to_surface(&self, surface_ptr: *mut u32, w: u32, h: u32) {
+        let _timing = crate::perf::Span::new(crate::perf::Metric::Editor);
         if surface_ptr.is_null() { return; }
         let bg_color = 0x000B0F19;     // Obsidian Dark Slate
         let panel_bg = 0x001E293B;     // Slate 800
@@ -1202,7 +1203,8 @@ pub fn draw_surf_rect(surface_ptr: *mut u32, surf_w: u32, surf_h: u32, x: u32, y
 }
 
 pub fn spawn_editor_app(name: &str, file_to_open: Option<&str>) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for editor.app")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = crate::terminal_app::terminal_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
@@ -1215,11 +1217,12 @@ pub fn spawn_editor_app(name: &str, file_to_open: Option<&str>) -> Result<u64, &
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
     );
+    let pending = crate::task::process::PendingProcess::new(pid);
 
     let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
     if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
@@ -1248,5 +1251,7 @@ pub fn spawn_editor_app(name: &str, file_to_open: Option<&str>) -> Result<u64, &
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window {})",
         name, pid, code_base, surf_id, win_id);
 
+    crate::input::register_kernel_input_owner(pid);
+    pending.commit();
     Ok(pid)
 }

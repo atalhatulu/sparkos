@@ -24,6 +24,7 @@ impl SimpleExecutor {
                 continue;
             }
 
+            let busy_start = crate::perf::stamp();
             let queue_len = self.task_queue.len();
             for _ in 0..queue_len {
                 if let Some(mut task) = self.task_queue.pop_front() {
@@ -44,7 +45,10 @@ impl SimpleExecutor {
 
                     let waker = dummy_waker();
                     let mut context = Context::from_waker(&waker);
-                    match task.poll(&mut context) {
+                    let poll_start = crate::perf::stamp();
+                    let result = task.poll(&mut context);
+                    crate::perf::finish(crate::perf::Metric::TaskPoll, poll_start);
+                    match result {
                         Poll::Ready(()) => {
                             super::PROCESS_LIST.lock().remove(&task_id);
                         }
@@ -52,6 +56,8 @@ impl SimpleExecutor {
                     }
                 }
             }
+
+            crate::perf::finish(crate::perf::Metric::ExecutorBusy, busy_start);
 
             // Bir turu tamamladik. Eger hala bekleyen gorevler varsa, 
             // bir sonraki donanim kesmesine (interrupt) kadar islemciyi uyut.

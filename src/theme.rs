@@ -21,9 +21,11 @@ pub struct Theme {
     pub titlebar_inactive: u32,
     pub border_color: u32,
     pub text_color: u32,
+    pub text_muted: u32,
     pub accent_color: u32,
     pub dock_background: u32,
     pub launcher_background: u32,
+    pub panel_background: u32,
     pub close_button_hover: u32,
 }
 
@@ -36,9 +38,11 @@ pub const SPARK_DARK: Theme = Theme {
     titlebar_inactive: 0x00334155,  // Muted Slate
     border_color: 0x00475569,       // Slate 600
     text_color: 0x00F8FAFC,         // Crisp White
+    text_muted: 0x0094A3B8,         // Slate 400
     accent_color: 0x0038BDF8,       // Sky Blue
     dock_background: 0x000F172A,    // Dark Glass
     launcher_background: 0x001E293B,// Slate Modal
+    panel_background: 0x001E293B,   // Slate 800
     close_button_hover: 0x00EF4444, // Red 500
 };
 
@@ -51,9 +55,11 @@ pub const SPARK_LIGHT: Theme = Theme {
     titlebar_inactive: 0x0094A3B8,  // Slate 400
     border_color: 0x00CBD5E1,       // Slate 300
     text_color: 0x000F172A,         // Slate 900
+    text_muted: 0x0064748B,         // Slate 500
     accent_color: 0x002563EB,       // Blue 600
     dock_background: 0x00F8FAFC,    // Light Glass
     launcher_background: 0x00FFFFFF,// White Modal
+    panel_background: 0x00F1F5F9,   // Slate 100
     close_button_hover: 0x00DC2626, // Red 600
 };
 

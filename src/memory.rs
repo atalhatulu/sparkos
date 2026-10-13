@@ -68,17 +68,15 @@ pub fn is_user_range(ptr: u64, len: usize) -> bool {
 // Faz 25: Virtual Memory Evolution — Reclaimable Physical Frame Allocator
 // ---------------------------------------------------------------------------
 
-struct UserFrameAllocator {
-    /// Snapshot of usable physical ranges: (start_inclusive, end_exclusive).
-    regions: Vec<(u64, u64)>,
-    next_region: usize,
-    /// Recycled physical frames available for immediate reuse.
-    free_list: Vec<PhysFrame>,
-    /// Set of allocated frame physical start addresses (Double-Free Defense).
-    allocated_frames: alloc::collections::BTreeSet<u64>,
-}
+static USER_FRAME_ALLOC: Mutex<Option<crate::frame_pool::FramePool>> = Mutex::new(None);
 
-static USER_FRAME_ALLOC: Mutex<Option<UserFrameAllocator>> = Mutex::new(None);
+#[cfg(feature = "kernel-regression")]
+static FAIL_ALLOCATION_AFTER: core::sync::atomic::AtomicIsize = core::sync::atomic::AtomicIsize::new(-1);
+
+#[cfg(feature = "kernel-regression")]
+pub fn fail_allocation_after(remaining: isize) {
+    FAIL_ALLOCATION_AFTER.store(remaining, core::sync::atomic::Ordering::SeqCst);
+}
 
 /// Seeds the user frame allocator with the usable regions from the boot memory
 /// map. Safe to call multiple times; the first successful call wins.
@@ -110,120 +108,43 @@ pub fn init_user_memory(memory_map: &'static MemoryMap) {
         }
     }
 
-    *guard = Some(UserFrameAllocator {
-        regions,
-        next_region: 0,
-        free_list: Vec::new(),
-        allocated_frames: alloc::collections::BTreeSet::new(),
-    });
+    *guard = Some(crate::frame_pool::FramePool::new(regions));
 }
 
-/// Allocates a fresh or recycled physical frame for user mappings.
-/// Returns `None` if the allocator is unseeded or exhausted.
+/// Allocate and zero a single frame from the shared user/frame-table pool.
 pub fn user_alloc_frame() -> Option<PhysFrame> {
-    let mut guard = USER_FRAME_ALLOC.lock();
-    let alloc = guard.as_mut()?;
-
-    // 1. Reclaim recycled frame if available (LIFO Frame Cache)
-    if let Some(frame) = alloc.free_list.pop() {
-        alloc.allocated_frames.insert(frame.start_address().as_u64());
-        
-        // Zero the frame memory to guarantee clean page tables and prevent MALFORMED_TABLE faults
-        let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
-        let dest = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
-        unsafe {
-            core::ptr::write_bytes(dest, 0, 4096);
-        }
-        return Some(frame);
-    }
-
-    // 2. Bump-allocate fresh frame from usable physical regions
-    while alloc.next_region < alloc.regions.len() {
-        let (start, end) = alloc.regions[alloc.next_region];
-        if start < end {
-            alloc.regions[alloc.next_region].0 = start + 4096;
-            let frame = PhysFrame::containing_address(PhysAddr::new(start));
-            alloc.allocated_frames.insert(start);
-
-            // Zero the frame memory to guarantee clean page tables and prevent corrupted page walks
-            let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
-            let dest = (phys_offset + start).as_mut_ptr::<u8>();
-            unsafe {
-                core::ptr::write_bytes(dest, 0, 4096);
-            }
-            return Some(frame);
-        }
-        alloc.next_region += 1;
-    }
-    None
+    user_alloc_contiguous_frames(1)
 }
 
-/// Allocates `count` contiguous physical frames directly from bump regions for large DMA/surfaces.
+/// Reserve an entire contiguous extent or leave the pool unchanged.
 pub fn user_alloc_contiguous_frames(count: usize) -> Option<PhysFrame> {
-    if count == 0 { return None; }
-    let required_bytes = (count as u64).checked_mul(4096)?;
-
-    let mut guard = USER_FRAME_ALLOC.lock();
-    let alloc = guard.as_mut()?;
-
-    while alloc.next_region < alloc.regions.len() {
-        let (start, end) = alloc.regions[alloc.next_region];
-        if start.checked_add(required_bytes)? <= end {
-            alloc.regions[alloc.next_region].0 = start + required_bytes;
-            for i in 0..count {
-                alloc.allocated_frames.insert(start + (i as u64) * 4096);
-            }
-
-            // Zero contiguous frame memory
-            let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
-            let dest = (phys_offset + start).as_mut_ptr::<u8>();
-            unsafe {
-                core::ptr::write_bytes(dest, 0, required_bytes as usize);
-            }
-            return Some(PhysFrame::containing_address(PhysAddr::new(start)));
-        }
-        alloc.next_region += 1;
+    #[cfg(feature = "kernel-regression")]
+    {
+        use core::sync::atomic::Ordering;
+        let remaining = FAIL_ALLOCATION_AFTER.load(Ordering::SeqCst);
+        if remaining == 0 { return None; }
+        if remaining > 0 { FAIL_ALLOCATION_AFTER.fetch_sub(1, Ordering::SeqCst); }
     }
-    None
+    let start = USER_FRAME_ALLOC.lock().as_mut()?.allocate(count)?;
+    let dest = (unsafe { crate::gui::PHYS_OFFSET } + start) as *mut u8;
+    unsafe { core::ptr::write_bytes(dest, 0, count * 4096); }
+    Some(PhysFrame::containing_address(PhysAddr::new(start)))
 }
 
-/// Releases a physical frame back to the pool (Faz 25 TD-MED-3 Resolution).
-/// Enforces double-free protection and out-of-bounds checks.
 pub fn user_free_frame(frame: PhysFrame) {
-    let mut guard = USER_FRAME_ALLOC.lock();
-    if let Some(alloc) = guard.as_mut() {
-        let addr = frame.start_address().as_u64();
-        // Only reclaim if the frame was actively recorded as allocated
-        if alloc.allocated_frames.remove(&addr) {
-            alloc.free_list.push(frame);
-        }
+    if let Some(pool) = USER_FRAME_ALLOC.lock().as_mut() {
+        pool.release(frame.start_address().as_u64());
     }
 }
 
-/// Returns (allocated_bytes, total_usable_bytes) from physical memory
+/// Returns allocated frame bytes and the original usable frame-pool capacity.
 pub fn get_memory_stats() -> (u64, u64) {
-    let guard = USER_FRAME_ALLOC.lock();
-    if let Some(alloc) = guard.as_ref() {
-        let mut total_bytes = 0u64;
-        for &(start, end) in &alloc.regions {
-            total_bytes += end.saturating_sub(start);
-        }
-        let allocated_bytes = (alloc.allocated_frames.len() as u64) * 4096;
-        (allocated_bytes, total_bytes.max(256 * 1024 * 1024))
-    } else {
-        (43 * 1024 * 1024, 256 * 1024 * 1024)
-    }
+    USER_FRAME_ALLOC.lock().as_ref().map(|pool| pool.stats()).unwrap_or((0, 0))
 }
 
-// ---------------------------------------------------------------------------
-// User page mapping helpers.
-// ---------------------------------------------------------------------------
-
-/// Maps a fresh frame at `virt` for use by a Ring-3 process.
-/// Ensures the target sits in the user half and the frame is user-accessible.
-/// Returns the mapped virtual address on success.
+/// Maps a freshly allocated page into the active address space.
 pub fn map_user_page(virt: u64, writable: bool) -> Result<u64, &'static str> {
-    if !is_canonical(virt) || virt >= USER_ADDR_LIMIT {
+    if !is_canonical(virt) || virt < USER_ADDR_BASE || virt >= USER_ADDR_LIMIT {
         return Err("user mapping target outside user space");
     }
     let frame = user_alloc_frame().ok_or("no free user frames")?;
@@ -371,33 +292,186 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
 // loads this CR3 right before iretq, so each Ring-3 execution truly runs in
 // its own address space.
 
-/// Clone the active page table and return the physical address of the new
-/// level-4 table (a valid CR3 value for a user process). `None` if no frame
-/// can be allocated.
+/// Own a new address space until it is handed to a process. Any early `?`
+/// during ELF/service construction reclaims already mapped pages and tables.
+pub struct AddressSpaceBuilder { cr3: u64 }
+
+impl AddressSpaceBuilder {
+    pub fn new() -> Result<Self, &'static str> {
+        Ok(Self { cr3: clone_active_cr3().ok_or("No free frames for address space")? })
+    }
+    pub fn cr3(&self) -> u64 { self.cr3 }
+    pub fn commit(mut self) -> u64 {
+        let cr3 = self.cr3;
+        self.cr3 = 0;
+        cr3
+    }
+}
+
+impl Drop for AddressSpaceBuilder {
+    fn drop(&mut self) {
+        if self.cr3 != 0 { let _ = destroy_user_address_space(self.cr3); }
+    }
+}
+
+/// Create a fresh userspace (1..2 GiB) while retaining supervisor mappings.
+/// The PML4 alone is not sufficient: sharing its low PDPT shares every user PTE.
 pub fn clone_active_cr3() -> Option<u64> {
-    let frame = user_alloc_frame()?;
-    let phys_offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
-    let src_ptr = if let Some(kcr3) = crate::task::process::shared_kernel_cr3() {
-        (phys_offset + PhysAddr::new(kcr3).as_u64()).as_ptr::<u64>()
-    } else {
-        unsafe { active_level_4_table(phys_offset) as *const PageTable as *const u64 }
+    crate::task::process::capture_shared_kernel_cr3();
+    let root = user_alloc_frame()?;
+    let low = match user_alloc_frame() {
+        Some(frame) => frame,
+        None => { user_free_frame(root); return None; }
     };
-    let dest = (phys_offset + frame.start_address().as_u64()).as_mut_ptr::<u64>();
+    let offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
     unsafe {
-        core::ptr::copy_nonoverlapping(src_ptr, dest, 512);
-        // Ensure PML4 entry 0 is USER_ACCESSIBLE so user processes can access userland mappings
-        if *dest != 0 {
-            *dest |= PageTableFlags::USER_ACCESSIBLE.bits() | PageTableFlags::WRITABLE.bits();
+        let source = &*((offset + crate::task::process::shared_kernel_cr3()?).as_ptr::<PageTable>());
+        let dest = &mut *((offset + root.start_address().as_u64()).as_mut_ptr::<PageTable>());
+        for i in 0..512 { dest[i] = source[i].clone(); }
+        let low_dest = &mut *((offset + low.start_address().as_u64()).as_mut_ptr::<PageTable>());
+        if source[0].flags().contains(PageTableFlags::PRESENT) {
+            let low_source = &*((offset + source[0].addr().as_u64()).as_ptr::<PageTable>());
+            for i in 0..512 { low_dest[i] = low_source[i].clone(); }
+        }
+        // Keep the low kernel image supervisor-only. User binaries must be linked
+        // at USER_ADDR_BASE; they may not replace the kernel at 2..~5 MiB.
+        let kernel_flags = low_dest[0].flags() & !PageTableFlags::USER_ACCESSIBLE;
+        low_dest[0].set_flags(kernel_flags);
+        low_dest[1].set_unused();
+        dest[0].set_frame(low, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE);
+    }
+    Some(root.start_address().as_u64())
+}
+
+/// Map externally owned surface frames transactionally, into the owner only.
+/// Existing mappings are never changed. On failure only this call's PTEs go away.
+pub fn map_surface_frames(cr3: u64, virt: u64, phys: u64, pages: u64) -> Result<(), &'static str> {
+    if cr3 == 0 || virt < USER_ADDR_BASE || virt % 4096 != 0 || phys % 4096 != 0
+        || pages == 0 || !is_user_range(virt, pages.checked_mul(4096).ok_or("Surface range overflow")? as usize) {
+        return Err("Invalid surface mapping");
+    }
+    let offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+    let target = unsafe { &mut *((offset + cr3).as_mut_ptr::<PageTable>()) };
+    let mut mapper = unsafe { OffsetPageTable::new(target, offset) };
+    let parent = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+    let flags = parent | PageTableFlags::NO_EXECUTE;
+    for i in 0..pages {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt + i * 4096));
+        let frame = PhysFrame::containing_address(PhysAddr::new(phys + i * 4096));
+        let result = unsafe { mapper.map_to_with_table_flags(page, frame, flags, parent, &mut UserFrameAllocatorAdapter) };
+        match result {
+            Ok(flush) => flush.flush(),
+            Err(_) => {
+                for j in 0..i {
+                    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt + j * 4096));
+                    if let Ok((_, flush)) = mapper.unmap(page) { flush.flush(); }
+                }
+                drop(mapper);
+                prune_empty_user_tables(cr3);
+                return Err("Surface mapping failed or overlaps an existing mapping");
+            }
         }
     }
-    Some(frame.start_address().as_u64())
+    Ok(())
+}
+
+/// Remove the owner's mappings without freeing the shared backing a second time.
+/// Validate all PTEs before mutation so a stale record cannot unmap somebody else's pages.
+pub fn unmap_surface_frames(cr3: u64, virt: u64, phys: u64, pages: u64) -> Result<(), &'static str> {
+    let offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+    let target = unsafe { &mut *((offset + cr3).as_mut_ptr::<PageTable>()) };
+    let mut mapper = unsafe { OffsetPageTable::new(target, offset) };
+    for i in 0..pages {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt + i * 4096));
+        if mapper.translate_page(page).map(|f| f.start_address().as_u64()).ok() != Some(phys + i * 4096) {
+            return Err("Surface backing does not match the owner page table");
+        }
+    }
+    for i in 0..pages {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt + i * 4096));
+        let (_, flush) = mapper.unmap(page).map_err(|_| "Surface unmap failed")?;
+        flush.flush();
+    }
+    drop(mapper);
+    crate::smp::tlb_shootdown(virt, pages as usize);
+    prune_empty_user_tables(cr3);
+    Ok(())
+}
+
+/// Reclaim empty paging structures in the private 1..2 GiB subtree.
+fn prune_empty_user_tables(cr3: u64) {
+    let offset = unsafe { crate::gui::PHYS_OFFSET };
+    unsafe {
+        let root = &mut *((offset + cr3) as *mut PageTable);
+        let l3 = &mut *((offset + root[0].addr().as_u64()) as *mut PageTable);
+        if !l3[1].flags().contains(PageTableFlags::PRESENT) { return; }
+        let l2_phys = l3[1].addr();
+        let l2 = &mut *((offset + l2_phys.as_u64()) as *mut PageTable);
+        for entry in l2.iter_mut() {
+            if entry.flags().contains(PageTableFlags::PRESENT) && !entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                let table_phys = entry.addr();
+                let l1 = &*((offset + table_phys.as_u64()) as *const PageTable);
+                if l1.iter().all(|e| e.is_unused()) {
+                    entry.set_unused();
+                    user_free_frame(PhysFrame::containing_address(table_phys));
+                }
+            }
+        }
+        if l2.iter().all(|e| e.is_unused()) {
+            l3[1].set_unused();
+            user_free_frame(PhysFrame::containing_address(l2_phys));
+        }
+    }
+}
+
+/// Reclaim a stopped process's private tables and owned code/stack pages.
+/// BIT_9 marks pages allocated by map_user_page_in_cr3; external DMA/surface
+/// backing is managed by its owner and must not be freed by this walk.
+pub fn destroy_user_address_space(cr3: u64) -> Result<(), &'static str> {
+    use x86_64::registers::control::Cr3;
+    if cr3 == 0 || Some(cr3) == crate::task::process::shared_kernel_cr3()
+        || Cr3::read().0.start_address().as_u64() == cr3 {
+        return Err("Cannot destroy the active or shared address space");
+    }
+    let offset = unsafe { crate::gui::PHYS_OFFSET };
+    unsafe {
+        let root = &mut *((offset + cr3) as *mut PageTable);
+        let l3_phys = root[0].addr();
+        let l3 = &mut *((offset + l3_phys.as_u64()) as *mut PageTable);
+        if l3[1].flags().contains(PageTableFlags::PRESENT) {
+            let l2_phys = l3[1].addr();
+            let l2 = &mut *((offset + l2_phys.as_u64()) as *mut PageTable);
+            for e2 in l2.iter_mut() {
+                if !e2.flags().contains(PageTableFlags::PRESENT) { continue; }
+                if e2.flags().contains(PageTableFlags::HUGE_PAGE) {
+                    return Err("Unexpected huge page in private userspace");
+                }
+                let l1_phys = e2.addr();
+                let l1 = &mut *((offset + l1_phys.as_u64()) as *mut PageTable);
+                for e1 in l1.iter_mut() {
+                    if e1.flags().contains(PageTableFlags::PRESENT | PageTableFlags::BIT_9) {
+                        user_free_frame(PhysFrame::containing_address(e1.addr()));
+                    }
+                    e1.set_unused();
+                }
+                e2.set_unused();
+                user_free_frame(PhysFrame::containing_address(l1_phys));
+            }
+            l3[1].set_unused();
+            user_free_frame(PhysFrame::containing_address(l2_phys));
+        }
+        root[0].set_unused();
+        user_free_frame(PhysFrame::containing_address(l3_phys));
+        user_free_frame(PhysFrame::containing_address(PhysAddr::new(cr3)));
+    }
+    Ok(())
 }
 
 /// Map a freshly allocated user frame at `virt` in the *given* address space
 /// (`cr3` is a physical level-4 table address; `0` means the active/shared
 /// table). Returns the mapped virtual address on success.
 pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, &'static str> {
-    if !is_canonical(virt) || virt >= USER_ADDR_LIMIT {
+    if !is_canonical(virt) || virt < USER_ADDR_BASE || virt >= USER_ADDR_LIMIT {
         return Err("user mapping target outside user space");
     }
     let frame = user_alloc_frame().ok_or("no free user frames")?;
@@ -415,7 +489,7 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
     target[0].set_flags(curr_flags | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::PRESENT);
     let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
 
-    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::BIT_9;
     if writable {
         flags |= PageTableFlags::WRITABLE;
     }
@@ -429,14 +503,10 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
                 tlb.flush();
                 Ok(virt)
             }
-            Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
-                // If page is already present in shared table, update flags to match
-                if let Ok(pt) = mapper.update_flags(page, flags) {
-                    pt.flush();
-                }
-                Ok(virt)
+            Err(_) => {
+                user_free_frame(frame);
+                Err("user page already mapped or page-table allocation failed")
             }
-            Err(_) => Err("failed to map user page in cr3"),
         }
     }
 }
@@ -485,11 +555,97 @@ pub fn write_user_region_in_cr3(cr3: u64, virt: u64, bytes: &[u8], len: u64) {
 /// Convenience: map a `len`-sized user region (rounded up to whole pages) with
 /// fresh frames in the given address space. Returns the base virtual address.
 pub fn map_user_region_in_cr3(cr3: u64, virt: u64, len: u64, writable: bool) -> Result<u64, &'static str> {
-    let pages = ((len.max(1) + 4095) / 4096) as u64;
+    let end = virt.checked_add(len.max(1)).ok_or("User region overflow")?;
+    if virt < USER_ADDR_BASE || end > USER_ADDR_LIMIT { return Err("User region out of bounds"); }
+    let start = virt & !4095;
+    let pages = (end - start + 4095) / 4096;
     for i in 0..pages {
-        map_user_page_in_cr3(cr3, virt + i * 4096, writable)?;
+        if let Err(e) = map_user_page_in_cr3(cr3, start + i * 4096, writable) {
+            let offset = VirtAddr::new(unsafe { crate::gui::PHYS_OFFSET });
+            let target = if cr3 == 0 {
+                unsafe { active_level_4_table(offset) }
+            } else {
+                unsafe { &mut *((offset + cr3).as_mut_ptr::<PageTable>()) }
+            };
+            let mut mapper = unsafe { OffsetPageTable::new(target, offset) };
+            for j in 0..i {
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(start + j * 4096));
+                if let Ok((frame, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                    user_free_frame(frame);
+                }
+            }
+            drop(mapper);
+            if cr3 != 0 { prune_empty_user_tables(cr3); }
+            return Err(e);
+        }
     }
     Ok(virt)
+}
+
+// -----------------------------------------------------------------------------
+// Faz 37: Copy-on-Write (CoW) & Demand Paging Subsystem
+// -----------------------------------------------------------------------------
+
+static COW_PAGES: spin::Mutex<alloc::collections::BTreeMap<(u64, u64), PhysAddr>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Registers a virtual page as Copy-on-Write for a given CR3.
+pub fn register_cow_page(cr3: u64, virt: u64, original_phys: PhysAddr) {
+    let page_aligned = virt & !0xFFFu64;
+    COW_PAGES.lock().insert((cr3, page_aligned), original_phys);
+}
+
+/// Checks if a page fault at `virt` in `cr3` is an active CoW page.
+pub fn is_cow_page(cr3: u64, virt: u64) -> bool {
+    let page_aligned = virt & !0xFFFu64;
+    COW_PAGES.lock().contains_key(&(cr3, page_aligned))
+}
+
+/// Resolves a Copy-on-Write page fault: allocates a private frame, copies the content,
+/// remaps with WRITABLE, and removes from CoW tracking.
+pub fn handle_cow_fault(cr3: u64, fault_virt: u64) -> Result<(), &'static str> {
+    let page_aligned = fault_virt & !0xFFFu64;
+    let old_phys = {
+        let mut guard = COW_PAGES.lock();
+        guard.remove(&(cr3, page_aligned)).ok_or("Not a tracked CoW page")?
+    };
+
+    let new_frame = user_alloc_frame().ok_or("No physical memory for CoW duplication")?;
+    let phys_offset = unsafe { crate::gui::PHYS_OFFSET };
+
+    // Kopyalama: eski fiziksel sayfadan yeni fiziksel sayfaya kopyala
+    let src_ptr = (phys_offset + old_phys.as_u64()) as *const u8;
+    let dst_ptr = (phys_offset + new_frame.start_address().as_u64()) as *mut u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 4096);
+    }
+
+    // Yeni sayfayı WRITABLE olarak hedef CR3'e eşle
+    let target = if cr3 == 0 {
+        unsafe { active_level_4_table(VirtAddr::new(phys_offset)) }
+    } else {
+        let ptr = (VirtAddr::new(phys_offset) + PhysAddr::new(cr3).as_u64()).as_mut_ptr::<PageTable>();
+        unsafe { &mut *ptr }
+    };
+    let mut mapper = unsafe { OffsetPageTable::new(target, VirtAddr::new(phys_offset)) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_aligned));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+
+    unsafe {
+        // Eski eşlemeyi kaldır (unmap) ve yeni çerçeveyi eşle
+        if let Ok((_unmapped_frame, flush)) = mapper.unmap(page) {
+            flush.flush();
+        }
+        let parent = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+        match mapper.map_to_with_table_flags(page, new_frame, flags, parent, &mut UserFrameAllocatorAdapter) {
+            Ok(tlb) => {
+                tlb.flush();
+                crate::smp::tlb_shootdown(page_aligned, 1);
+                Ok(())
+            }
+            Err(_) => Err("Failed to remap CoW page"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

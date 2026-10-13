@@ -48,28 +48,30 @@ impl Dock {
             let is_hovered = hovered_dock_tab == Some(idx);
 
             let tab_bg = if is_focused {
-                0x002563EB // Vibrant Blue
+                active_theme.titlebar_active
             } else if win.state == WindowState::Minimized {
-                if is_hovered { 0x001E293B } else { 0x000F172A }
+                if is_hovered { active_theme.panel_background } else { active_theme.dock_background }
             } else if is_hovered {
-                0x00334155
+                active_theme.panel_background
             } else {
-                0x001E293B
+                active_theme.window_inactive
             };
 
             let tab_fg = if is_focused {
-                0x00FFFFFF
+                active_theme.text_color
             } else if win.state == WindowState::Minimized {
-                0x0064748B
+                active_theme.text_muted
             } else {
-                0x00E2E8F0
+                active_theme.text_color
             };
 
-            // Sekme arkaplanı ve çerçevesi
+            // Sekme arkaplanı ve çerçevesi (Modern Pill/Kapsül rozet stili)
             crate::gui::draw_rect(tab_x, 2, 88, 22, tab_bg);
-            let border_col = if is_focused { 0x0060A5FA } else { 0x00334155 };
+            let border_col = if is_focused { active_theme.accent_color } else { active_theme.border_color };
             crate::gui::draw_rect(tab_x, 2, 88, 1, border_col);
             crate::gui::draw_rect(tab_x, 23, 88, 1, border_col);
+            crate::gui::draw_rect(tab_x, 2, 1, 22, border_col);
+            crate::gui::draw_rect(tab_x + 87, 2, 1, 22, border_col);
 
             // Dikey ortalanmış 16x16 HD ikon ve başlık metni
             crate::gui::draw_icon_glyph(tab_x + 5, 5, win.icon, tab_fg, tab_bg);
@@ -78,9 +80,9 @@ impl Dock {
 
             // Aktif göstergesi
             if is_focused {
-                crate::gui::draw_rect(tab_x + 36, 21, 16, 2, 0x0060A5FA);
+                crate::gui::draw_rect(tab_x + 32, 21, 24, 2, active_theme.accent_color);
             } else if win.state != WindowState::Minimized {
-                crate::gui::draw_rect(tab_x + 40, 22, 8, 1, 0x0094A3B8);
+                crate::gui::draw_rect(tab_x + 38, 22, 12, 1, active_theme.text_muted);
             }
 
             tab_x += 92;
@@ -89,8 +91,12 @@ impl Dock {
         // 4. En Sağ Üst: Saat, Sistem Süresi ve Ağ/Bellek Bilgisi
         let hud_w = 206u16;
         let hud_x = screen_w.saturating_sub(hud_w + 4);
-        crate::gui::draw_rect(hud_x, 2, hud_w, 22, 0x001E293B);
-        crate::gui::draw_rect(hud_x, 2, hud_w, 1, 0x00334155);
+        let hud_bg = active_theme.panel_background;
+        crate::gui::draw_rect(hud_x, 2, hud_w, 22, hud_bg);
+        crate::gui::draw_rect(hud_x, 2, hud_w, 1, active_theme.border_color);
+        crate::gui::draw_rect(hud_x, 23, hud_w, 1, active_theme.border_color);
+        crate::gui::draw_rect(hud_x, 2, 1, 22, active_theme.border_color);
+        crate::gui::draw_rect(hud_x + hud_w - 1, 2, 1, 22, active_theme.border_color);
 
         // HD Ağ İkonu (Ethernet / Wi-Fi / Bağlantı Yok)
         let is_connected = NETWORK_MANAGER.lock().state != NetworkState::Disconnected;
@@ -99,13 +105,13 @@ impl Dock {
 
         // Ağ etiketi
         let net_lbl = if is_connected { "Online" } else { "Offline" };
-        let net_col = if is_connected { 0x0034D399 } else { 0x0094A3B8 };
-        crate::gui::draw_string(hud_x + 24, 7, net_lbl, net_col, 0x001E293B);
+        let net_col = if is_connected { 0x0034D399 } else { active_theme.text_muted };
+        crate::gui::draw_string(hud_x + 24, 7, net_lbl, net_col, hud_bg);
 
-        // Bellek
+        // Bellek (Pill Badge Ayracı ile)
         let (used_mem, _) = crate::memory::get_memory_stats();
         let mem_str = alloc::format!("{}M", (used_mem / 1048576).max(1));
-        crate::gui::draw_string(hud_x + 76, 7, &mem_str, 0x0038BDF8, 0x001E293B);
+        crate::gui::draw_string(hud_x + 76, 7, &mem_str, active_theme.accent_color, hud_bg);
 
         // Saat / Süre (Uptime) Kutusu
         let ticks = crate::interrupts::get_tick();
@@ -114,8 +120,11 @@ impl Dock {
         let s = seconds % 60;
         let time_str = alloc::format!("{:02}:{:02}s", mins, s);
 
-        crate::gui::draw_rect(hud_x + 110, 3, 92, 20, 0x000F172A);
-        crate::icons::render_icon_16(hud_x + 114, 5, crate::app_registry::AppIcon::SysMon, 0x000F172A);
-        crate::gui::draw_string(hud_x + 134, 7, &time_str, 0x00F8FAFC, 0x000F172A);
+        let clock_bg = active_theme.dock_background;
+        crate::gui::draw_rect(hud_x + 110, 3, 92, 20, clock_bg);
+        crate::gui::draw_rect(hud_x + 110, 3, 92, 1, active_theme.border_color);
+        crate::gui::draw_rect(hud_x + 110, 22, 92, 1, active_theme.border_color);
+        crate::icons::render_icon_16(hud_x + 114, 5, crate::app_registry::AppIcon::SysMon, clock_bg);
+        crate::gui::draw_string(hud_x + 134, 7, &time_str, active_theme.text_color, clock_bg);
     }
 }

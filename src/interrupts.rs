@@ -373,6 +373,19 @@ extern "x86-interrupt" fn page_fault_handler(
 
     // Distinguish user vs kernel faults using the saved code-segment RPL.
     if fault_from_user(&stack) {
+        // Faz 37: Copy-on-Write (CoW) / Demand Paging kontrolü.
+        // Hata yazma erişimi (CAUSED_BY_WRITE) ve sayfa mevcut (PROTECTION_VIOLATION) ise CoW kontrol et.
+        if error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) {
+            let (frame, _) = x86_64::registers::control::Cr3::read();
+            let current_cr3 = frame.start_address().as_u64();
+            if crate::memory::is_cow_page(current_cr3, addr) {
+                if crate::memory::handle_cow_fault(current_cr3, addr).is_ok() {
+                    // CoW çözüldü, kullanıcı alanındaki yazma talimatına geri dön!
+                    return;
+                }
+            }
+        }
+
         // User fault: the process touched memory it is not allowed to. Recover
         // it under the process model. `recover_user_fault` diverges.
         recover_user_fault(&stack, addr, &alloc::format!("err={:?}", error_code));

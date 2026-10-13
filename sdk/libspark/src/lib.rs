@@ -15,14 +15,17 @@ pub const SYS_EXIT: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_WRITE: u64 = 4;
-pub const SYS_EXEC: u64 = 7;
-pub const SYS_WAITPID: u64 = 8;
+pub const SYS_LSEEK: u64 = 8;
 pub const SYS_YIELD: u64 = 9;
 
 pub const SYS_SOCKET: u64 = 10;
 pub const SYS_CONNECT: u64 = 11;
 pub const SYS_SEND: u64 = 12;
 pub const SYS_RECV: u64 = 13;
+
+pub const SYS_FORK: u64 = 14;
+pub const SYS_EXEC: u64 = 15;
+pub const SYS_WAITPID: u64 = 16;
 
 pub const SYS_IPC_SEND: u64 = 20;
 pub const SYS_IPC_RECV: u64 = 21;
@@ -43,6 +46,13 @@ pub const SYS_MOVE_WINDOW: u64 = 36;
 pub const SYS_MINIMIZE_WINDOW: u64 = 37;
 pub const SYS_RESTORE_WINDOW: u64 = 38;
 pub const SYS_POLL_EVENT: u64 = 39;
+pub const SYS_SETAFFINITY: u64 = 40;
+pub const SYS_GETAFFINITY: u64 = 41;
+pub const SYS_MKDIR: u64 = 42;
+pub const SYS_STAT: u64 = 43;
+pub const SYS_KILL: u64 = 44;
+pub const SYS_SIGACTION: u64 = 45;
+pub const SYS_SIGPROCMASK: u64 = 46;
 
 // -----------------------------------------------------------------------------
 // Standard Error Codes
@@ -135,6 +145,22 @@ pub unsafe fn raw_syscall4(n: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     ret
 }
 
+#[inline(always)]
+pub unsafe fn raw_syscall5(n: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    let ret: u64;
+    core::arch::asm!(
+        "int 0x80",
+        inout("rax") n => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        options(nostack)
+    );
+    ret
+}
+
 // -----------------------------------------------------------------------------
 // Process API
 // -----------------------------------------------------------------------------
@@ -160,6 +186,36 @@ pub mod process {
         let ret = unsafe { raw_syscall1(SYS_WAITPID, pid) as i64 };
         if ret >= 0 {
             Ok(ret as u64)
+        } else {
+            Err(ErrorCode::from_i64(ret))
+        }
+    }
+
+    /// Hedef sürece POSIX sinyali gönderir
+    pub fn kill(pid: u64, sig: u32) -> Result<(), ErrorCode> {
+        let ret = unsafe { raw_syscall2(SYS_KILL, pid, sig as u64) as i64 };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(ErrorCode::from_i64(ret))
+        }
+    }
+
+    /// Belirtilen sinyal için kullanıcı alanı işleyici (handler) kaydeder
+    pub fn signal(sig: u32, handler: extern "C" fn(u32)) -> Result<(), ErrorCode> {
+        let ret = unsafe { raw_syscall2(SYS_SIGACTION, sig as u64, handler as usize as u64) as i64 };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(ErrorCode::from_i64(ret))
+        }
+    }
+
+    /// Sürecin sinyal maskesini ayarlar
+    pub fn sigprocmask(how: u32, mask: u32) -> Result<u32, ErrorCode> {
+        let ret = unsafe { raw_syscall2(SYS_SIGPROCMASK, how as u64, mask as u64) as i64 };
+        if ret >= 0 {
+            Ok(ret as u32)
         } else {
             Err(ErrorCode::from_i64(ret))
         }
@@ -217,6 +273,53 @@ pub mod fd {
             Err(ErrorCode::from_i64(ret))
         }
     }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct FileStat {
+        pub st_size: u64,
+        pub st_mode: u32,
+        pub st_ino: u32,
+        pub st_dev: u32,
+        pub _reserved: [u8; 12],
+    }
+
+    impl FileStat {
+        pub fn is_dir(&self) -> bool {
+            (self.st_mode & 0x4000) != 0
+        }
+
+        pub fn is_file(&self) -> bool {
+            (self.st_mode & 0x8000) != 0
+        }
+    }
+
+    /// Yeni bir dizin oluşturur
+    pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
+        let ret = unsafe { raw_syscall1(SYS_MKDIR, path.as_ptr() as u64) as i64 };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(ErrorCode::from_i64(ret))
+        }
+    }
+
+    /// Dosya veya dizin durumunu ve boyutunu sorgular
+    pub fn stat(path: &str) -> Result<FileStat, ErrorCode> {
+        let mut stat_buf = FileStat::default();
+        let ret = unsafe {
+            raw_syscall2(
+                SYS_STAT,
+                path.as_ptr() as u64,
+                &mut stat_buf as *mut FileStat as u64,
+            ) as i64
+        };
+        if ret == 0 {
+            Ok(stat_buf)
+        } else {
+            Err(ErrorCode::from_i64(ret))
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -249,6 +352,16 @@ pub mod ipc {
     /// IPC uç noktasından non-blocking mesaj alır
     pub fn try_recv(ep_id: u32, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let ret = unsafe { raw_syscall3(SYS_IPC_TRY_RECV, ep_id as u64, buf.as_mut_ptr() as u64, buf.len() as u64) as i64 };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(ErrorCode::from_i64(ret))
+        }
+    }
+
+    /// IPC uç noktasından blocking (çekirdek seviyesinde uyutan) mesaj alır (TD-MED-2)
+    pub fn recv(ep_id: u32, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        let ret = unsafe { raw_syscall5(SYS_IPC_RECV, ep_id as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as i64 };
         if ret >= 0 {
             Ok(ret as usize)
         } else {
@@ -580,13 +693,18 @@ pub mod event {
         }
     }
 
-    /// Olay gelene kadar bekler (Yield tabanlı döngü)
+    /// Olay gelene kadar çekirdek seviyesinde bekler (Blocking IPC - TD-MED-2)
     pub fn next(ep_id: u32) -> InputEvent {
+        let mut buf = [0u8; 32];
         loop {
-            if let Some(ev) = poll(ep_id) {
-                return ev;
+            match ipc::recv(ep_id, &mut buf) {
+                Ok(len) if len >= 32 => {
+                    return unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const InputEvent) };
+                }
+                _ => {
+                    process::yield_cpu();
+                }
             }
-            process::yield_cpu();
         }
     }
 }

@@ -116,7 +116,8 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
     })?;
 
     // 3. Allocate fresh CR3 and map ELF segments and stack
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for process CR3")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
 
     for seg in &elf.segments {
         let is_writable = (seg.flags & crate::elf::PF_W) != 0;
@@ -135,11 +136,12 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
         app.name,
         actual_entry,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
     );
+    let pending = crate::task::process::PendingProcess::new(pid);
 
     // 5. Create Surface with correct owner_pid
     let surf_id = crate::surface::create_surface_for_pid(pid, app.default_w, app.default_h)?;
@@ -173,27 +175,22 @@ pub fn spawn_registered_app(app_id: u8) -> Result<u64, &'static str> {
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window)",
         app.name, pid, actual_entry, surf_id);
 
+    pending.commit();
     Ok(pid)
 }
 
 /// Re-renders the application content to its surface matching the new window width and height
 pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, width: u32, height: u32) {
-    let surf_ptr = {
-        let mut reg = crate::surface::SURFACE_REGISTRY.write();
-        if let Some(surf) = reg.iter_mut().find(|s| s.surface_id == surface_id || s.owner_pid == owner_pid) {
-            surf.width = width.min(crate::surface::MAX_SURFACE_WIDTH);
-            surf.height = height.min(crate::surface::MAX_SURFACE_HEIGHT);
-            unsafe { (crate::gui::PHYS_OFFSET + surf.shmem_phys_addr) as *mut u32 }
-        } else {
-            return;
-        }
+    let (surf_ptr, render_w, render_h) = match crate::surface::get_surface_render_target(surface_id, owner_pid, width, height) {
+        Some(target) => target,
+        None => return,
     };
 
     // 1. Files.app
     {
         let mut files = crate::files_app::FILES_INSTANCES.lock();
         if let Some(st) = files.get_mut(&window_id) {
-            st.render_to_surface(surf_ptr, width, height);
+            st.render_to_surface(surf_ptr, render_w, render_h);
             return;
         }
     }
@@ -201,7 +198,7 @@ pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, wid
     {
         let editors = crate::editor_app::EDITOR_INSTANCES.lock();
         if let Some(st) = editors.get(&window_id) {
-            st.render_to_surface(surf_ptr, width, height);
+            st.render_to_surface(surf_ptr, render_w, render_h);
             return;
         }
     }
@@ -209,7 +206,7 @@ pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, wid
     {
         let mut browsers = crate::browser_app::BROWSER_INSTANCES.lock();
         if let Some(st) = browsers.get_mut(&window_id) {
-            st.render_to_surface(surf_ptr, width, height);
+            st.render_to_surface(surf_ptr, render_w, render_h);
             return;
         }
     }
@@ -217,7 +214,7 @@ pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, wid
     {
         let taskmgrs = crate::taskmgr_app::TASKMGR_INSTANCES.lock();
         if let Some(st) = taskmgrs.get(&window_id) {
-            st.render_to_surface(surf_ptr, width, height);
+            st.render_to_surface(surf_ptr, render_w, render_h);
             return;
         }
     }
@@ -225,7 +222,7 @@ pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, wid
     {
         let settings = crate::settings_app::SETTINGS_INSTANCES.lock();
         if let Some(st) = settings.get(&window_id) {
-            st.render_to_surface(surf_ptr, width, height);
+            st.render_to_surface(surf_ptr, render_w, render_h);
             return;
         }
     }
@@ -233,9 +230,9 @@ pub fn rerender_app_surface(window_id: u64, surface_id: u64, owner_pid: u64, wid
     {
         let mut terminals = crate::terminal_app::TERMINAL_INSTANCES.lock();
         if let Some(st) = terminals.get_mut(&window_id) {
-            st.width = width;
-            st.height = height;
-            st.render_to_surface(surf_ptr, width, height);
+            st.width = render_w;
+            st.height = render_h;
+            st.render_to_surface(surf_ptr, render_w, render_h);
             return;
         }
     }

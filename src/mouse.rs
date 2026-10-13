@@ -128,14 +128,15 @@ pub fn handle_interrupt() {
             let left_click = (state.packet[0] & 1) != 0;
             MOUSE_LEFT_CLICK.store(left_click, Ordering::Relaxed);
             
-            let mut x = MOUSE_X.load(Ordering::Relaxed) as i16 + dx;
-            let mut y = MOUSE_Y.load(Ordering::Relaxed) as i16 + dy;
+            let x = MOUSE_X.load(Ordering::Relaxed) as i16 + dx;
+            let y = MOUSE_Y.load(Ordering::Relaxed) as i16 + dy;
             
             let max_w = unsafe { crate::gui::VESA.width };
             let max_h = unsafe { crate::gui::VESA.height };
             crate::cursor::update_mouse_input(x, y, left_click, max_w, max_h);
             let cstate = crate::cursor::get_cursor_state();
             
+            crate::perf::mouse_irq();
             MOUSE_X.store(cstate.x, Ordering::Relaxed);
             MOUSE_Y.store(cstate.y, Ordering::Relaxed);
         }

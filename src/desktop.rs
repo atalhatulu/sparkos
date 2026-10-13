@@ -100,10 +100,22 @@ impl DesktopEnvironment {
 
         crate::gui::draw_background(start_col, end_col);
 
-        // 2. Render Desktop Icons
+        // 2. Render Desktop Icons (Yalnızca CLIP_RECT ile kesişen simgeleri çiz)
+        let clip = unsafe { crate::gui::CLIP_RECT };
         for icon in &self.icons {
             let (ix, iy) = icon.position;
             if ix + 60 >= screen_w || iy + 65 >= screen_h { continue; }
+
+            // Damage Kırpma Optimizasyonu: Hasar bölgesinin dışındaki simgeleri atla
+            if let Some((cx, cy, cw, ch)) = clip {
+                let icon_right = ix + 64;
+                let icon_bottom = iy + 64;
+                let clip_right = cx + cw;
+                let clip_bottom = cy + ch;
+                if icon_right < cx || ix > clip_right || icon_bottom < cy || iy > clip_bottom {
+                    continue;
+                }
+            }
 
             let is_selected = self.selected_icon_id == Some(icon.id);
             if is_selected {
@@ -126,31 +138,46 @@ impl DesktopEnvironment {
             crate::gui::draw_string(text_center_x, iy + 40, icon.label, 0x00F8FAFC, 0x00000000);
         }
 
-        // 3. Desktop Resource Widget (Top-Right HUD)
-        let (used_mem, total_mem) = crate::memory::get_memory_stats();
-        let used_mb = (used_mem / (1024 * 1024)).max(1);
-        let total_mb = total_mem / (1024 * 1024);
-
+        // 3. Desktop Resource Widget (Top-Right HUD - Yalnızca CLIP_RECT ile kesişiyorsa çiz)
         let widget_x = screen_w.saturating_sub(184);
         let widget_y = 36u16;
+        let widget_w = 172u16;
+        let widget_h = 70u16;
 
-        crate::gui::draw_rect_alpha(widget_x, widget_y, 172, 70, 0x000F172A, 200);
-        crate::gui::draw_rect(widget_x, widget_y, 172, 1, 0x00334155);
-        crate::gui::draw_rect(widget_x, widget_y, 1, 70, 0x00334155);
-        crate::gui::draw_rect(widget_x + 171, widget_y, 1, 70, 0x00334155);
-        crate::gui::draw_rect(widget_x, widget_y + 69, 172, 1, 0x00334155);
+        let should_draw_widget = match clip {
+            Some((cx, cy, cw, ch)) => {
+                let w_right = widget_x + widget_w;
+                let w_bottom = widget_y + widget_h;
+                let c_right = cx + cw;
+                let c_bottom = cy + ch;
+                !(w_right < cx || widget_x > c_right || w_bottom < cy || widget_y > c_bottom)
+            }
+            None => true,
+        };
 
-        let proc_count = crate::task::process::get_system_metrics_snapshot().len();
+        if should_draw_widget {
+            let (used_mem, total_mem) = crate::memory::get_memory_stats();
+            let used_mb = (used_mem / (1024 * 1024)).max(1);
+            let total_mb = total_mem / (1024 * 1024);
 
-        let cpu_str = alloc::format!("CPU  {}% (PIDs: {})", (proc_count * 3).min(99), proc_count);
-        let ram_str = alloc::format!("RAM  {} / {} MB", used_mb, total_mb);
-        let disk_str = "DISK 12 / 64 MB";
-        let gpu_str = "GPU  N/A";
+            crate::gui::draw_rect_alpha(widget_x, widget_y, widget_w, widget_h, active_theme.dock_background, 210);
+            crate::gui::draw_rect(widget_x, widget_y, widget_w, 1, active_theme.border_color);
+            crate::gui::draw_rect(widget_x, widget_y, 1, widget_h, active_theme.border_color);
+            crate::gui::draw_rect(widget_x + widget_w - 1, widget_y, 1, widget_h, active_theme.border_color);
+            crate::gui::draw_rect(widget_x, widget_y + widget_h - 1, widget_w, 1, active_theme.border_color);
 
-        crate::gui::draw_string(widget_x + 8, widget_y + 6, &cpu_str, 0x0038BDF8, 0x00000000);
-        crate::gui::draw_string(widget_x + 8, widget_y + 21, &ram_str, 0x0034D399, 0x00000000);
-        crate::gui::draw_string(widget_x + 8, widget_y + 36, disk_str, 0x00CBD5E1, 0x00000000);
-        crate::gui::draw_string(widget_x + 8, widget_y + 51, gpu_str, 0x0064748B, 0x00000000);
+            let proc_count = crate::task::process::get_system_metrics_snapshot().len();
+
+            let cpu_str = alloc::format!("CPU  {}% (PIDs: {})", (proc_count * 3).min(99), proc_count);
+            let ram_str = alloc::format!("RAM  {} / {} MB", used_mb, total_mb);
+            let disk_str = "DISK 12 / 64 MB";
+            let gpu_str = "GPU  N/A";
+
+            crate::gui::draw_string(widget_x + 8, widget_y + 6, &cpu_str, active_theme.accent_color, 0x00000000);
+            crate::gui::draw_string(widget_x + 8, widget_y + 21, &ram_str, 0x0034D399, 0x00000000);
+            crate::gui::draw_string(widget_x + 8, widget_y + 36, disk_str, active_theme.text_color, 0x00000000);
+            crate::gui::draw_string(widget_x + 8, widget_y + 51, gpu_str, active_theme.text_muted, 0x00000000);
+        }
     }
 
     /// Handles mouse clicks on desktop: single-click selects, double-click activates launcher action

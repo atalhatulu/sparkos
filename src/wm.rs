@@ -116,6 +116,7 @@ pub struct WindowManager {
     pub snap_preview: SnapPreview,
     pub dragging_window: Option<(u64, i32, i32)>,
     pub resizing_window: Option<(u64, ResizeEdge, i32, i32, i32, i32, u32, u32)>,
+    pending_resize_render: Option<u64>,
     pub hovered_target: Option<HoverTarget>,
     pub hovered_dock_tab: Option<usize>,
     pub launcher_open: bool,
@@ -136,6 +137,7 @@ impl WindowManager {
             snap_preview: SnapPreview::None,
             dragging_window: None,
             resizing_window: None,
+            pending_resize_render: None,
             hovered_target: None,
             hovered_dock_tab: None,
             launcher_open: false,
@@ -146,6 +148,12 @@ impl WindowManager {
         }
     }
 
+    pub fn mark_launcher_damage(&mut self) {
+        let layout = crate::launcher::LauncherLayout::new();
+        self.mark_damage(layout.x, layout.y, layout.width, layout.height);
+        self.mark_damage(4, 0, 92, DOCK_HEIGHT as u32);
+    }
+
     pub fn launcher_nav_up(&mut self) {
         let total = crate::app_registry::REGISTERED_APPS.len();
         if total > 0 {
@@ -154,9 +162,7 @@ impl WindowManager {
             } else {
                 self.launcher_selected -= 1;
             }
-            let screen_h = unsafe { crate::gui::VESA.height as i32 };
-            let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
-            self.mark_damage(4, (dock_y - 250).max(0), 164, 260);
+            self.mark_launcher_damage();
         }
     }
 
@@ -164,9 +170,7 @@ impl WindowManager {
         let total = crate::app_registry::REGISTERED_APPS.len();
         if total > 0 {
             self.launcher_selected = (self.launcher_selected + 1) % total;
-            let screen_h = unsafe { crate::gui::VESA.height as i32 };
-            let dock_y = screen_h.saturating_sub(DOCK_HEIGHT as i32);
-            self.mark_damage(4, (dock_y - 250).max(0), 164, 260);
+            self.mark_launcher_damage();
         }
     }
 
@@ -239,6 +243,13 @@ impl WindowManager {
 
         // Reset previous focus
         for w in self.windows.iter_mut() {
+            if w.focused {
+                // Only decoration changes when focus is lost; avoid repainting the client.
+                self.damage_tracker.add_bounds(w.x, w.y, w.width, 20);
+                self.damage_tracker.add_bounds(w.x, w.y + 20, 1, w.height);
+                self.damage_tracker.add_bounds(w.x + w.width as i32 - 1, w.y + 20, 1, w.height);
+                self.damage_tracker.add_bounds(w.x, w.y + w.height as i32 + 19, w.width, 1);
+            }
             w.focused = false;
         }
 
@@ -342,9 +353,6 @@ impl WindowManager {
 
     /// Minimizes a window, hiding it, recording previous state and transferring focus. Enforces caller ownership.
     pub fn minimize_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
-        let max_w = unsafe { crate::gui::VESA.width as u32 };
-        let max_h = unsafe { crate::gui::VESA.height as u32 };
-
         let (win_x, win_y, win_w, win_h) = {
             let win = self.windows.iter_mut().find(|w| w.window_id == window_id)
                 .ok_or(WmError::NotFound)?;
@@ -377,6 +385,7 @@ impl WindowManager {
             if let Some((fx, fy, fw, fh)) = focused_geom {
                 self.mark_window_damage(fx, fy, fw, fh);
             }
+            if let Some(fid) = self.focused_window { self.touch_mru(fid); }
         }
         Ok(())
     }
@@ -615,27 +624,19 @@ impl WindowManager {
         self.clean_mru();
     }
 
-    /// Cleans up nonexistent or closed window IDs from MRU list.
+    /// Cleans up nonexistent or closed window IDs from MRU list without heap allocations.
     pub fn clean_mru(&mut self) {
-        let existing: Vec<u64> = self.windows.iter().filter(|w| w.state != WindowState::Closed).map(|w| w.window_id).collect();
-        self.mru_list.retain(|id| existing.contains(id));
+        self.mru_list.retain(|&id| self.windows.iter().any(|w| w.window_id == id && w.state != WindowState::Closed));
     }
 
     /// Handles Alt+Tab keypress: activates switcher HUD or advances selection.
     pub fn alt_tab_press(&mut self, is_shift: bool) {
         self.clean_mru();
-        if self.windows.is_empty() {
+        if self.mru_list.is_empty() {
             return;
         }
 
-        let candidates: Vec<u64> = self.mru_list.iter()
-            .copied()
-            .filter(|&id| self.windows.iter().any(|w| w.window_id == id && w.state != WindowState::Closed))
-            .collect();
-
-        if candidates.is_empty() {
-            return;
-        }
+        let candidates = self.mru_list.clone();
 
         let sw = unsafe { crate::gui::VESA.width as i32 };
         let sh = unsafe { crate::gui::VESA.height as i32 };
@@ -723,18 +724,9 @@ impl WindowManager {
     /// Cycles through open windows via Alt-Tab, restoring minimized windows and raising target to top
     pub fn alt_tab_cycle(&mut self) -> Option<u64> {
         self.clean_mru();
-        if self.windows.is_empty() { return None; }
+        if self.mru_list.is_empty() { return None; }
 
-        let candidates: Vec<u64> = self.mru_list.iter()
-            .copied()
-            .filter(|&id| self.windows.iter().any(|w| w.window_id == id && w.state != WindowState::Closed))
-            .collect();
-
-        if candidates.is_empty() {
-            return None;
-        }
-
-        let target_id = if candidates.len() >= 2 { candidates[1] } else { candidates[0] };
+        let target_id = if self.mru_list.len() >= 2 { self.mru_list[1] } else { self.mru_list[0] };
         if let Some(win) = self.windows.iter().find(|w| w.window_id == target_id) {
             let owner = win.owner_pid;
             if win.state == WindowState::Minimized {
@@ -748,11 +740,36 @@ impl WindowManager {
         self.focused_window
     }
 
+    /// User-requested close: repeated requests never bypass unsaved confirmation.
+    pub fn request_close_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
+        let win = self.windows.iter().find(|w| w.window_id == window_id)
+            .ok_or(WmError::NotFound)?;
+        if win.owner_pid != caller_pid { return Err(WmError::PermissionDenied); }
+        let (x, y, width, height, sid) = (win.x, win.y, win.width, win.height, win.surface_id);
+        let needs_confirmation = {
+            let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
+            if let Some(editor) = editors.get_mut(&window_id) {
+                if editor.is_dirty {
+                    editor.show_unsaved_dialog = true;
+                    if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter()
+                        .find(|s| s.surface_id == sid && s.owner_pid == caller_pid) {
+                        let ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
+                        editor.render_to_surface(ptr, width, height);
+                    }
+                    true
+                } else { false }
+            } else { false }
+        };
+        if needs_confirmation {
+            self.mark_window_damage(x, y, width, height);
+            Ok(())
+        } else {
+            self.destroy_window(caller_pid, window_id)
+        }
+    }
+
     /// Destroys a window with strict ownership verification, surface reclamation, and process cleanup.
     pub fn destroy_window(&mut self, caller_pid: u64, window_id: u64) -> Result<(), WmError> {
-        let max_w = unsafe { crate::gui::VESA.width as u32 };
-        let max_h = unsafe { crate::gui::VESA.height as u32 };
-
         let idx = self.windows.iter().position(|w| w.window_id == window_id)
             .ok_or(WmError::NotFound)?;
 
@@ -766,6 +783,7 @@ impl WindowManager {
         let old_h = self.windows[idx].height;
         let surf_id = self.windows[idx].surface_id;
         self.windows.remove(idx);
+        if self.pending_resize_render == Some(window_id) { self.pending_resize_render = None; }
         self.mru_list.retain(|&id| id != window_id);
         self.alt_tab.candidates.retain(|&id| id != window_id);
         self.clean_mru();
@@ -786,20 +804,13 @@ impl WindowManager {
             if let Some((fx, fy, fw, fh)) = focused_geom {
                 self.mark_window_damage(fx, fy, fw, fh);
             }
+            if let Some(fid) = self.focused_window { self.touch_mru(fid); }
         }
 
-        // Clean up surface registry for this window and uncharge accounting
+        // Use the same unmap/free/accounting path as SYS_DESTROY_SURFACE.
         if surf_id != 0 {
-            let mut reg = crate::surface::SURFACE_REGISTRY.write();
-            if let Some(pos) = reg.iter().position(|s| s.surface_id == surf_id && s.owner_pid == caller_pid) {
-                let surf = reg.remove(pos);
-                drop(reg);
-
-                let mut sched = crate::task::process::SCHEDULER.lock();
-                if let Some(proc) = sched.get_process_mut(caller_pid) {
-                    proc.uncharge_memory(surf.shmem_size as u64);
-                    proc.decrement_surface_count();
-                }
+            if let Err(e) = crate::surface::destroy_surface_for_pid(caller_pid, surf_id) {
+                crate::serial_println!("[WM] Surface {} cleanup: {}", surf_id, e);
             }
         }
 
@@ -808,9 +819,21 @@ impl WindowManager {
         crate::files_app::cleanup_files_for_window(window_id);
         crate::editor_app::cleanup_editor_for_window(window_id);
         crate::browser_app::cleanup_browser_for_window(window_id);
+        crate::settings_app::cleanup_settings_for_window(window_id);
+        crate::taskmgr_app::cleanup_taskmgr_for_window(window_id);
 
         // Unregister window from process PCB, decrement window count, and check remaining windows
         let remaining_windows = self.windows.iter().any(|w| w.owner_pid == caller_pid);
+        // A process closing its own last window is still executing on its
+        // kernel stack. Leave its PCB/address space alive until SYS_EXIT.
+        let should_terminate = !remaining_windows
+            && crate::task::process::current_pid() != caller_pid
+            && crate::task::process::SCHEDULER.lock().get_process(caller_pid)
+                .map(|p| p.kind == crate::task::process::ProcessKind::UIBound).unwrap_or(false);
+        let can_purge = if should_terminate {
+            crate::surface::cleanup_surfaces_for_pid(caller_pid);
+            crate::task::process::release_process_address_space(caller_pid)
+        } else { false };
         {
             let mut sched = crate::task::process::SCHEDULER.lock();
             let mut need_purge = false;
@@ -819,7 +842,7 @@ impl WindowManager {
                 proc.owned_windows.retain(|&wid| wid != window_id);
 
                 // If process is UI-bound and has no remaining windows, mark it exited
-                if !remaining_windows && proc.kind == crate::task::process::ProcessKind::UIBound {
+                if can_purge {
                     proc.state = crate::task::process::ProcessState::Exited;
                     proc.exited = true;
                     proc.reaped = true;
@@ -833,6 +856,7 @@ impl WindowManager {
 
             if need_purge {
                 sched.purge_pid(caller_pid);
+                crate::task::PROCESS_LIST.lock().remove(&caller_pid);
             }
         }
 
@@ -901,6 +925,13 @@ impl WindowManager {
         let mut win = self.windows.remove(idx);
 
         for w in self.windows.iter_mut() {
+            if w.focused {
+                // Only decoration changes when focus is lost; avoid repainting the client.
+                self.damage_tracker.add_bounds(w.x, w.y, w.width, 20);
+                self.damage_tracker.add_bounds(w.x, w.y + 20, 1, w.height);
+                self.damage_tracker.add_bounds(w.x + w.width as i32 - 1, w.y + 20, 1, w.height);
+                self.damage_tracker.add_bounds(w.x, w.y + w.height as i32 + 19, w.width, 1);
+            }
             w.focused = false;
         }
 
@@ -948,16 +979,30 @@ impl WindowManager {
             if crate::gui::BACKBUFFER.is_null() { return; }
         }
 
-        let damage = match self.damage_tracker.take_damage() {
-            Some(d) => d,
-            None => return, // Zero damage: skip redraw completely
-        };
+        let screen_w = unsafe { crate::gui::VESA.width as u32 };
+        let screen_h = unsafe { crate::gui::VESA.height as u32 };
+        // Input only stores the latest geometry. Render at most once per frame.
+        if let Some(wid) = self.pending_resize_render.take() {
+            if let Some(win) = self.windows.iter().find(|w| w.window_id == wid) {
+                crate::app_registry::rerender_app_surface(wid, win.surface_id, win.owner_pid, win.width, win.height);
+                self.damage_tracker.add_bounds(win.x, win.y, win.width, win.height + 20);
+            }
+        }
+        let (regions, count) = self.damage_tracker.take_regions(screen_w, screen_h);
+        if count == 0 { return; }
+        let _timing = crate::perf::Span::new(crate::perf::Metric::Compose);
+        let mouse = crate::perf::take_pending_mouse();
+        for region in &regions[..count] {
+            self.composite_region(*region);
+        }
+        crate::perf::finish(crate::perf::Metric::MouseToPresent, mouse);
+    }
 
-        let screen_w = unsafe { crate::gui::VESA.width as u16 };
-        let screen_h = unsafe { crate::gui::VESA.height as u16 };
-        let clamped = damage.clamp_to_screen(screen_w as u32, screen_h as u32);
-        if clamped.is_empty() { return; }
-
+    fn composite_region(&self, clamped: crate::damage::DamageRegion) {
+        use core::sync::atomic::Ordering;
+        COMPOSITED_PIXELS.fetch_add(clamped.area(), Ordering::Relaxed);
+        let screen_w = unsafe { crate::gui::VESA.width };
+        let screen_h = unsafe { crate::gui::VESA.height };
         let is_full = clamped.x == 0 && clamped.y == 0 && clamped.width >= screen_w as u32 && clamped.height >= screen_h as u32;
 
         if is_full {
@@ -978,6 +1023,18 @@ impl WindowManager {
             if !win.visible || win.state == WindowState::Minimized {
                 continue;
             }
+
+            if win.state != WindowState::Fullscreen {
+                let left = win.x.max(0);
+                let top = win.y.max(0);
+                if left >= clamped.x + clamped.width as i32
+                    || top >= clamped.y + clamped.height as i32
+                    || left + win.width as i32 <= clamped.x
+                    || top + win.height as i32 + 20 <= clamped.y {
+                    continue;
+                }
+            }
+            COMPOSITED_WINDOWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
             let wx = win.x.max(0) as u16;
             let wy = win.y.max(0) as u16;
@@ -1014,7 +1071,9 @@ impl WindowManager {
                                 None => (0, 0, screen_w_usize, screen_h_usize),
                             };
 
-                            for r in 0..copy_h {
+                            let first_row = clip_y.saturating_sub(offset_y).min(copy_h);
+                            let end_row = (clip_y + clip_h).saturating_sub(offset_y).min(copy_h);
+                            for r in first_row..end_row {
                                 let dst_row = offset_y + r;
                                 if dst_row < clip_y || dst_row >= clip_y + clip_h {
                                     continue;
@@ -1041,6 +1100,10 @@ impl WindowManager {
 
             // 3a. Titlebar (20px high)
             crate::gui::draw_rect(wx, wy, ww, 20, title_bg);
+            if is_focused {
+                // Aktif pencere vurgu çizgisi (1px modern accent indicator)
+                crate::gui::draw_rect(wx, wy, ww, 1, active_theme.accent_color);
+            }
             
             // Draw App Icon & Title strictly from cached Window metadata (Dikey & Yatay Tam Ortalı)
             crate::gui::draw_icon_glyph(wx + 6, wy + 2, win.icon, title_fg, title_bg);
@@ -1054,36 +1117,45 @@ impl WindowManager {
                 ChromeButton::None
             };
 
-            // Minimize Button [—]
+            // Minimize Button [—] (Hitbox: wx + ww - 56 .. wx + ww - 40, wy + 2 .. wy + 18)
             if ww > 60 {
                 let min_x = wx + ww - 54;
-                let min_bg = if hovered_btn == ChromeButton::Minimize { 0x00475569 } else { active_theme.dock_background };
+                let min_bg = if hovered_btn == ChromeButton::Minimize { 0x00FBBF24 } else { 0x00D97706 };
                 crate::gui::draw_rect(min_x, wy + 3, 14, 14, min_bg);
-                crate::gui::draw_char(min_x + 4, wy + 5, '-', 0x00E2E8F0, min_bg);
+                crate::gui::draw_rect(min_x + 3, wy + 9, 8, 2, 0x000F172A);
             }
 
-            // Maximize Button [□]
+            // Maximize Button [□] (Hitbox: wx + ww - 38 .. wx + ww - 22, wy + 2 .. wy + 18)
             if ww > 40 {
                 let max_x = wx + ww - 36;
-                let max_bg = if hovered_btn == ChromeButton::Maximize { active_theme.accent_color } else { active_theme.dock_background };
+                let max_bg = if hovered_btn == ChromeButton::Maximize { 0x0034D399 } else { 0x00059669 };
                 crate::gui::draw_rect(max_x, wy + 3, 14, 14, max_bg);
-                let max_sym = if win.state == WindowState::Maximized { '^' } else { '+' };
-                crate::gui::draw_char(max_x + 4, wy + 5, max_sym, 0x00E2E8F0, max_bg);
+                if win.state == WindowState::Maximized {
+                    // Restore glyph (küçük çift kutu izi)
+                    crate::gui::draw_rect(max_x + 3, wy + 5, 6, 6, 0x000F172A);
+                    crate::gui::draw_rect(max_x + 5, wy + 7, 6, 6, 0x000F172A);
+                } else {
+                    // Maximize glyph (içi oyuk temiz kare)
+                    crate::gui::draw_rect(max_x + 3, wy + 4, 8, 8, 0x000F172A);
+                    crate::gui::draw_rect(max_x + 5, wy + 6, 4, 4, max_bg);
+                }
             }
 
-            // Close Button [×]
+            // Close Button [×] (Hitbox: wx + ww - 20 .. wx + ww - 4, wy + 2 .. wy + 18)
             if ww > 20 {
                 let close_x = wx + ww - 18;
-                let close_bg = if hovered_btn == ChromeButton::Close { active_theme.close_button_hover } else { 0x00DC2626 };
+                let close_bg = if hovered_btn == ChromeButton::Close { active_theme.close_button_hover } else { 0x00EF4444 };
                 crate::gui::draw_rect(close_x, wy + 3, 14, 14, close_bg);
                 crate::gui::draw_char(close_x + 4, wy + 5, 'x', 0x00FFFFFF, close_bg);
             }
 
-            // 3b. Client Area Background
-            crate::gui::draw_rect(wx, wy + 20, ww, wh, active_theme.window_active);
+            // 3b & 3c. Client Area & Surface Blit (Single lookup, skip fill if surface fully covers client)
+            let surface_opt = surf_reg.iter().find(|s| s.surface_id == win.surface_id);
+            if !surface_opt.map_or(false, |s| s.width >= win.width && s.height >= win.height) {
+                crate::gui::draw_rect(wx, wy + 20, ww, wh, active_theme.window_active);
+            }
 
-            // 3c. Blit shared-memory surface if present (1:1 Crisp Fast Row Copy - Zero Lag)
-            if let Some(surface) = surf_reg.iter().find(|s| s.surface_id == win.surface_id) {
+            if let Some(surface) = surface_opt {
                 let phys_addr = surface.shmem_phys_addr;
                 let src_ptr = unsafe { (crate::gui::PHYS_OFFSET + phys_addr) as *const u32 };
                 let surf_w = surface.width as usize;
@@ -1101,7 +1173,9 @@ impl WindowManager {
                             None => (0, 0, screen_w as usize, screen_h as usize),
                         };
 
-                        for r in 0..copy_h {
+                        let first_row = clip_y.saturating_sub((wy + 20) as usize).min(copy_h);
+                        let end_row = (clip_y + clip_h).saturating_sub((wy + 20) as usize).min(copy_h);
+                        for r in first_row..end_row {
                             let dst_row = (wy + 20) as usize + r;
                             if dst_row < clip_y || dst_row >= clip_y + clip_h {
                                 continue;
@@ -1268,33 +1342,33 @@ impl WindowManager {
 
         // 1. Check Launcher Dropdown Click (if open)
         if self.launcher_open {
-            let px = 4;
-            let pw = 164;
-            let total_apps = crate::app_registry::REGISTERED_APPS.len() as i32;
-            let ph = 34 + total_apps * 28 + 26;
-            let py = top_bar_h + 2;
+            let layout = crate::launcher::LauncherLayout::new();
+            let px = layout.x;
+            let py = layout.y;
+            let pw = layout.width as i32;
+            let ph = layout.height as i32;
 
             if mx >= px && mx < px + pw && my >= py && my < py + ph {
-                let mut cur_y = py + 28;
+                let mut cur_y = layout.item_start_y;
                 for app in crate::app_registry::REGISTERED_APPS.iter() {
-                    if my >= cur_y && my < cur_y + 24 {
+                    if my >= cur_y && my < cur_y + layout.item_height as i32 {
                         self.pending_spawn_app = Some(app.id);
                         self.launcher_open = false;
-                        self.mark_damage(px, py, pw as u32, ph as u32);
+                        self.mark_damage(px, py, layout.width, layout.height);
                         return None;
                     }
-                    cur_y += 28;
+                    cur_y += layout.item_spacing as i32;
                 }
                 // Close Menu button
-                if my >= cur_y && my < cur_y + 24 {
+                if my >= cur_y && my < cur_y + layout.close_btn_height as i32 {
                     self.launcher_open = false;
-                    self.mark_damage(px, py, pw as u32, ph as u32);
+                    self.mark_damage(px, py, layout.width, layout.height);
                     return None;
                 }
-            } else if !(mx >= 4 && mx <= 80 && my < top_bar_h) {
+            } else if !(mx >= 4 && mx <= 92 && my < top_bar_h) {
                 // Clicked outside launcher dropdown -> close launcher
                 self.launcher_open = false;
-                self.mark_damage(px, py, pw as u32, ph as u32);
+                self.mark_damage(px, py, layout.width, layout.height);
             }
         }
 
@@ -1406,21 +1480,7 @@ impl WindowManager {
             if mx >= wx && mx < wx + ww && my >= wy && my < wy + 20 {
                 // 1. Close button [×] (Rightmost: wx + ww - 20 .. wx + ww - 4)
                 if mx >= wx + ww - 20 && mx <= wx + ww - 4 && my >= wy + 2 && my <= wy + 18 {
-                    let mut editors = crate::editor_app::EDITOR_INSTANCES.lock();
-                    if let Some(editor_state) = editors.get_mut(&wid) {
-                        if editor_state.is_dirty {
-                            editor_state.show_unsaved_dialog = true;
-                            if let Some(surface) = crate::surface::SURFACE_REGISTRY.read().iter().find(|s| s.surface_id == win.surface_id || s.owner_pid == owner) {
-                                let surf_ptr = unsafe { (crate::gui::PHYS_OFFSET + surface.shmem_phys_addr) as *mut u32 };
-                                editor_state.render_to_surface(surf_ptr, win.width, win.height);
-                            }
-                            drop(editors);
-                            return None;
-                        }
-                    }
-                    drop(editors);
-
-                    let _ = self.destroy_window(owner, wid);
+                    let _ = self.request_close_window(owner, wid);
                     return None;
                 }
                 // 2. Maximize button [□] (Middle: wx + ww - 38 .. wx + ww - 22)
@@ -1524,8 +1584,11 @@ impl WindowManager {
         }
 
         if let Some((wid, ..)) = self.resizing_window.take() {
-            if let Some(win) = self.windows.iter().find(|w| w.window_id == wid) {
+            if self.pending_resize_render.take() == Some(wid) {
+              if let Some(win) = self.windows.iter().find(|w| w.window_id == wid) {
                 crate::app_registry::rerender_app_surface(wid, win.surface_id, win.owner_pid, win.width, win.height);
+                self.damage_tracker.add_bounds(win.x, win.y, win.width, win.height + 20);
+              }
             }
         }
         crate::cursor::set_cursor_type(crate::cursor::CursorType::Default);
@@ -1619,7 +1682,10 @@ impl WindowManager {
                 let min_box_y = old_y.min(win.y) - 4;
                 let max_box_w = (old_w.max(win.width)) + (old_x - win.x).abs() as u32 + 8;
                 let max_box_h = (old_h.max(win.height)) + (old_y - win.y).abs() as u32 + 28;
-                self.damage_tracker.add_bounds(min_box_x, min_box_y, max_box_w, max_box_h);
+                if (old_x, old_y, old_w, old_h) != (win.x, win.y, win.width, win.height) {
+                    self.pending_resize_render = Some(wid);
+                    self.damage_tracker.add_bounds(min_box_x, min_box_y, max_box_w, max_box_h);
+                }
                 win.state = WindowState::Normal;
                 win.normal_geom = (win.x, win.y, win.width, win.height);
             }
@@ -1857,26 +1923,88 @@ impl WindowManager {
         crate::cursor::set_cursor_type(cursor_type);
     }
 
-    /// Cleans up all windows owned by a terminating process and re-evaluates focus.
+    /// Cleans up all windows owned by a terminating process, cleans up transient WM states, and re-evaluates focus.
     pub fn cleanup_windows_for_pid(&mut self, pid: u64) {
-        let initial_count = self.windows.len();
-        self.windows.retain(|w| w.owner_pid != pid);
-        let cleaned = initial_count - self.windows.len();
+        let dead_windows: Vec<(u64, i32, i32, u32, u32, u64)> = self.windows.iter()
+            .filter(|w| w.owner_pid == pid)
+            .map(|w| (w.window_id, w.x, w.y, w.width, w.height, w.surface_id))
+            .collect();
 
-        if cleaned > 0 {
-            // Re-evaluate focus if previous focused window was destroyed
-            if let Some(fid) = self.focused_window {
-                if !self.windows.iter().any(|w| w.window_id == fid) {
-                    self.focused_window = self.windows.iter().rev().find(|w| w.visible).map(|w| w.window_id);
-                    if let Some(new_fid) = self.focused_window {
-                        if let Some(w) = self.windows.iter_mut().find(|w| w.window_id == new_fid) {
-                            w.focused = true;
-                        }
-                    }
+        if dead_windows.is_empty() {
+            return;
+        }
+
+        for &(wid, x, y, w, h, surf_id) in &dead_windows {
+            if self.pending_resize_render == Some(wid) { self.pending_resize_render = None; }
+            // 1. Mark damage for the removed window area
+            self.mark_window_damage(x, y, w, h);
+
+            // 2. Clean up transient interaction states
+            self.mru_list.retain(|&id| id != wid);
+            self.alt_tab.candidates.retain(|&id| id != wid);
+            if let Some((dwid, _, _)) = self.dragging_window {
+                if dwid == wid {
+                    self.dragging_window = None;
                 }
             }
-            crate::serial_println!("[WM] Cleaned up {} orphaned window(s) for terminating PID {}", cleaned, pid);
+            if let Some((rwid, _, _, _, _, _, _, _)) = self.resizing_window {
+                if rwid == wid {
+                    self.resizing_window = None;
+                }
+            }
+            if let Some(ref htarget) = self.hovered_target {
+                if htarget.window_id == wid {
+                    self.hovered_target = None;
+                }
+            }
+            if let Some((lwid, _)) = self.last_titlebar_click {
+                if lwid == wid {
+                    self.last_titlebar_click = None;
+                }
+            }
+
+            // 3. Clean up app instance registries
+            crate::terminal_app::cleanup_terminal_for_window(wid);
+            crate::files_app::cleanup_files_for_window(wid);
+            crate::editor_app::cleanup_editor_for_window(wid);
+            crate::browser_app::cleanup_browser_for_window(wid);
+            crate::settings_app::cleanup_settings_for_window(wid);
+            crate::taskmgr_app::cleanup_taskmgr_for_window(wid);
+
+            // 4. Destroy attached surface
+            if surf_id != 0 {
+                let _ = crate::surface::destroy_surface_for_pid(pid, surf_id);
+            }
         }
+
+        self.windows.retain(|w| w.owner_pid != pid);
+        self.clean_mru();
+        self.mark_top_bar_damage();
+
+        // 5. Transfer focus to topmost remaining visible window
+        let active_focus_dead = match self.focused_window {
+            Some(fid) => dead_windows.iter().any(|(wid, _, _, _, _, _)| *wid == fid),
+            None => true,
+        };
+
+        if active_focus_dead {
+            self.focused_window = self.windows.iter().rev()
+                .find(|w| w.visible && w.state != WindowState::Minimized)
+                .map(|w| w.window_id);
+            let mut focused_geom = None;
+            for w in self.windows.iter_mut() {
+                w.focused = Some(w.window_id) == self.focused_window;
+                if w.focused {
+                    focused_geom = Some((w.x, w.y, w.width, w.height));
+                }
+            }
+            if let Some((fx, fy, fw, fh)) = focused_geom {
+                self.mark_window_damage(fx, fy, fw, fh);
+            }
+            if let Some(fid) = self.focused_window { self.touch_mru(fid); }
+        }
+
+        crate::serial_println!("[WM] Cleaned up {} window(s) and transient state for PID {}", dead_windows.len(), pid);
     }
 }
 
@@ -1894,6 +2022,7 @@ pub const FRAME_INTERVAL_TICKS: u64 = 16; // ~16.67 ms (60 FPS)
 /// Only performs rendering if damage exists and at most once every ~16 ms.
 pub async fn compositor_task() {
     let mut last_render_tick = 0u64;
+    let mut first_frame = true;
 
     loop {
         if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1907,6 +2036,10 @@ pub async fn compositor_task() {
                     let cy = crate::mouse::MOUSE_Y.load(core::sync::atomic::Ordering::Relaxed);
                     wm.composite_desktop(cx as i32, cy as i32);
                     last_render_tick = now;
+                    if first_frame {
+                        first_frame = false;
+                        crate::serial_println!("[DESKTOP] First frame presented.");
+                    }
                 }
             }
         }
@@ -1914,3 +2047,7 @@ pub async fn compositor_task() {
         crate::task::yield_now().await;
     }
 }
+
+// Work counters, not FPS estimates: useful for deterministic compositor regressions.
+pub static COMPOSITED_PIXELS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static COMPOSITED_WINDOWS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
@@ -8,10 +8,10 @@ echo "                   SparkOS x86_64 Boot Launcher                 "
 echo "================================================================"
 
 echo "[1/3] SparkOS Kernel Derleniyor..."
-cargo bootimage 2>&1 | grep -v "^   Compiling\|^    Finished\|^    Locking\|Downloading\|^  Downloaded\|^  Installing"
+cargo bootimage
 
-BIN=$(ls -1t target/*/debug/bootimage-sparkos.bin 2>/dev/null | head -1)
-if [ -z "$BIN" ]; then
+BIN="${CARGO_TARGET_DIR:-target}/x86_64-unknown-none/debug/bootimage-sparkos.bin"
+if [ ! -f "$BIN" ]; then
     echo "HATA: bootimage-sparkos.bin bulunamadı!"
     exit 1
 fi

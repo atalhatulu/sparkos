@@ -40,17 +40,19 @@ fn active_l4() -> *const PageTable {
 fn walk_page(page: Page) -> Option<PageTableFlags> {
     let l4 = unsafe { &*active_l4() };
     let p4 = &l4[page.p4_index()];
-    if !p4.flags().contains(PageTableFlags::PRESENT) {
+    if !p4.flags().contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE) {
         return None;
     }
     let p3 = unsafe { &*VirtAddr::new(crate::gui::PHYS_OFFSET.wrapping_add(p4.addr().as_u64())).as_ptr::<PageTable>() };
     let p3e = &p3[page.p3_index()];
-    if !p3e.flags().contains(PageTableFlags::PRESENT) {
+    if !p3e.flags().contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+        || p3e.flags().contains(PageTableFlags::HUGE_PAGE) {
         return None;
     }
     let p2 = unsafe { &*VirtAddr::new(crate::gui::PHYS_OFFSET.wrapping_add(p3e.addr().as_u64())).as_ptr::<PageTable>() };
     let p2e = &p2[page.p2_index()];
-    if !p2e.flags().contains(PageTableFlags::PRESENT) {
+    if !p2e.flags().contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+        || p2e.flags().contains(PageTableFlags::HUGE_PAGE) {
         return None;
     }
     let p1 = unsafe { &*VirtAddr::new(crate::gui::PHYS_OFFSET.wrapping_add(p2e.addr().as_u64())).as_ptr::<PageTable>() };
@@ -58,7 +60,13 @@ fn walk_page(page: Page) -> Option<PageTableFlags> {
     if !p1e.flags().contains(PageTableFlags::PRESENT) {
         return None;
     }
-    Some(p1e.flags())
+    let mut flags = p1e.flags();
+    if !p4.flags().contains(PageTableFlags::WRITABLE)
+        || !p3e.flags().contains(PageTableFlags::WRITABLE)
+        || !p2e.flags().contains(PageTableFlags::WRITABLE) {
+        flags.remove(PageTableFlags::WRITABLE);
+    }
+    Some(flags)
 }
 
 /// Sayfa, kullanıcı modundan okunabilir mi?
@@ -86,7 +94,7 @@ fn check_user_range(ptr: u64, len: usize) -> Result<(), &'static str> {
     if ptr == 0 {
         return Err("null pointer");
     }
-    if ptr >= USER_ADDR_LIMIT {
+    if ptr < crate::memory::USER_ADDR_BASE || ptr >= USER_ADDR_LIMIT {
         return Err("address outside user space");
     }
 

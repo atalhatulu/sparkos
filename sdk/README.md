@@ -56,3 +56,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 | `libspark::close(fd)` | Açık dosya tanıtıcısını kapatır |
 | `libspark::exit(code)` | Uygulamayı belirtilen kod ile sonlandırır |
 | `libspark::yield_cpu()` | CPU zamanını kooperatif olarak devreder |
+
+## Kullanıcı adres düzeni
+
+`spark build`, `sdk/linker/app.ld` dosyasını kullanarak ELF girişini `0x40000000` bölgesine bağlar.
+Eski `0x400000` adresi kernel ile çakıştığından artık reddedilir; eski ELF uygulamalarını yeniden derleyin.
+ELF görüntüleri `0x40000000..0x70000000` içinde olmalı; toplam sayfa bütçesi 16 MiB, program başlığı sınırı 128’dir.
+Yüzeyler `0x70000000` sonrasındaki slotlarda, kullanıcı yığını `0x7fff0000` altında bulunur.
+
+`SYS_YIELD` ve SDK/kernel exec/waitpid ABI uyumu henüz interaktif userspace uygulamalar için tamamlanmamıştır.
+GUI örnekleri, yerleşik kernel masaüstünün yerine geçen tam uygulamalar olarak değerlendirilmemelidir.

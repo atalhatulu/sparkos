@@ -14,6 +14,12 @@ pub mod serial;
 pub mod vga_buffer;
 pub mod interrupts;
 pub mod memory;
+pub mod frame_pool;
+pub mod perf;
+pub mod perf_histogram;
+pub mod surface_raster;
+#[cfg(feature = "kernel-regression")]
+mod regression;
 pub mod allocator;
 pub mod keyboard;
 pub mod shell;
@@ -505,10 +511,14 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     ipc::init_irq_notify();
 
     x86_64::instructions::interrupts::enable();
+    crate::perf::init();
     serial_println!("[OK] Interrupts enabled");
     
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "\n[OK] Loading filesystem from ATA disk...\n").unwrap();
     fs::load_from_disk();
+
+    #[cfg(feature = "kernel-regression")]
+    regression::run();
 
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
     

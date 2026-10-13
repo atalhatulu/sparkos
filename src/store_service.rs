@@ -125,7 +125,7 @@ impl AppStoreService {
 
         // 3. Register to installed registry and filesystem
         self.installed_apps.insert(String::from(name), manifest.version.clone());
-        crate::pkg_service::PACKAGE_MANAGER.lock().install_package(name, 1024);
+        let _ = crate::pkg_service::PACKAGE_MANAGER.lock().install_package(name, 1024);
         crate::serial_println!("[APP-STORE] Installed '{}' v{} by {}", manifest.name, manifest.version, manifest.developer);
         Ok(())
     }
@@ -148,7 +148,7 @@ impl AppStoreService {
     /// Uninstalls application and cleans up metadata
     pub fn uninstall_app(&mut self, name: &str) -> Result<(), &'static str> {
         if self.installed_apps.remove(name).is_some() {
-            crate::pkg_service::PACKAGE_MANAGER.lock().remove_package(name);
+            let _ = crate::pkg_service::PACKAGE_MANAGER.lock().remove_package(name);
             crate::serial_println!("[APP-STORE] Uninstalled '{}' completely", name);
             Ok(())
         } else {

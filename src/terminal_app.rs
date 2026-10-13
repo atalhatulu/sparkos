@@ -445,6 +445,7 @@ impl TerminalState {
     }
 
     pub fn render_to_surface(&mut self, surface_ptr: *mut u32, w: u32, h: u32) {
+        let _timing = crate::perf::Span::new(crate::perf::Metric::Terminal);
         if surface_ptr.is_null() { return; }
         self.resize(w, h);
 
@@ -512,13 +513,8 @@ pub fn cleanup_terminal_for_window(window_id: u64) {
 }
 
 pub fn clear_surface(surface_ptr: *mut u32, w: u32, h: u32, color: u32) {
-    if surface_ptr.is_null() { return; }
-    let total = (w as usize) * (h as usize);
-    unsafe {
-        for i in 0..total {
-            core::ptr::write_volatile(surface_ptr.add(i), color);
-        }
-    }
+    // Shared surface backing is ordinary RAM, not a device register aperture.
+    unsafe { crate::surface_raster::clear(surface_ptr, w, h, color); }
 }
 
 pub fn terminal_machine_code() -> [u8; 16] {
@@ -531,7 +527,8 @@ pub fn terminal_machine_code() -> [u8; 16] {
 }
 
 pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for terminal.app")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = terminal_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
@@ -544,11 +541,12 @@ pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
     );
+    let pending = crate::task::process::PendingProcess::new(pid);
 
     let surf_id = crate::surface::create_surface_for_pid(pid, crate::surface::MAX_SURFACE_WIDTH, crate::surface::MAX_SURFACE_HEIGHT)?;
     if let Some(s) = crate::surface::SURFACE_REGISTRY.write().iter_mut().find(|s| s.surface_id == surf_id) {
@@ -577,5 +575,7 @@ pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window {})",
         name, pid, code_base, surf_id, win_id);
 
+    crate::input::register_kernel_input_owner(pid);
+    pending.commit();
     Ok(pid)
 }

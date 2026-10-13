@@ -53,6 +53,25 @@ pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 pub const SERVICE_DEVICE_FD: u32 = u32::MAX - 1;
 
 // ---------------------------------------------------------------------------
+// POSIX Signal Constants
+// ---------------------------------------------------------------------------
+
+pub const SIGHUP: u32 = 1;
+pub const SIGINT: u32 = 2;
+pub const SIGQUIT: u32 = 3;
+pub const SIGILL: u32 = 4;
+pub const SIGABRT: u32 = 6;
+pub const SIGFPE: u32 = 8;
+pub const SIGKILL: u32 = 9;
+pub const SIGSEGV: u32 = 11;
+pub const SIGPIPE: u32 = 13;
+pub const SIGALRM: u32 = 14;
+pub const SIGTERM: u32 = 15;
+pub const SIGCHLD: u32 = 17;
+pub const SIGCONT: u32 = 18;
+pub const SIGSTOP: u32 = 19;
+
+// ---------------------------------------------------------------------------
 // Global scheduler state
 // ---------------------------------------------------------------------------
 
@@ -251,10 +270,17 @@ pub struct Process {
     /// Caller'ın capability handle'larının tutuldugu per-process tablo (fd -> CapHandle).
     /// Asama 2.0 (fcc ön koşulu — caller kimliği): her syscall caller'ın kendi tablosuna
     /// bakar; kendi tablosunda olmayan handle kullanilamaz. Process exit'te tum handle'lar
-    /// temizlenir.
     pub cap_table: alloc::vec::Vec<(u32, crate::cap::CapHandle)>,
     /// TSS IOPB yetkili port aralığı (None == hiçbir porta erişemez).
     pub allowed_ports: Option<(u16, u16)>,
+    /// SMP CPU Affinitesi (None == her çekirdekte çalışabilir, Some(cpu_id) == sabitlenmiş çekirdek)
+    pub cpu_affinity: Option<usize>,
+    /// Bekleyen sinyaller (bitmask)
+    pub pending_signals: u32,
+    /// Engellenmiş / maskelenmiş sinyaller (bitmask)
+    pub blocked_signals: u32,
+    /// Sinyal işleyicileri (sig_num -> Ring 3 handler RIP)
+    pub signal_handlers: BTreeMap<u32, u64>,
 }
 
 impl Process {
@@ -285,6 +311,10 @@ impl Process {
             reaped: false,
             cap_table: alloc::vec::Vec::new(),
             allowed_ports: None,
+            cpu_affinity: None,
+            pending_signals: 0,
+            blocked_signals: 0,
+            signal_handlers: BTreeMap::new(),
         }
     }
 
@@ -404,6 +434,28 @@ pub fn set_cpu_current_pid(cpu_id: usize, pid: Option<u64>) {
     if cpu_id < crate::gdt::MAX_CPUS {
         PER_CPU_SCHEDULER.lock()[cpu_id].current_pid = pid;
     }
+}
+
+/// Sets CPU affinity for a specific process (Faz 34: SMP Affinity & Pinning)
+pub fn set_process_cpu_affinity(pid: u64, cpu_id: Option<usize>) -> Result<(), &'static str> {
+    if let Some(target_cpu) = cpu_id {
+        if target_cpu >= crate::gdt::MAX_CPUS {
+            return Err("Invalid CPU ID for affinity");
+        }
+    }
+    let mut s = SCHEDULER.lock();
+    if let Some(p) = s.table.get_mut(&pid) {
+        p.cpu_affinity = cpu_id;
+        Ok(())
+    } else {
+        Err("Process not found")
+    }
+}
+
+/// Gets the CPU affinity for a process
+pub fn get_process_cpu_affinity(pid: u64) -> Option<Option<usize>> {
+    let s = SCHEDULER.lock();
+    s.table.get(&pid).map(|p| p.cpu_affinity)
 }
 
 pub struct Scheduler {
@@ -588,6 +640,28 @@ fn insert_process(name: &str) -> u64 {
     pid
 }
 
+/// Roll back a not-yet-published GUI process when surface/window creation fails.
+pub struct PendingProcess { pid: Option<u64> }
+
+impl PendingProcess {
+    pub fn new(pid: u64) -> Self { Self { pid: Some(pid) } }
+    pub fn commit(mut self) { self.pid = None; }
+}
+
+impl Drop for PendingProcess {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid else { return; };
+        crate::surface::cleanup_surfaces_for_pid(pid);
+        if !release_process_address_space(pid) { return; }
+        let mut sched = SCHEDULER.lock();
+        if let Some(p) = sched.get_process_mut(pid) {
+            crate::cap::destroy_process_cspace(&mut p.cap_table);
+        }
+        sched.purge_pid(pid);
+        crate::task::PROCESS_LIST.lock().remove(&pid);
+    }
+}
+
 /// Wait for a child process to terminate and reap its exit status (Faz 8).
 pub fn waitpid(child_pid: u64) -> Result<u64, &'static str> {
     let mut s = SCHEDULER.lock();
@@ -616,6 +690,104 @@ pub fn waitpid(child_pid: u64) -> Result<u64, &'static str> {
         }
     }
     Ok(exit_code)
+}
+
+/// Send a POSIX signal to a target process.
+/// If `sig == SIGKILL`, immediately terminates the process and marks it as exited.
+/// For other signals, records the signal into `pending_signals` unless masked by `blocked_signals`.
+pub fn send_signal(target_pid: u64, sig: u32) -> Result<(), &'static str> {
+    if sig == 0 || sig > 31 {
+        return Err("Invalid signal number");
+    }
+
+    let mut s = SCHEDULER.lock();
+    let p = s.table.get_mut(&target_pid).ok_or("Process not found")?;
+
+    if p.state == ProcessState::Terminated || p.state == ProcessState::Reaped || p.exited {
+        return Err("Process already terminated");
+    }
+
+    match sig {
+        SIGKILL => {
+            p.state = ProcessState::Terminated;
+            p.exited = true;
+            p.exit_code = 128 + sig as u64; // Standard Unix exit code convention
+            // Notify parent if waiting
+            if let Some(parent_pid) = p.parent_pid {
+                let mut wake_parent = false;
+                if let Some(parent) = s.table.get_mut(&parent_pid) {
+                    if parent.state == ProcessState::Blocked {
+                        parent.state = ProcessState::Ready;
+                        wake_parent = true;
+                    }
+                    // Deliver SIGCHLD to parent
+                    parent.pending_signals |= 1 << SIGCHLD;
+                }
+                if wake_parent {
+                    s.ready.push_back(parent_pid);
+                }
+            }
+        }
+        SIGSTOP => {
+            p.state = ProcessState::Blocked;
+        }
+        SIGCONT => {
+            if p.state == ProcessState::Blocked {
+                p.state = ProcessState::Ready;
+                s.ready.push_back(target_pid);
+            }
+        }
+        _ => {
+            // Check if signal is blocked
+            if (p.blocked_signals & (1 << sig)) == 0 {
+                p.pending_signals |= 1 << sig;
+                // If the process was Blocked waiting, unblock it so it can handle the signal
+                if p.state == ProcessState::Blocked {
+                    p.state = ProcessState::Ready;
+                    s.ready.push_back(target_pid);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Registers a custom Ring-3 signal handler for a specific signal
+pub fn register_signal_handler(sig: u32, handler_rip: u64) -> Result<(), &'static str> {
+    if sig == SIGKILL || sig == SIGSTOP {
+        return Err("SIGKILL and SIGSTOP cannot be caught or ignored");
+    }
+    if sig == 0 || sig > 31 {
+        return Err("Invalid signal number");
+    }
+
+    let pid = current_pid();
+    let mut s = SCHEDULER.lock();
+    let p = s.table.get_mut(&pid).ok_or("Process not found")?;
+    p.signal_handlers.insert(sig, handler_rip);
+    Ok(())
+}
+
+/// Sets or updates the signal mask for the current process
+pub fn set_signal_mask(how: u32, mask: u32) -> Result<u32, &'static str> {
+    let pid = current_pid();
+    let mut s = SCHEDULER.lock();
+    let p = s.table.get_mut(&pid).ok_or("Process not found")?;
+    let old_mask = p.blocked_signals;
+
+    // SIGKILL (9) and SIGSTOP (19) can never be masked
+    let unmaskable = (1 << SIGKILL) | (1 << SIGSTOP);
+    let sanitized_mask = mask & !unmaskable;
+
+    match how {
+        0 => p.blocked_signals |= sanitized_mask,  // SIG_BLOCK
+        1 => p.blocked_signals &= !sanitized_mask, // SIG_UNBLOCK
+        2 => p.blocked_signals = sanitized_mask,   // SIG_SETMASK
+        _ => return Err("Invalid how parameter"),
+    }
+
+    Ok(old_mask)
 }
 
 /// Create a kernel thread. `entry` runs on a private kernel stack once the
@@ -738,6 +910,10 @@ pub fn create_user_process_with_caps(
 /// and the guard dropped BEFORE switching. Single-CPU cooperative model means
 /// nothing races during the service run.
 pub fn enter_service(pid: u64) {
+    // int 0x80 is an interrupt gate: SYS_EXIT returns with IF cleared. The
+    // register-context switch does not save RFLAGS, so restore the executor's
+    // original interrupt state explicitly when the service returns.
+    let interrupts_were_enabled = x86_64::instructions::interrupts::are_enabled();
     // We are about to switch away from the kernel's own address space; remember
     // it so `exit_current` can resume the executor here (see `exit_current`).
     capture_shared_kernel_cr3();
@@ -771,6 +947,11 @@ pub fn enter_service(pid: u64) {
     };
     // Guard dropped here; `save_ctx` still points into the static's storage.
     switch_context(save_ctx, target_ctx);
+    if interrupts_were_enabled {
+        x86_64::instructions::interrupts::enable();
+    } else {
+        x86_64::instructions::interrupts::disable();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,19 +1022,11 @@ fn enter_user_current() -> ! {
     unsafe {
         core::arch::asm!(
             "mov rsp, {kstack}",
-            "sub rsp, 40",
-            "mov rax, {ss}",
-            "mov [rsp + 32], rax", // SS
-            "mov rax, {rspu}",
-            "mov [rsp + 24], rax", // user RSP
-            "pushfq",              // RFLAGS
-            "pop rax",
-            "or rax, 0x200",       // IF set
-            "mov [rsp + 16], rax",
-            "mov rax, {cs}",
-            "mov [rsp + 8], rax",  // CS
-            "mov rax, {ripu}",
-            "mov [rsp], rax",      // RIP
+            "push {ss}",
+            "push {rspu}",
+            "push 0x202", // Reserved bit 1 and IF; no inherited kernel status flags.
+            "push {cs}",
+            "push {ripu}",
             "iretq",
             kstack = in(reg) kstack_top,
             ss = in(reg) user_ss as u64,
@@ -948,6 +1121,14 @@ pub fn schedule() {
                 Some(candidate) => {
                     if let Some(p) = s.table.get(&candidate) {
                         if !p.exited && !p.reaped && p.state != ProcessState::Terminated && p.state != ProcessState::Exited {
+                            // Faz 34: CPU Affinity kontrolü (0 numaralı BSP çekirdeği için kontrol)
+                            if let Some(aff_cpu) = p.cpu_affinity {
+                                if aff_cpu != 0 {
+                                    // Başka bir CPU'ya sabitlenmiş; hazır kuyruğunun arkasına bırakıp sonrakine bak
+                                    s.ready.push_back(candidate);
+                                    continue;
+                                }
+                            }
                             break candidate;
                         }
                     }
@@ -1030,6 +1211,22 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) {
         )
 }
 
+/// Release private page tables only after switching out of the process.
+/// The PCB stays present while surface quotas are returned.
+pub fn release_process_address_space(pid: u64) -> bool {
+    if crate::surface::SURFACE_REGISTRY.read().iter().any(|s| s.owner_pid == pid) {
+        return false; // A failed surface unmap must retain its owner page tables.
+    }
+    let cr3 = SCHEDULER.lock().get_process(pid).map(|p| p.user_cr3).unwrap_or(0);
+    if cr3 == 0 { return true; }
+    if let Err(e) = crate::memory::destroy_user_address_space(cr3) {
+        crate::serial_println!("[MEMORY] PID {} address-space cleanup deferred: {}", pid, e);
+        return false;
+    }
+    if let Some(p) = SCHEDULER.lock().get_process_mut(pid) { p.user_cr3 = 0; }
+    true
+}
+
 /// Terminate the running process and switch to the next ready one (or idle),
 /// or — Aşama 5.2 — resume the cooperative executor that entered a service via
 /// [`enter_service`]. Never returns.
@@ -1048,6 +1245,16 @@ pub fn exit_current() -> ! {
         }
     }
 
+    // Resource teardown takes its own scheduler/registry locks. Keep the PCB
+    // alive until it finishes, but never hold SCHEDULER across those calls.
+    let exiting_pid = SCHEDULER.lock().current;
+    if let Some(pid) = exiting_pid {
+        crate::surface::cleanup_surfaces_for_pid(pid);
+        crate::wm::cleanup_windows_for_pid(pid);
+        crate::input::cleanup_input_for_pid(pid);
+        release_process_address_space(pid);
+    }
+
     let exec_ctx: Option<RegisterContext> = EXECUTOR_RESUME.lock().take();
     if let Some(mut ctx) = exec_ctx {
         {
@@ -1059,9 +1266,6 @@ pub fn exit_current() -> ! {
                     crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
                     crate::cap::destroy_process_cspace(&mut p.cap_table);
                     crate::ipc::hangup_channel_for_pid(pid as u32);
-                    crate::surface::cleanup_surfaces_for_pid(pid);
-                    crate::wm::cleanup_windows_for_pid(pid);
-                    crate::input::cleanup_input_for_pid(pid);
                     p.allowed_ports = None;
                     (p.parent_pid, p.is_user)
                 } else {
@@ -1108,9 +1312,6 @@ pub fn exit_current() -> ! {
                 p.exited = true;
                 crate::cap::destroy_process_cspace(&mut p.cap_table);
                 crate::ipc::hangup_channel_for_pid(pid as u32);
-                crate::surface::cleanup_surfaces_for_pid(pid);
-                crate::wm::cleanup_windows_for_pid(pid);
-                crate::input::cleanup_input_for_pid(pid);
                 p.allowed_ports = None;
                 (p.parent_pid, p.is_user)
             } else {
@@ -1259,9 +1460,12 @@ pub fn exec_elf_proc(name: &str, elf_bytes: &[u8]) -> Result<u64, &'static str> 
         crate::elf::ElfError::OverlappingSegments => "Overlapping ELF segments",
         crate::elf::ElfError::InvalidEntryPoint => "Invalid ELF entry point",
         crate::elf::ElfError::NoLoadableSegments => "No loadable segments found",
+        crate::elf::ElfError::ImageTooLarge => "ELF image exceeds load budget",
+        crate::elf::ElfError::OutOfMemory => "Insufficient memory for ELF image",
     })?;
 
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for exec")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
 
     // Multi-Segment Loading: Her PT_LOAD segmentini izole CR3 sayfa tablosuna haritala
     for seg in &elf.segments {
@@ -1280,7 +1484,7 @@ pub fn exec_elf_proc(name: &str, elf_bytes: &[u8]) -> Result<u64, &'static str> 
         name,
         actual_entry,
         stack_top,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
     );
@@ -1292,14 +1496,15 @@ pub fn exec_elf_proc(name: &str, elf_bytes: &[u8]) -> Result<u64, &'static str> 
 /// space. `data` (if any) is copied at `USER_ADDR_BASE + 0x2000` so code can
 /// reference a fixed data slot. Used by the demo and for raw test payloads.
 fn spawn_raw_user(name: &str, code: &[u8], data: Option<(u64, u8)>) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for user proc")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code_base = crate::memory::USER_ADDR_BASE;
     // Cover code page(s) plus the optional data slot (at +0x2000).
     let map_len = 0x3000u64;
     crate::memory::map_user_region_in_cr3(cr3, code_base, map_len, false)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, code, 0x1000);
     if let Some((off, byte)) = data {
-        unsafe { core::ptr::write((code_base + off) as *mut u8, byte); }
+        crate::memory::write_user_region_in_cr3(cr3, code_base + off, &[byte], 1);
     }
     let stack_base = crate::memory::USER_STACK_TOP - 4096;
     crate::memory::map_user_region_in_cr3(cr3, stack_base, 4096, true)?;
@@ -1307,7 +1512,7 @@ fn spawn_raw_user(name: &str, code: &[u8], data: Option<(u64, u8)>) -> Result<u6
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
     );
@@ -1528,7 +1733,8 @@ pub fn spawn_service<F>(
 where
     F: FnOnce() -> Vec<u8>,
 {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     // Sadece MANAGE: SYS_IPC_BIND_IRQ'un tek ihtiyaç duyduğu hak. Tüm hakkı
     // (Rights::all) servise vermek gerekmez — least privilege.
     let dev_manage = crate::cap::grant(dev, crate::cap::Rights(512))
@@ -1544,9 +1750,11 @@ where
     // allocator'ın verdiği fiziksel frame'ler sıfırlı değil; banner'ın
     // deterministik olması ve counter'ın [+0x04] 0'dan başlaması için bölgeyi
     // sıfırlayıp banner'ı yazmak zorunlu. (ep_id [+0x00] ve counter [+0x04]
-    // servis tarafından kendisi yazılır.) Eşleme ortak L3 üzerinden aktif
-    // tabloda da görünür; tıpkı code yazımı gibi doğrudan yazılabilir.
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    // servis tarafından kendisi yazılır.) Veri, sahibinin fiziksel eşlemesi
+    // üzerinden yazılır; kullanıcı sanal adresi kernel CR3 içinde bulunmaz.
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(b"SVC UP\r\n".as_ptr(), data_ptr.add(8), 8);
@@ -1559,7 +1767,7 @@ where
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![(SERVICE_DEVICE_FD, dev_manage)],
@@ -1687,7 +1895,8 @@ pub fn fault_machine_code() -> Vec<u8> {
 pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
     let dev_ports = crate::cap::create_device_ports(0x3F8, 0x3FF)
         .map_err(|_| "device port binding failed")?;
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     // IO (8) | MANAGE (512): sys_ioperm gate'i ve provisioning yönetimi.
     let dev_io = crate::cap::grant(dev_ports, crate::cap::Rights(8 | 512))
         .map_err(|_| "service device grant failed")?;
@@ -1700,7 +1909,9 @@ pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
     // Bump allocator'ın verdiği fiziksel frame'ler sıfırlı değil; deterministik
     // TX için bölgeyi sıfırlayıp stringi yazmak zorunlu. (ioperm sonucu [+0x00]
     // servis tarafından kendisi yazılır.)
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(b"[SERDRV] alive\r\n".as_ptr(), data_ptr.add(0x10), 16);
@@ -1713,7 +1924,7 @@ pub fn spawn_serial_service(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![(SERVICE_DEVICE_FD, dev_io)],
@@ -2060,7 +2271,8 @@ pub fn spawn_net_service(name: &str, kern_ep_id: u32, ep_writer: crate::cap::Cap
 
     crate::dma_region::register_dma_region(dma_cap.slot, dma.phys_addr(), 3);
 
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
 
     let code = net_machine_code(bar0_start, bar0_end, dma_phys, kern_ep_id);
     let code_base = crate::memory::USER_ADDR_BASE;
@@ -2070,7 +2282,9 @@ pub fn spawn_net_service(name: &str, kern_ep_id: u32, ep_writer: crate::cap::Cap
     // Data slot seed: FAIL_MAP @ +0x10, FAIL_RX @ +0x30, FAIL_FRAME @ +0x50,
     // FAIL_IPC @ +0x70, SUCCESS @ +0xA0. "NTV1" magic at +0x90 is written by the
     // driver at runtime only after the frame is verified. Offsets never overlap.
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(NETDRV_FAIL_MAP.as_ptr(), data_ptr.add(0x10), NETDRV_FAIL_MAP.len());
@@ -2094,7 +2308,7 @@ pub fn spawn_net_service(name: &str, kern_ep_id: u32, ep_writer: crate::cap::Cap
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         cap_table,
@@ -2255,7 +2469,8 @@ pub fn spawn_disk_service(name: &str) -> Result<u64, &'static str> {
     let port_cap = crate::cap::grant(dev_ports, crate::cap::Rights(8 | 512))
         .map_err(|_| "port grant failed")?;
 
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for service")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
 
     let code = disk_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
@@ -2265,7 +2480,9 @@ pub fn spawn_disk_service(name: &str) -> Result<u64, &'static str> {
     // Data slot seed: [+0x10] success message, [+0x40] failure message.
     // The machine code prints one of them *only* after verifying the sector content
     // (SPFS superblock magic) — a pre-seeded message is never printed unconditionally.
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2291,7 +2508,7 @@ pub fn spawn_disk_service(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         cap_table,
@@ -2333,13 +2550,16 @@ pub fn fssvc_machine_code() -> Vec<u8> {
 /// fssvc, I/O port yetkisine sahip DEĞİLDİR (Port Confinement); disk işlemlerini
 /// yalnızca `disksvc` üzerinden IPC ile yürütür.
 pub fn spawn_fs_service(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for fssvc")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = fssvc_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
 
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2356,7 +2576,7 @@ pub fn spawn_fs_service(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![], // No raw I/O port capabilities!
@@ -2386,7 +2606,8 @@ fn serial_spawn(kind: &str, pid: u64, name: &str) {
 /// Kod + stack klonlanmış CR3'e haritalanır; capability verilmez (fault'u
 /// tetiklemek için I/O veya endpoint hakkı gerekmez).
 pub fn spawn_fault_service(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for fault service")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
 
     let code = fault_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
@@ -2400,7 +2621,7 @@ pub fn spawn_fault_service(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
@@ -2632,13 +2853,16 @@ pub fn spawn_netsvc(
     recycle_ep_id: u32,
     recycle_writer_cap: crate::cap::CapHandle,
 ) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for netsvc")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = netsvc_machine_code(rx_ep_id, recycle_ep_id);
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
 
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(NETSVC_RX_VERIFIED.as_ptr(), data_ptr.add(0xA0), NETSVC_RX_VERIFIED.len());
@@ -2659,7 +2883,7 @@ pub fn spawn_netsvc(
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         cap_table,
@@ -2699,13 +2923,16 @@ pub fn shell_machine_code() -> Vec<u8> {
 
 /// Spawn the Ring-3 User Shell (`sh`) (Faz 6).
 pub fn spawn_user_shell(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for shell")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = shell_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
 
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2722,7 +2949,7 @@ pub fn spawn_user_shell(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
@@ -2762,13 +2989,16 @@ pub fn displaysvc_machine_code() -> Vec<u8> {
 
 /// Spawn the Ring-3 Display Server (`displaysvc`) (Faz 11).
 pub fn spawn_display_server(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for display_server")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = displaysvc_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
 
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2785,7 +3015,7 @@ pub fn spawn_display_server(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
@@ -2825,13 +3055,16 @@ pub fn wm_machine_code() -> Vec<u8> {
 
 /// Spawn the Ring-3 Window Manager (`wm`) (Faz 12).
 pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frames for window_manager")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = wm_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
     crate::memory::write_user_region_in_cr3(cr3, code_base, &code, 0x1000);
 
-    let data_ptr = (code_base + 0x2000) as *mut u8;
+    let data_phys = crate::memory::translate_page_in_cr3(cr3, code_base + 0x2000)
+        .ok_or("Service data page missing")?;
+    let data_ptr = (unsafe { crate::gui::PHYS_OFFSET } + data_phys.as_u64()) as *mut u8;
     unsafe {
         core::ptr::write_bytes(data_ptr, 0, 0x1000);
         core::ptr::copy_nonoverlapping(
@@ -2848,7 +3081,7 @@ pub fn spawn_window_manager(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
@@ -2914,7 +3147,8 @@ pub fn live_demo_machine_code() -> Vec<u8> {
 
 /// Spawns a persistent Ring-3 GUI `live_demo_app` with its own CR3, Surface, and Window.
 pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
-    let cr3 = crate::memory::clone_active_cr3().ok_or("no free frame for live_demo_app")?;
+    let address_space = crate::memory::AddressSpaceBuilder::new()?;
+    let cr3 = address_space.cr3();
     let code = live_demo_machine_code();
     let code_base = crate::memory::USER_ADDR_BASE;
     crate::memory::map_user_region_in_cr3(cr3, code_base, 0x3000, true)?;
@@ -2927,12 +3161,13 @@ pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
         name,
         code_base,
         crate::memory::USER_STACK_TOP,
-        cr3,
+        address_space.commit(),
         crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0,
         alloc::vec![],
     );
 
+    let pending = PendingProcess::new(pid);
     let surf_id = crate::surface::create_surface_for_pid(pid, 260, 140)?;
     let _win_id = crate::wm::WM.lock()
         .create_window(pid, surf_id, 90, 85, 260, 140)
@@ -2942,6 +3177,7 @@ pub fn spawn_live_demo_app(name: &str) -> Result<u64, &'static str> {
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window)",
         name, pid, code_base, surf_id);
 
+    pending.commit();
     Ok(pid)
 }
 
@@ -2952,5 +3188,3 @@ pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
 
     Ok((pid_term, pid_files, 0))
 }
-
-
