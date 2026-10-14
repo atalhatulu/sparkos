@@ -700,7 +700,7 @@ Connection: keep-alive</pre>
     }
 
     pub fn render_toolbar_only(&self, surface_ptr: *mut u32, w: u32, h: u32) {
-        if surface_ptr.is_null() { return; }
+        if surface_ptr.is_null() || w < 160 || h < 32 { return; }
 
         let bar_bg = 0x001E293B;       // Classic Top Toolbar
         let border_col = 0x00334155;
@@ -733,6 +733,7 @@ Connection: keep-alive</pre>
         let search_btn_w = 44u32;
         let bar_start_x = 120u32;
         let bar_end_x = w.saturating_sub(search_btn_w + 8);
+        if bar_end_x <= bar_start_x { return; }
         let url_w = bar_end_x.saturating_sub(bar_start_x);
 
         let url_bg = if self.url_bar_focused { 0x000F172A } else { 0x00020617 };

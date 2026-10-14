@@ -222,7 +222,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     if fault_from_user(&stack) {
         recover_user_fault(&stack, 0, &alloc::format!("#GP err={:#x}", error_code));
     }
-    serial_println!("[PANIC] GPF (error={:#x})", error_code);
+    serial_println!("[PANIC] GPF (error={:#x}) rip={:#x} cs={:#x} rsp={:#x}", error_code, stack.instruction_pointer.as_u64(), stack.code_segment.0, stack.stack_pointer.as_u64());
     loop { x86_64::instructions::hlt(); }
 }
 
