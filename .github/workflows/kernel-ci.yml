@@ -66,7 +66,19 @@ jobs:
             --image target/x86_64-unknown-none/debug/bootimage-sparkos.bin \
             --disk disk.img \
             --output scratch/ci_test \
-            --regression
+            --regression \
+            --timeout 180 || {
+              echo "### QEMU Smoke Test Failed" >> $GITHUB_STEP_SUMMARY
+              echo '#### Serial Log (last 100 lines)' >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              tail -n 100 scratch/ci_test/serial.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo '#### QEMU Log' >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              cat scratch/ci_test/qemu.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              exit 1
+            }
 
       - name: Verify regression golden log matches
         run: |

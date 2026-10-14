@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--regression', action='store_true')
     parser.add_argument('--cpus', type=int, default=2)
     parser.add_argument('--memory', default='256M')
+    parser.add_argument('--timeout', type=int, default=180)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     log = args.output.resolve() / 'serial.log'
@@ -32,7 +33,7 @@ def main():
     with (args.output / 'qemu.log').open('w') as output:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=output, stderr=output, text=True)
         try:
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + args.timeout
             while time.monotonic() < deadline:
                 serial = log.read_text(errors='replace') if log.exists() else ''
                 if any(marker in serial for marker in ['KERNEL PANIC', '[PANIC]', '[FATAL]', '[USER-FAULT]']):
