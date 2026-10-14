@@ -736,3 +736,51 @@ pub fn notify_window_event(pid: u64, event_type: EventType, width: u32, height: 
     };
     deliver_event_to_pid(pid, ev);
 }
+
+pub use spark_abi::input::{
+    InputEvent as AbiInputEvent, InputRequest, InputResponse,
+    INPUT_OP_REGISTER_CLIENT, INPUT_OP_POLL_EVENT, INPUT_OP_SEND_EVENT, INPUT_OP_SET_FOCUS,
+    EVENT_KEY_DOWN, EVENT_KEY_UP, EVENT_MOUSE_MOVE, EVENT_MOUSE_DOWN, EVENT_MOUSE_UP, EVENT_MOUSE_SCROLL,
+};
+
+/// Ring-3 Girdi Servisi IPC Dağıtıcısı (Faz 5.2)
+pub fn dispatch_input_request(req: &InputRequest) -> InputResponse {
+    match req.opcode {
+        INPUT_OP_POLL_EVENT => {
+            let mut queues = INPUT_QUEUES.lock();
+            if let Some(queue) = queues.get_mut(&req.client_pid) {
+                if let Some(ev) = queue.pop() {
+                    let abi_ev = AbiInputEvent {
+                        kind: ev.event_type as u32,
+                        keycode: ev.key_code as u32,
+                        modifiers: ev.modifiers as u32,
+                        mouse_x: ev.mouse_x,
+                        mouse_y: ev.mouse_y,
+                        buttons: ev.mouse_button as u32,
+                        timestamp_ms: ev.timestamp,
+                    };
+                    return InputResponse::ok(abi_ev, queue.len() as u32);
+                }
+            }
+            InputResponse::empty_queue()
+        }
+        INPUT_OP_SEND_EVENT => {
+            let kernel_ev = InputEvent {
+                event_type: req.event.kind as u8,
+                modifiers: req.event.modifiers as u8,
+                key_code: req.event.keycode as u8,
+                mouse_button: req.event.buttons as u8,
+                wheel_delta: 0,
+                _reserved: [0; 3],
+                mouse_x: req.event.mouse_x,
+                mouse_y: req.event.mouse_y,
+                timestamp: req.event.timestamp_ms,
+                _padding: [0; 8],
+            };
+            deliver_event_to_pid(req.client_pid, kernel_ev);
+            InputResponse::ok(req.event, 0)
+        }
+        _ => InputResponse::err(spark_abi::errno::ENOSYS as u32),
+    }
+}
+

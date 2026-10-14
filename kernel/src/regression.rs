@@ -195,6 +195,7 @@ pub fn run() {
     blocking_channel_stress_regression();
     service_supervisor_and_discovery_regression();
     spfs_v1_block_engine_and_ipc_regression();
+    input_service_ipc_and_event_distribution_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -666,5 +667,58 @@ fn spfs_v1_block_engine_and_ipc_regression() {
 
     crate::serial_println!("[REGRESSION] PASS SPFS dynamic block engine, indirect blocks, rollback and IPC protocol");
 }
+
+fn input_service_ipc_and_event_distribution_regression() {
+    use crate::input::{dispatch_input_request, InputRequest, AbiInputEvent, INPUT_OP_POLL_EVENT, INPUT_OP_SEND_EVENT, EVENT_KEY_DOWN, EVENT_MOUSE_MOVE};
+
+    let client_pid = 9999u64;
+
+    // 1. Send KeyDown Event via IPC
+    let key_ev = AbiInputEvent::key_down(0x1E, 0, 100); // Key 'A'
+    let mut req_send_key = InputRequest::empty();
+    req_send_key.opcode = INPUT_OP_SEND_EVENT;
+    req_send_key.client_pid = client_pid;
+    req_send_key.event = key_ev;
+    let resp_send = dispatch_input_request(&req_send_key);
+    assert_eq!(resp_send.status, 0);
+
+    // 2. Send MouseMove Event via IPC
+    let mouse_ev = AbiInputEvent::mouse_move(150, 250, 1, 105);
+    let mut req_send_mouse = InputRequest::empty();
+    req_send_mouse.opcode = INPUT_OP_SEND_EVENT;
+    req_send_mouse.client_pid = client_pid;
+    req_send_mouse.event = mouse_ev;
+    let resp_send_m = dispatch_input_request(&req_send_mouse);
+    assert_eq!(resp_send_m.status, 0);
+
+    // 3. Poll Events via IPC
+    let mut req_poll = InputRequest::empty();
+    req_poll.opcode = INPUT_OP_POLL_EVENT;
+    req_poll.client_pid = client_pid;
+
+    let resp_poll_1 = dispatch_input_request(&req_poll);
+    assert_eq!(resp_poll_1.status, 0);
+    assert_eq!(resp_poll_1.event.kind, EVENT_KEY_DOWN);
+    assert_eq!(resp_poll_1.event.keycode, 0x1E);
+    assert_eq!(resp_poll_1.pending_count, 1);
+
+    let resp_poll_2 = dispatch_input_request(&req_poll);
+    assert_eq!(resp_poll_2.status, 0);
+    assert_eq!(resp_poll_2.event.kind, EVENT_MOUSE_MOVE);
+    assert_eq!(resp_poll_2.event.mouse_x, 150);
+    assert_eq!(resp_poll_2.event.mouse_y, 250);
+    assert_eq!(resp_poll_2.pending_count, 0);
+
+    // 4. Poll on empty queue
+    let resp_poll_empty = dispatch_input_request(&req_poll);
+    assert_eq!(resp_poll_empty.status, 0);
+    assert_eq!(resp_poll_empty.event.kind, 0);
+    assert_eq!(resp_poll_empty.pending_count, 0);
+
+    crate::input::cleanup_input_for_pid(client_pid);
+
+    crate::serial_println!("[REGRESSION] PASS Input service IPC protocol and event queue distribution");
+}
+
 
 
