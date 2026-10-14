@@ -138,7 +138,7 @@ impl<T> Mutex<T> {
                 if crate::sync::irq_locks_held() == 0 && x86_64::instructions::interrupts::are_enabled() {
                     crate::task::process::schedule();
                 } else {
-                    x86_64::instructions::hlt();
+                    core::hint::spin_loop();
                 }
             }
         }

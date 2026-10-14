@@ -171,7 +171,7 @@ impl WaitQueue {
     }
 
     pub fn prepare_wait(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>, reason: BlockReason) {
-        let cur = s.current.expect("prepare_wait requires current running process");
+        let cur = s.current().expect("prepare_wait requires current running process");
         self.enqueue_internal(cur, s);
         if let Some(proc) = s.table.get_mut(&cur) {
             proc.state = ProcessState::Blocked;
@@ -180,7 +180,7 @@ impl WaitQueue {
     }
 
     pub fn finish_wait(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) {
-        if let Some(cur) = s.current {
+        if let Some(cur) = s.current() {
             self.remove_internal(cur, s);
             if let Some(proc) = s.table.get_mut(&cur) {
                 if proc.state == ProcessState::Blocked {
@@ -193,7 +193,7 @@ impl WaitQueue {
 
     pub fn wake_one(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) -> Option<u64> {
         while let Some(pid) = self.dequeue_internal(s) {
-            if s.current == Some(pid) {
+            if s.is_running_on_any_cpu(pid) {
                 if let Some(proc) = s.table.get_mut(&pid) {
                     if proc.state == ProcessState::Blocked || proc.block_reason.is_some() {
                         proc.state = ProcessState::Running;
@@ -713,7 +713,7 @@ pub fn get_process_cpu_affinity(pid: u64) -> Option<Option<usize>> {
 pub struct Scheduler {
     table: BTreeMap<u64, Process>,
     ready: VecDeque<u64>,
-    current: Option<u64>,
+    current: [Option<u64>; crate::gdt::MAX_CPUS],
     pub sleep_queue: WaitQueue,
 }
 
@@ -724,7 +724,7 @@ impl Scheduler {
         Scheduler {
             table: BTreeMap::new(),
             ready: VecDeque::new(),
-            current: None,
+            current: [None; crate::gdt::MAX_CPUS],
             sleep_queue: WaitQueue::new(),
         }
     }
@@ -824,7 +824,36 @@ impl Scheduler {
     }
 
     pub fn current(&self) -> Option<u64> {
-        self.current
+        let cpu_id = crate::smp::current_cpu_id();
+        self.current_for_cpu(cpu_id)
+    }
+
+    pub fn current_for_cpu(&self, cpu_id: usize) -> Option<u64> {
+        if cpu_id < crate::gdt::MAX_CPUS {
+            self.current[cpu_id]
+        } else {
+            None
+        }
+    }
+
+    pub fn set_current_for_cpu(&mut self, cpu_id: usize, pid: Option<u64>) {
+        if cpu_id < crate::gdt::MAX_CPUS {
+            self.current[cpu_id] = pid;
+            set_cpu_current_pid(cpu_id, pid);
+        }
+    }
+
+    pub fn is_running_on_any_cpu(&self, pid: u64) -> bool {
+        self.current.iter().any(|&c| c == Some(pid))
+    }
+
+    pub fn clear_current_if_matches(&mut self, pid: u64) {
+        for (cpu_id, cur) in self.current.iter_mut().enumerate() {
+            if *cur == Some(pid) {
+                *cur = None;
+                set_cpu_current_pid(cpu_id, None);
+            }
+        }
     }
 
     pub fn get_process(&self, pid: u64) -> Option<&Process> {
@@ -857,9 +886,7 @@ impl Scheduler {
 
     pub fn purge_pid(&mut self, pid: u64) {
         self.ready.retain(|&p| p != pid);
-        if self.current == Some(pid) {
-            self.current = None;
-        }
+        self.clear_current_if_matches(pid);
         self.table.remove(&pid);
     }
 
@@ -886,6 +913,7 @@ pub fn remove_process_from_ready(pid: u64) {
 
 /// Idle process entry: park the CPU when nothing else can run.
 extern "C" fn idle_process() {
+    x86_64::instructions::interrupts::enable();
     loop {
         x86_64::instructions::hlt();
     }
@@ -896,7 +924,7 @@ extern "C" fn idle_process() {
 fn kernel_thread_stub() -> ! {
     let entry = {
         let mut s = SCHEDULER.lock();
-        match s.current.and_then(|pid| s.table.get_mut(&pid)) {
+        match s.current().and_then(|pid| s.table.get_mut(&pid)) {
             Some(p) => p.entry.take(),
             None => None,
         }
@@ -1025,7 +1053,7 @@ fn insert_process(name: &str) -> u64 {
     let pid = alloc_pid();
     let mut p = Process::new(name);
     p.pid = pid;
-    p.parent_pid = s.current;
+    p.parent_pid = s.current();
     s.table.insert(pid, p);
     pid
 }
@@ -1070,7 +1098,7 @@ impl Drop for PendingProcess {
 pub fn waitpid(child_pid: u64) -> Result<u64, &'static str> {
     loop {
         let mut s = SCHEDULER.lock();
-        let curr = s.current;
+        let curr = s.current();
         let (is_reaped, is_term, exit_code) = {
             let p = s.table.get(&child_pid).ok_or("Process not found")?;
             (
@@ -1226,7 +1254,7 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
     let pid = insert_process(name);
     {
         let mut s = SCHEDULER.lock();
-        let cur = s.current;
+        let cur = s.current();
         let p = s.table.get_mut(&pid).unwrap();
         p.parent_pid = cur;
         p.entry = Some(entry);
@@ -1337,9 +1365,10 @@ pub fn create_user_process_with_caps(
 /// kernel continuation so the int-0x80 / sys_exit path can return here.
 /// Does not return on its own stack (control goes to Ring 3).
 fn enter_user_current() -> ! {
+    let cpu_id = crate::smp::current_cpu_id();
     let (pid, user_rip, user_rsp, user_cr3, user_cs, user_ss, allowed_ports, kstack_top) = {
         let mut s = SCHEDULER.lock();
-        let pid = match s.current {
+        let pid = match s.current_for_cpu(cpu_id) {
             Some(p) => p,
             None => idle_forever(),
         };
@@ -1370,15 +1399,10 @@ fn enter_user_current() -> ! {
     );
 
     // TSS IOPB izinlerini senkronize et
-    if let Some((start, end)) = allowed_ports {
-        crate::gdt::reset_io_bitmap();
-        crate::gdt::allow_port_range(start, end);
-    } else {
-        crate::gdt::reset_io_bitmap();
-    }
+    sync_iopb_for_process_for_cpu(cpu_id, allowed_ports);
 
     // Point RSP0 at this process's private kernel stack.
-    crate::gdt::set_tss_rsp0(kstack_top);
+    crate::gdt::set_tss_rsp0_for_cpu(cpu_id, kstack_top);
 
     // Optional per-process address space switch.
     if user_cr3 != 0 {
@@ -1501,13 +1525,13 @@ pub fn sleep_ms(ms: u64) {
     let target_tick = crate::interrupts::get_tick().saturating_add(ms);
     {
         let mut s = SCHEDULER.lock();
-        if let Some(cur) = s.current {
+        if let Some(cur) = s.current() {
             s.enqueue_sleep(cur, target_tick);
         }
     }
     schedule();
     let mut s = SCHEDULER.lock();
-    if let Some(cur) = s.current {
+    if let Some(cur) = s.current() {
         s.remove_sleep(cur);
     }
 }
@@ -1599,16 +1623,16 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
 
     // Requeue current to the back and pick the next ready process.
     let (cur_ctx, next_ctx, prev_pid) = {
+        let prev_pid = s.current_for_cpu(cpu_id);
         // Raw pointer to the old current process's saved context (stable in
         // the static table); null if there was no current process yet.
-        let cur_raw = match s.current {
+        let cur_raw = match prev_pid {
             Some(p) => s.table.get(&p).map(|p| {
                 (&p.ctx as *const RegisterContext) as *mut RegisterContext
             }),
             None => None,
         };
-        let prev_pid = s.current;
-        if let Some(cur) = s.current {
+        if let Some(cur) = prev_pid {
             if let Some(p) = s.table.get_mut(&cur) {
                 p.check_stack_canary();
                 if p.state == ProcessState::Running && !p.exited && !p.reaped {
@@ -1654,8 +1678,16 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
 
         match next {
             Some(pid) => {
-                s.current = Some(pid);
-                set_cpu_current_pid(cpu_id, Some(pid));
+                if prev_pid == Some(pid) {
+                    if let Some(p) = s.table.get_mut(&pid) {
+                        p.state = ProcessState::Running;
+                        p.on_cpu = Some(cpu_id);
+                    }
+                    arm_quantum();
+                    drop(s);
+                    return;
+                }
+                s.set_current_for_cpu(cpu_id, Some(pid));
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Running;
                     p.on_cpu = Some(cpu_id);
@@ -1671,28 +1703,26 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
             }
             None => {
                 // Nothing runnable: CPU idles via the idle process (pid 0).
-                if let Some(idle_proc) = s.table.get(&0) {
+                if prev_pid == Some(0) {
+                    arm_quantum();
+                    drop(s);
+                    return;
+                }
+                s.set_current_for_cpu(cpu_id, Some(0));
+                let idle_ctx = if let Some(idle_proc) = s.table.get_mut(&0) {
+                    idle_proc.state = ProcessState::Running;
+                    idle_proc.on_cpu = Some(cpu_id);
                     idle_proc.check_stack_canary();
                     crate::gdt::set_tss_rsp0_for_cpu(cpu_id, idle_proc.kernel_stack_top());
-                    let idle_ctx: *const RegisterContext = &idle_proc.ctx;
-                    // Önceki sürecin on_cpu kaydını temizle
-                    if let Some(prev) = prev_pid {
-                        if prev != 0 {
-                            if let Some(p) = s.table.get_mut(&prev) {
-                                if p.on_cpu == Some(cpu_id) {
-                                    p.on_cpu = None;
-                                }
-                            }
-                        }
-                    }
-                    drop(s);
-                    jump_to_initial(idle_ctx);
+                    &idle_proc.ctx as *const RegisterContext
                 } else {
                     drop(s);
                     loop {
                         x86_64::instructions::hlt();
                     }
-                }
+                };
+                arm_quantum();
+                (cur_raw.unwrap_or(core::ptr::null_mut()), idle_ctx, prev_pid)
             }
         }
     };
@@ -1709,7 +1739,7 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
     // önceki sürecin (prev_pid) artık eski CPU'da çalışmadığını teyit edip on_cpu'sunu temizler.
     if let Some(prev) = prev_pid {
         let mut s = SCHEDULER.lock();
-        let curr = s.current;
+        let curr = s.current_for_cpu(cpu_id);
         if let Some(p) = s.table.get_mut(&prev) {
             // Eğer önceki süreç hâlâ bu CPU üzerinde işaretliyse ve mevcut çalışan kendisi değilse serbest bırak
             if p.on_cpu == Some(cpu_id) && curr != Some(prev) {
@@ -1798,15 +1828,17 @@ pub fn exit_current() -> ! {
 
     // Resource teardown takes its own scheduler/registry locks. Keep the PCB
     // alive until it finishes, but never hold SCHEDULER across those calls.
+    let cpu_id = crate::smp::current_cpu_id();
     let exiting_pid = {
         let mut s = SCHEDULER.lock();
-        if let Some(pid) = s.current {
+        if let Some(pid) = s.current_for_cpu(cpu_id) {
             if let Some(p) = s.table.get_mut(&pid) {
                 p.state = ProcessState::Exiting;
+                p.on_cpu = None;
             }
             s.remove_sleep(pid);
         }
-        s.current
+        s.current_for_cpu(cpu_id)
     };
     if let Some(pid) = exiting_pid {
         #[cfg(feature = "legacy-desktop")]
@@ -1828,10 +1860,11 @@ pub fn exit_current() -> ! {
     let mut killed_pid = None;
     let next_ctx: *const RegisterContext = {
         let mut s = SCHEDULER.lock();
-        if let Some(pid) = s.current {
+        if let Some(pid) = s.current_for_cpu(cpu_id) {
             let (parent_pid, is_user) = if let Some(p) = s.table.get_mut(&pid) {
                 p.state = ProcessState::Terminated;
                 p.exited = true;
+                p.on_cpu = None;
                 crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
                 p.allowed_ports = None;
                 (p.parent_pid, p.is_user)
@@ -1858,25 +1891,24 @@ pub fn exit_current() -> ! {
         }
         match s.ready.pop_front() {
             Some(pid) => {
-                s.current = Some(pid);
-                set_cpu_current_pid(0, Some(pid));
+                s.set_current_for_cpu(cpu_id, Some(pid));
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Running;
+                    p.on_cpu = Some(cpu_id);
                     p.check_stack_canary();
-                    crate::gdt::set_tss_rsp0(p.kernel_stack_top());
+                    crate::gdt::set_tss_rsp0_for_cpu(cpu_id, p.kernel_stack_top());
                 }
                 let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
-                sync_iopb_for_process(ports);
+                sync_iopb_for_process_for_cpu(cpu_id, ports);
                 arm_quantum();
                 &s.table[&pid].ctx as *const RegisterContext
             }
             None => {
-                s.current = Some(0);
-                set_cpu_current_pid(0, Some(0));
-                sync_iopb_for_process(None);
+                s.set_current_for_cpu(cpu_id, None);
+                sync_iopb_for_process_for_cpu(cpu_id, None);
                 if let Some(p) = s.table.get(&0) {
                     p.check_stack_canary();
-                    crate::gdt::set_tss_rsp0(p.kernel_stack_top());
+                    crate::gdt::set_tss_rsp0_for_cpu(cpu_id, p.kernel_stack_top());
                 }
                 &s.table[&0].ctx as *const RegisterContext
             }
@@ -1896,7 +1928,7 @@ pub fn exit_current() -> ! {
 /// preemptive scheduler (as opposed to the legacy single-app shell path).
 pub fn current_is_user_process() -> bool {
     let s = SCHEDULER.lock();
-    match s.current {
+    match s.current() {
         Some(p) => s.table.get(&p).map(|p| p.is_user).unwrap_or(false),
         None => false,
     }
@@ -1905,7 +1937,7 @@ pub fn current_is_user_process() -> bool {
 /// Snapshot of the current running process name + pid (for diagnostics).
 pub fn current_process_info() -> Option<(u64, String)> {
     let s = SCHEDULER.lock();
-    s.current.and_then(|pid| s.table.get(&pid)).map(|p| (p.pid, p.name.clone()))
+    s.current().and_then(|pid| s.table.get(&pid)).map(|p| (p.pid, p.name.clone()))
 }
 
 /// `fork_current` — duplicate the calling process.
@@ -1919,7 +1951,7 @@ pub fn current_process_info() -> Option<(u64, String)> {
 pub fn fork_current() -> i64 {
     let (cur, name, u_rip, u_rsp, u_cs, u_ss) = {
         let s = SCHEDULER.lock();
-        let cur = match s.current {
+        let cur = match s.current() {
             Some(p) if p != 0 => p,
             _ => return -1,
         };
@@ -3218,7 +3250,7 @@ fn alloc_idle() {
 
 fn init_bootstrap_process() {
     let mut s = SCHEDULER.lock();
-    if s.current.is_some() {
+    if s.current_for_cpu(0).is_some() {
         return;
     }
     let pid = 1;
@@ -3226,10 +3258,10 @@ fn init_bootstrap_process() {
         let mut p = Process::new("init");
         p.pid = pid;
         p.state = ProcessState::Running;
+        p.on_cpu = Some(0);
         s.table.insert(pid, p);
     }
-    s.current = Some(pid);
-    set_cpu_current_pid(0, Some(pid));
+    s.set_current_for_cpu(0, Some(pid));
     if NEXT_PID.load(Ordering::Relaxed) <= 1 {
         NEXT_PID.store(2, Ordering::Relaxed);
     }
@@ -3307,7 +3339,7 @@ where
 
 pub fn set_current_allowed_ports(ports: Option<(u16, u16)>) {
     let mut s = SCHEDULER.lock();
-    if let Some(pid) = s.current {
+    if let Some(pid) = s.current() {
         if let Some(p) = s.table.get_mut(&pid) {
             p.allowed_ports = ports;
         }

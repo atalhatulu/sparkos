@@ -173,11 +173,10 @@ pub static TLB_SHOOTDOWN_LOCK: crate::sync::IrqMutex<()> = crate::sync::IrqMutex
 
 /// Sends an EOI (End of Interrupt) to the Local APIC.
 pub fn lapic_eoi() {
-    let mut guard = BSP_LAPIC.lock();
-    if let Some(ref mut lapic) = *guard {
-        unsafe {
-            lapic.write_reg(0xB0, 0); // EOI Register (offset 0xB0)
-        }
+    let phys_offset = unsafe { crate::memory::PHYS_OFFSET };
+    let eoi_ptr = (phys_offset + 0xfee0_0000 + 0xB0) as *mut u32;
+    unsafe {
+        core::ptr::write_volatile(eoi_ptr, 0);
     }
 }
 
@@ -522,7 +521,12 @@ pub fn start_ap(cpu_id: usize, apic_id: u8, trampoline_addr: u32) {
 
     crate::serial_println!("[SMP] CPU {}: AP online (apic_id={})", cpu_id, apic_id);
     crate::serial_println!("[SMP] CPU {}: long mode initialized", cpu_id);
-    setup_per_cpu_for(cpu_id, apic_id);
+    unsafe {
+        let block_ptr = &PER_CPU_BLOCKS[cpu_id] as *const _ as *mut PerCpuBlock;
+        (*block_ptr).self_ptr = block_ptr;
+        (*block_ptr).apic_id = apic_id;
+        (*block_ptr).online.store(true, core::sync::atomic::Ordering::SeqCst);
+    }
     crate::serial_println!("[SMP] CPU {}: per-cpu state initialized", cpu_id);
     unsafe {
         let tss_addr = &raw const crate::gdt::PER_CPU_TSS[cpu_id] as u64;
