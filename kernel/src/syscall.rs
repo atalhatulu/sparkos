@@ -76,13 +76,10 @@ pub extern "C" fn syscall_dispatcher(
             }
         }
         SYS_FORK => {
-            // Asama 2 (B3): process'in EXECUTE yetkisi olmadan fork yapamaz.
-            if syscall_cap::check_process_exec().is_err() {
-                return EACCES;
-            }
-            let pid = crate::task::process::fork_current();
-            serial_println!("[SYSCALL] SYS_FORK from Ring 3 -> child pid {}", pid);
-            pid as u64
+            // Faz 3.6: SYS_FORK çekirdekten kaldırıldı (mikroçekirdekte fork yok,
+            // spawn modeli esastır; POSIX uyumluluk servisi Faz 10'da MemObject ile taklit edecek).
+            crate::serial_println!("[SYSCALL] SYS_FORK deprecated/removed -> ENOSYS");
+            spark_abi::errno::ENOSYS
         }
         SYS_EXEC => {
             // exec(elf_ptr, len): build a fresh user process from ELF bytes.
