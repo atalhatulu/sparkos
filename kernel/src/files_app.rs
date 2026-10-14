@@ -748,7 +748,7 @@ pub fn spawn_files_app(name: &str) -> Result<u64, &'static str> {
         FILES_INSTANCES.lock().insert(win_id, state);
     }
 
-    let _ = crate::surface::present_surface(surf_id, 0, 0, FILES_WIDTH, FILES_HEIGHT);
+    let _ = crate::surface::present_surface_for_pid(pid, surf_id, 0, 0, FILES_WIDTH, FILES_HEIGHT);
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window {})",
         name, pid, code_base, surf_id, win_id);
 

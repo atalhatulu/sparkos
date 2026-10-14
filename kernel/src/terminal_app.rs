@@ -571,7 +571,7 @@ pub fn spawn_terminal_app(name: &str) -> Result<u64, &'static str> {
         TERMINAL_INSTANCES.lock().insert(win_id, state);
     }
 
-    let _ = crate::surface::present_surface(surf_id, 0, 0, TERM_WIDTH, TERM_HEIGHT);
+    let _ = crate::surface::present_surface_for_pid(pid, surf_id, 0, 0, TERM_WIDTH, TERM_HEIGHT);
     crate::serial_println!("[APP-REGISTRY] Successfully launched '{}' (PID {}, Entry 0x{:x}, Surface {}, Window {})",
         name, pid, code_base, surf_id, win_id);
 

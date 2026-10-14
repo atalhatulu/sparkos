@@ -378,6 +378,7 @@ extern "C" fn boot_orchestrator() {
     {
         // Otomatik olarak GUI Desktop Ortamını Başlat
         crate::vga_buffer::GUI_MODE.store(true, core::sync::atomic::Ordering::Relaxed);
+        crate::wm::WM.lock().mark_full_damage();
         let _ = crate::task::process::spawn_desktop_v1_apps();
         crate::wm::WM.lock().mark_full_damage();
         crate::serial_println!("[DESKTOP] Auto-booted SparkOS GUI Desktop Environment.");
