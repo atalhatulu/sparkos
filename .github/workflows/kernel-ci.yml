@@ -22,9 +22,11 @@ jobs:
           sudo apt-get install -y qemu-system-x86 python3
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-08
           components: rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none
 
       - name: Install bootimage
         run: cargo install bootimage
@@ -39,7 +41,14 @@ jobs:
         run: ./tools/check_deps.sh
 
       - name: Verify headless build (no default features)
-        run: cargo check --no-default-features
+        run: |
+          cargo check -p sparkos --no-default-features --verbose 2>&1 | tee /tmp/check.log || {
+            echo "### Cargo Check Failed" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat /tmp/check.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
 
       - name: Build bootimage with kernel-regression
         run: cargo bootimage --features kernel-regression
