@@ -13,10 +13,13 @@ pub mod errno {
     pub const EFAULT: u64 = 14;
     pub const EINVAL: u64 = 22;
     pub const ENOSYS: u64 = 38;
+    pub const EDQUOT: u64 = 122;
+    pub const EQUOTA: u64 = 122;
 
     pub const EFAULT_RET: u64 = (-14i64) as u64;
     pub const EACCES_RET: u64 = (-13i64) as u64;
     pub const EAGAIN_RET: u64 = (-11i64) as u64;
+    pub const EQUOTA_RET: u64 = (-122i64) as u64;
 }
 
 pub mod syscall {
@@ -142,6 +145,7 @@ pub mod cap {
         Generic,
         Fd,
         Process,
+        MemObject,
     }
 }
 

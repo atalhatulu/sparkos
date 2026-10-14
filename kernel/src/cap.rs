@@ -80,11 +80,18 @@ pub fn root_cap() -> Option<CapHandle> {
 
 // --- HELPER FUNCTIONS ---
 
-fn allocate_slot(state: &mut CoreState) -> usize {
+pub const MAX_CAP_SLOTS: usize = 2048;
+pub const MAX_CAP_NODES: usize = 2048;
+pub const MAX_CAP_OBJECTS: usize = 1024;
+
+fn allocate_slot(state: &mut CoreState) -> Result<usize> {
     for (i, slot) in state.slots.iter_mut().enumerate() {
         if slot.free {
-            return i;
+            return Ok(i);
         }
+    }
+    if state.slots.len() >= MAX_CAP_SLOTS {
+        return Err(CapError::Exhausted);
     }
     let idx = state.slots.len();
     state.slots.push(CapSlot {
@@ -95,7 +102,7 @@ fn allocate_slot(state: &mut CoreState) -> usize {
         free: true,
         is_lent: false,
     });
-    idx
+    Ok(idx)
 }
 
 fn is_revoked(state: &CoreState, node_idx: u32) -> bool {
@@ -146,6 +153,10 @@ pub fn create_object(kind: ObjectKind) -> Result<CapHandle> {
     let mut state_guard = lock_state();
     let state = state_guard.as_mut().ok_or(CapError::Invalid)?;
 
+    if state.objects.len() >= MAX_CAP_OBJECTS || state.nodes.len() >= MAX_CAP_NODES {
+        return Err(CapError::Exhausted);
+    }
+
     let obj_idx = state.objects.len();
     state.objects.push(CapObject {
         kind,
@@ -160,7 +171,7 @@ pub fn create_object(kind: ObjectKind) -> Result<CapHandle> {
         epoch: 0,
     });
 
-    let slot_idx = allocate_slot(state);
+    let slot_idx = allocate_slot(state)?;
     let gen = state.slots[slot_idx].generation;
     state.slots[slot_idx] = CapSlot {
         node_idx,
@@ -207,13 +218,17 @@ pub fn grant(parent: CapHandle, req: Rights) -> Result<CapHandle> {
     let obj_idx = p_slot.object_idx;
     let rights = p_slot.rights & req;
 
+    if state.nodes.len() >= MAX_CAP_NODES {
+        return Err(CapError::Exhausted);
+    }
+
     let new_node_idx = state.nodes.len() as u32;
     state.nodes.push(CapNode {
         parent: Some(p_node_idx),
         epoch: 0,
     });
 
-    let new_slot_idx = allocate_slot(state);
+    let new_slot_idx = allocate_slot(state)?;
     let new_gen = state.slots[new_slot_idx].generation;
     state.slots[new_slot_idx] = CapSlot {
         node_idx: new_node_idx,
@@ -257,6 +272,10 @@ pub fn transfer(src: CapHandle, req: Rights) -> Result<CapHandle> {
     let obj_idx = src_slot.object_idx;
     let rights = src_slot.rights & req;
 
+    if state.nodes.len() >= MAX_CAP_NODES {
+        return Err(CapError::Exhausted);
+    }
+
     // Yeni root yap (parent: None). Eski lineage revoke'undan etkilenmez.
     let new_node_idx = state.nodes.len() as u32;
     state.nodes.push(CapNode {
@@ -264,7 +283,7 @@ pub fn transfer(src: CapHandle, req: Rights) -> Result<CapHandle> {
         epoch: 0,
     });
 
-    let new_slot_idx = allocate_slot(state);
+    let new_slot_idx = allocate_slot(state)?;
     let new_gen = state.slots[new_slot_idx].generation;
     state.slots[new_slot_idx] = CapSlot {
         node_idx: new_node_idx,
@@ -313,13 +332,17 @@ pub fn lend(parent: CapHandle, req: Rights) -> Result<CapHandle> {
     let obj_idx = p_slot.object_idx;
     let rights = p_slot.rights & req;
 
+    if state.nodes.len() >= MAX_CAP_NODES {
+        return Err(CapError::Exhausted);
+    }
+
     let new_node_idx = state.nodes.len() as u32;
     state.nodes.push(CapNode {
         parent: Some(p_node_idx),
         epoch: 0,
     });
 
-    let new_slot_idx = allocate_slot(state);
+    let new_slot_idx = allocate_slot(state)?;
     let new_gen = state.slots[new_slot_idx].generation;
     state.slots[new_slot_idx] = CapSlot {
         node_idx: new_node_idx,
@@ -628,7 +651,13 @@ pub fn deref(cap: CapHandle, flags: Rights) -> Result<CapAccess> {
 }
 
 pub struct CapAccess {
-    object_idx: u32,
+    pub object_idx: u32,
+}
+
+impl CapAccess {
+    pub fn object_idx(&self) -> u32 {
+        self.object_idx
+    }
 }
 
 impl Drop for CapAccess {

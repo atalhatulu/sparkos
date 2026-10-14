@@ -367,6 +367,8 @@ pub struct ProcessResourceUsage {
     pub window_count: u32,
     pub surface_count: u32,
     pub ipc_channel_count: u32,
+    pub cap_count: u32,
+    pub endpoint_count: u32,
 }
 
 impl ProcessResourceUsage {
@@ -379,6 +381,8 @@ impl ProcessResourceUsage {
             window_count: 0,
             surface_count: 0,
             ipc_channel_count: 0,
+            cap_count: 0,
+            endpoint_count: 0,
         }
     }
 }
@@ -389,6 +393,8 @@ pub struct ProcessResourceLimits {
     pub max_windows: u32,
     pub max_surfaces: u32,
     pub max_ipc_channels: u32,
+    pub max_caps: u32,
+    pub max_endpoints: u32,
 }
 
 impl ProcessResourceLimits {
@@ -398,6 +404,8 @@ impl ProcessResourceLimits {
             max_windows: 8,
             max_surfaces: 16,
             max_ipc_channels: 32,
+            max_caps: 128,
+            max_endpoints: 32,
         }
     }
 
@@ -407,6 +415,8 @@ impl ProcessResourceLimits {
             max_windows: 2,
             max_surfaces: 4,
             max_ipc_channels: 16,
+            max_caps: 64,
+            max_endpoints: 16,
         }
     }
 }
@@ -578,6 +588,46 @@ impl Process {
 
     pub fn decrement_surface_count(&mut self) {
         self.resource_usage.surface_count = self.resource_usage.surface_count.saturating_sub(1);
+    }
+
+    pub fn increment_cap_count(&mut self) -> Result<(), &'static str> {
+        if self.resource_usage.cap_count >= self.resource_limits.max_caps {
+            return Err("Capability quota exceeded");
+        }
+        self.resource_usage.cap_count += 1;
+        Ok(())
+    }
+
+    pub fn decrement_cap_count(&mut self) {
+        self.resource_usage.cap_count = self.resource_usage.cap_count.saturating_sub(1);
+    }
+
+    pub fn increment_endpoint_count(&mut self) -> Result<(), &'static str> {
+        if self.resource_usage.endpoint_count >= self.resource_limits.max_endpoints {
+            return Err("Endpoint quota exceeded");
+        }
+        self.resource_usage.endpoint_count += 1;
+        Ok(())
+    }
+
+    pub fn decrement_endpoint_count(&mut self) {
+        self.resource_usage.endpoint_count = self.resource_usage.endpoint_count.saturating_sub(1);
+    }
+}
+
+pub fn try_charge_process_memory(pid: u64, bytes: u64) -> Result<(), &'static str> {
+    let mut s = SCHEDULER.lock();
+    if let Some(p) = s.table.get_mut(&pid) {
+        p.try_charge_memory(bytes)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn uncharge_process_memory(pid: u64, bytes: u64) {
+    let mut s = SCHEDULER.lock();
+    if let Some(p) = s.table.get_mut(&pid) {
+        p.uncharge_memory(bytes);
     }
 }
 
@@ -927,11 +977,22 @@ fn alloc_pid() -> u64 {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
 }
 
+pub const MAX_PROCESSES: usize = 64;
+
 fn insert_process(name: &str) -> u64 {
+    let mut s = SCHEDULER.lock();
+    if s.table.len() >= MAX_PROCESSES {
+        let reaped_pids: alloc::vec::Vec<u64> = s.table.iter()
+            .filter(|(_, p)| p.state == ProcessState::Terminated && p.reaped)
+            .map(|(&pid, _)| pid)
+            .collect();
+        for r_pid in reaped_pids {
+            s.table.remove(&r_pid);
+        }
+    }
     let pid = alloc_pid();
     let mut p = Process::new(name);
     p.pid = pid;
-    let mut s = SCHEDULER.lock();
     p.parent_pid = s.current;
     s.table.insert(pid, p);
     pid

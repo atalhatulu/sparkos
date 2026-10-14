@@ -136,15 +136,20 @@ static NEXT_EP_ID: AtomicU32 = AtomicU32::new(8);
 
 /// SEC-12: Mikroçekirdek yığın tükenmesini (OOM DoS) önlemek için maksimum IPC kuyruk sınırı
 pub const MAX_ENDPOINT_CAPACITY: usize = 256;
+pub const MAX_ENDPOINTS: usize = 256;
 
 /// Yeni bir mikroçekirdek IPC Endpoint'i oluşturur ve kayıt eder.
 pub fn create_raw_endpoint(capacity: usize) -> cap::Result<(u32, CapHandle)> {
     if capacity == 0 || capacity > MAX_ENDPOINT_CAPACITY {
         return Err(CapError::Invalid);
     }
+    let mut endpoints = ENDPOINTS.lock();
+    if endpoints.len() >= MAX_ENDPOINTS {
+        return Err(CapError::Exhausted);
+    }
     let (channel, handle) = RawCapChannel::new(capacity)?;
     let ep_id = NEXT_EP_ID.fetch_add(1, Ordering::Relaxed);
-    ENDPOINTS.lock().insert(ep_id, channel);
+    endpoints.insert(ep_id, channel);
     Ok((ep_id, handle))
 }
 
