@@ -1525,6 +1525,22 @@ pub fn schedule() {
     schedule_internal(s);
 }
 
+static CURRENT_IOPB_PORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
+pub fn sync_iopb_for_process(ports: Option<(u16, u16)>) {
+    let encoded = match ports {
+        Some((start, end)) => (start as u32) | ((end as u32) << 16),
+        None => u32::MAX,
+    };
+    let prev = CURRENT_IOPB_PORTS.swap(encoded, core::sync::atomic::Ordering::Relaxed);
+    if prev != encoded {
+        crate::gdt::reset_io_bitmap();
+        if let Some((start, end)) = ports {
+            crate::gdt::allow_port_range(start, end);
+        }
+    }
+}
+
 fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
     // Faz 2.2: Uyanma zamanı gelmiş thread'leri uyandır
     poll_sleeping_processes_locked(&mut s, crate::interrupts::get_tick());
@@ -1590,12 +1606,7 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
             crate::gdt::set_tss_rsp0(p.kernel_stack_top());
         }
         let ports = s.table.get(&next).and_then(|p| p.allowed_ports);
-        if let Some((start, end)) = ports {
-            crate::gdt::reset_io_bitmap();
-            crate::gdt::allow_port_range(start, end);
-        } else {
-            crate::gdt::reset_io_bitmap();
-        }
+        sync_iopb_for_process(ports);
 
         arm_quantum();
         let next_raw = if let Some(p) = s.table.get(&next) {
@@ -1608,6 +1619,8 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
         crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", next));
         (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
     };
+
+    // drop(s) → switch_context penceresi SMP için güvensiz; Faz 4'te finish_switch kalıbı
     drop(s);
 
     if cur_ctx.is_null() {
@@ -1821,19 +1834,14 @@ pub fn exit_current() -> ! {
                     crate::gdt::set_tss_rsp0(p.kernel_stack_top());
                 }
                 let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
-                if let Some((start, end)) = ports {
-                    crate::gdt::reset_io_bitmap();
-                    crate::gdt::allow_port_range(start, end);
-                } else {
-                    crate::gdt::reset_io_bitmap();
-                }
+                sync_iopb_for_process(ports);
                 arm_quantum();
                 &s.table[&pid].ctx as *const RegisterContext
             }
             None => {
                 s.current = Some(0);
                 set_cpu_current_pid(0, Some(0));
-                crate::gdt::reset_io_bitmap();
+                sync_iopb_for_process(None);
                 if let Some(p) = s.table.get(&0) {
                     p.check_stack_canary();
                     crate::gdt::set_tss_rsp0(p.kernel_stack_top());
