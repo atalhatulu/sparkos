@@ -109,6 +109,10 @@ impl<M> CapChannel<M> {
         cap::check_rights_for_object(receiver_cap, self.endpoint_cap, Rights::READ)?;
         Ok(self.inner.try_recv())
     }
+
+    pub fn wait_queue_not_empty(&self) -> &crate::task::process::WaitQueue {
+        self.inner.wait_queue_not_empty()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -229,16 +233,24 @@ pub fn raw_ipc_recv(
     receiver_cap: CapHandle,
 ) -> cap::Result<CapMessage<Vec<u8>>> {
     loop {
-        let msg = {
+        {
             let guard = ENDPOINTS.lock();
             let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
-            channel.try_recv(receiver_cap)?
-        };
-        if let Some(msg) = msg {
-            return Ok(msg);
+            if let Some(msg) = channel.try_recv(receiver_cap)? {
+                return Ok(msg);
+            }
+            let mut s = crate::task::process::SCHEDULER.lock();
+            channel.wait_queue_not_empty().prepare_wait(&mut s, crate::task::process::BlockReason::ChannelRecv);
         }
-        // Kilit bırakıldı — gönderen process kilidi alıp send yapabilir.
-        x86_64::instructions::interrupts::enable_and_hlt();
+        // Kilitler bırakıldı — gönderen process kilidi alıp send yapabilir; schedule() assert'i sağlanır.
+        crate::task::process::schedule();
+        {
+            let guard = ENDPOINTS.lock();
+            if let Some(channel) = guard.get(&ep_id) {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                channel.wait_queue_not_empty().finish_wait(&mut s);
+            }
+        }
     }
 }
 
