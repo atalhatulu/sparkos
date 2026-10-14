@@ -52,7 +52,7 @@ jobs:
 
       - name: Build bootimage with kernel-regression
         run: |
-          cargo bootimage --package sparkos --features kernel-regression 2>&1 | tee /tmp/bootimage.log || {
+          cargo bootimage --manifest-path kernel/Cargo.toml --features kernel-regression 2>&1 | tee /tmp/bootimage.log || {
             echo "### Bootimage Failed" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             cat /tmp/bootimage.log >> $GITHUB_STEP_SUMMARY
