@@ -113,7 +113,7 @@ impl<T> Drop for IrqSafeSpinlockGuard<'_, T> {
 // ---------------------------------------------------------------------------
 pub use crate::irq_mutex::*;
 
-/// 2. Mutex — Built on top of spin::Mutex, provides a std::sync::Mutex like lock() that uses hlt to wait
+/// 2. Mutex — Built on top of spin::Mutex, provides a non-spinning lock that yields to the scheduler
 pub struct Mutex<T> {
     inner: SpinMutex<T>,
 }
@@ -126,11 +126,21 @@ impl<T> Mutex<T> {
     }
 
     pub fn lock(&self) -> MutexGuard<'_, T> {
+        let mut spins = 0;
         loop {
             if let Some(guard) = self.inner.try_lock() {
                 return guard;
             }
-            x86_64::instructions::hlt();
+            spins += 1;
+            if spins < 32 {
+                core::hint::spin_loop();
+            } else {
+                if crate::sync::irq_locks_held() == 0 && x86_64::instructions::interrupts::are_enabled() {
+                    crate::task::process::schedule();
+                } else {
+                    x86_64::instructions::hlt();
+                }
+            }
         }
     }
     
