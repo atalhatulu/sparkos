@@ -36,7 +36,7 @@ Seviye 7: Çizelgeleyici ve İş Parçacığı Tablosu (SCHEDULER - YAPRAK KİL�
 
 | Kilit Adı | Dosya | Tür | IRQ Erişimi (Doğrudan/Dolaylı) | Alındığı Bağlamlar | Sıra Seviyesi | IrqMutex Durumu |
 |---|---|---|---|---|:---:|:---:|
-| `WRITE_LOCK` | `src/vga_buffer.rs` | `spin::Mutex<VgaWriter>` | Evet (Panic, Clock task, VGA log) | Ekrana yazı yazma | 1 | Standart (Spin) |
+| `WRITE_LOCK` | `src/vga_buffer.rs` | `IrqMutex<VgaWriter>` | Evet (Panic, Clock task, VGA log) | Ekrana yazı yazma | 1 | **ZORUNLU (IrqMutex)** |
 | `SERIAL` | `src/serial.rs` | `IrqMutex<Option<SerialPort>>`| Evet (Panic dump, debug logları) | COM1 seri port çıktısı | 1 | **ZORUNLU (IrqMutex)** |
 | `TRACE_RING` | `src/ktrace.rs` | `IrqMutex<RingBuffer>` | Evet (User-fault loglama) | Çekirdek izleme halkası | 1 | **ZORUNLU (IrqMutex)** |
 | `CRASH_REPORTER` | `src/crash_reporter.rs` | `IrqMutex<CrashReporter>` | Evet (Panic crash dump) | Çökme kaydı | 1 | **ZORUNLU (IrqMutex)** |
