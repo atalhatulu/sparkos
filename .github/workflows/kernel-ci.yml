@@ -54,8 +54,11 @@ jobs:
         run: |
           set -o pipefail
           cargo bootimage --manifest-path kernel/Cargo.toml --features kernel-regression 2>&1 | tee /tmp/bootimage.log || {
-            ERR=$(tail -n 5 /tmp/bootimage.log 2>/dev/null | tr '\n' ' ')
-            echo "::error::Bootimage failed: $ERR"
+            ERR=$(grep -B 2 -A 5 "error\[" /tmp/bootimage.log 2>/dev/null | head -n 10 | tr '\n' ' ')
+            if [ -z "$ERR" ]; then
+              ERR=$(grep -B 2 -A 5 "error:" /tmp/bootimage.log 2>/dev/null | head -n 10 | tr '\n' ' ')
+            fi
+            echo "::error::Bootimage error: $ERR"
             exit 1
           }
           echo "Bootimage Log:"
