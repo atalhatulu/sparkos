@@ -3,7 +3,6 @@ use core::hint::spin_loop;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use alloc::collections::VecDeque;
-use core::task::Waker;
 use spin::Mutex as SpinMutex;
 
 /// 1. Spinlock — Raw CPU spinlock using atomic swap
@@ -140,17 +139,17 @@ impl<T> Mutex<T> {
     }
 }
 
-/// 3. Semaphore — Atomic counter with an async wakelist
+/// 3. Semaphore — Atomic counter with a WaitQueue
 pub struct Semaphore {
     count: AtomicUsize,
-    wakers: SpinMutex<VecDeque<Waker>>,
+    queue: crate::task::process::WaitQueue,
 }
 
 impl Semaphore {
     pub const fn new(initial: usize) -> Self {
         Semaphore {
             count: AtomicUsize::new(initial),
-            wakers: SpinMutex::new(VecDeque::new()),
+            queue: crate::task::process::WaitQueue::new(),
         }
     }
 
@@ -170,32 +169,32 @@ impl Semaphore {
     pub fn wait(&self) {
         loop {
             if self.try_wait() {
-                break;
+                return;
             }
-            x86_64::instructions::hlt();
-        }
-    }
-    
-    pub async fn wait_async(&self) {
-        core::future::poll_fn(|cx| {
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.queue.prepare_wait(&mut s, crate::task::process::BlockReason::Generic);
+            }
             if self.try_wait() {
-                core::task::Poll::Ready(())
-            } else {
-                self.wakers.lock().push_back(cx.waker().clone());
-                core::task::Poll::Pending
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.queue.finish_wait(&mut s);
+                return;
             }
-        }).await;
+            crate::task::process::schedule();
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.queue.finish_wait(&mut s);
+            }
+        }
     }
 
     pub fn signal(&self) {
         self.count.fetch_add(1, Ordering::Release);
-        if let Some(waker) = self.wakers.lock().pop_front() {
-            waker.wake();
-        }
+        let mut s = crate::task::process::SCHEDULER.lock();
+        self.queue.wake_one(&mut s);
     }
 }
 
-/// 4. Condvar — Condition variable compatible with spin::MutexGuard
 /// 4. Condvar — WaitQueue-backed Condition Variable
 pub struct Condvar {
     queue: crate::task::process::WaitQueue,
@@ -220,6 +219,10 @@ impl Condvar {
             self.queue.finish_wait(&mut s);
         }
         mutex.lock()
+    }
+
+    pub fn wait_irq<'a, T>(&self, guard: IrqGuard<'a, T>, mutex: &'a IrqMutex<T>) -> IrqGuard<'a, T> {
+        self.wait(guard, mutex)
     }
 
     pub fn notify_one(&self) {
@@ -249,6 +252,10 @@ impl<M> BlockingChannel<M> {
             not_full: crate::task::process::WaitQueue::new(),
             capacity,
         }
+    }
+
+    pub fn wait_queue_not_empty(&self) -> &crate::task::process::WaitQueue {
+        &self.not_empty
     }
 
     pub fn send(&self, msg: M) {
