@@ -1598,7 +1598,7 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
     poll_sleeping_processes_locked(&mut s, crate::interrupts::get_tick());
 
     // Requeue current to the back and pick the next ready process.
-    let (cur_ctx, next_ctx) = {
+    let (cur_ctx, next_ctx, prev_pid) = {
         // Raw pointer to the old current process's saved context (stable in
         // the static table); null if there was no current process yet.
         let cur_raw = match s.current {
@@ -1607,6 +1607,7 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
             }),
             None => None,
         };
+        let prev_pid = s.current;
         if let Some(cur) = s.current {
             if let Some(p) = s.table.get_mut(&cur) {
                 p.check_stack_canary();
@@ -1626,6 +1627,13 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                 Some(candidate) => {
                     if let Some(p) = s.table.get(&candidate) {
                         if !p.exited && !p.reaped && p.state != ProcessState::Terminated && p.state != ProcessState::Exited {
+                            // SMP Güvenliği: Eğer süreç başka bir çekirdekte hâlâ çalışıyorsa alma!
+                            if let Some(running_cpu) = p.on_cpu {
+                                if running_cpu != cpu_id {
+                                    s.ready.push_back(candidate);
+                                    continue;
+                                }
+                            }
                             // Faz 34: CPU Affinity kontrolü
                             if let Some(aff_cpu) = p.cpu_affinity {
                                 if aff_cpu != cpu_id {
@@ -1659,7 +1667,7 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                 arm_quantum();
                 let next_raw = s.table.get(&pid).map(|p| &p.ctx as *const RegisterContext).unwrap_or(core::ptr::null());
                 crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", pid));
-                (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
+                (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw, prev_pid)
             }
             None => {
                 // Nothing runnable: CPU idles via the idle process (pid 0).
@@ -1667,6 +1675,16 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                     idle_proc.check_stack_canary();
                     crate::gdt::set_tss_rsp0_for_cpu(cpu_id, idle_proc.kernel_stack_top());
                     let idle_ctx: *const RegisterContext = &idle_proc.ctx;
+                    // Önceki sürecin on_cpu kaydını temizle
+                    if let Some(prev) = prev_pid {
+                        if prev != 0 {
+                            if let Some(p) = s.table.get_mut(&prev) {
+                                if p.on_cpu == Some(cpu_id) {
+                                    p.on_cpu = None;
+                                }
+                            }
+                        }
+                    }
                     drop(s);
                     jump_to_initial(idle_ctx);
                 } else {
@@ -1679,13 +1697,25 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
         }
     };
 
-    // drop(s) → switch_context penceresi SMP için güvensiz; Faz 4'te finish_switch kalıbı
     drop(s);
 
     if cur_ctx.is_null() {
         switch_context_null_save(next_ctx);
     } else {
         switch_context(cur_ctx, next_ctx);
+    }
+
+    // finish_switch: Bağlam değişimi tamamlandıktan sonra, bu CPU'ya geçen yeni iş parçacığı
+    // önceki sürecin (prev_pid) artık eski CPU'da çalışmadığını teyit edip on_cpu'sunu temizler.
+    if let Some(prev) = prev_pid {
+        let mut s = SCHEDULER.lock();
+        let curr = s.current;
+        if let Some(p) = s.table.get_mut(&prev) {
+            // Eğer önceki süreç hâlâ bu CPU üzerinde işaretliyse ve mevcut çalışan kendisi değilse serbest bırak
+            if p.on_cpu == Some(cpu_id) && curr != Some(prev) {
+                p.on_cpu = None;
+            }
+        }
     }
 }
 
