@@ -52,13 +52,14 @@ jobs:
 
       - name: Build bootimage with kernel-regression
         run: |
+          set -o pipefail
           cargo bootimage --manifest-path kernel/Cargo.toml --features kernel-regression 2>&1 | tee /tmp/bootimage.log || {
-            echo "### Bootimage Failed" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            cat /tmp/bootimage.log >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            ERR=$(tail -n 5 /tmp/bootimage.log 2>/dev/null | tr '\n' ' ')
+            echo "::error::Bootimage failed: $ERR"
             exit 1
           }
+          echo "Bootimage Log:"
+          cat /tmp/bootimage.log
           echo "Created binaries:"
           find target -name "*.bin" || true
 
