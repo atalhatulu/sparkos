@@ -239,7 +239,7 @@ pub fn map_user_phys_range_in_cr3(
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
-        if virt >= USER_ADDR_BASE {
+        if virt >= USER_ADDR_BASE + 0x2000 || virt < USER_ADDR_BASE {
             flags |= PageTableFlags::NO_EXECUTE;
         }
     }
@@ -274,6 +274,94 @@ pub fn map_user_phys_range(
 ) -> Result<(), &'static str> {
     map_user_phys_range_in_cr3(0, virt, phys_start, count, writable)
 }
+
+pub fn unmap_user_phys_range_in_cr3(
+    cr3: u64,
+    virt: u64,
+    count: u64,
+) -> Result<(), &'static str> {
+    if !is_canonical(virt) || virt >= USER_ADDR_LIMIT {
+        return Err("user unmapping target outside user space");
+    }
+    let phys_offset = VirtAddr::new(unsafe { PHYS_OFFSET });
+    let target = if cr3 == 0 {
+        unsafe { active_level_4_table(phys_offset) }
+    } else {
+        let ptr = (phys_offset + PhysAddr::new(cr3).as_u64()).as_mut_ptr::<PageTable>();
+        unsafe { &mut *ptr }
+    };
+    let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
+
+    for i in 0..count {
+        let v = virt + i * 4096;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(v));
+        if let Ok((_, flush)) = mapper.unmap(page) {
+            flush.flush();
+        }
+    }
+    drop(mapper);
+    crate::smp::tlb_shootdown(virt, count as usize);
+    if cr3 != 0 {
+        prune_empty_user_tables(cr3);
+    }
+    Ok(())
+}
+
+/// Kernel-only physical range identity mapping (without USER_ACCESSIBLE).
+pub fn map_kernel_phys_range(
+    virt: u64,
+    phys_start: PhysAddr,
+    count: u64,
+    writable: bool,
+) -> Result<(), &'static str> {
+    let phys_offset = VirtAddr::new(unsafe { PHYS_OFFSET });
+    let target = unsafe { active_level_4_table(phys_offset) };
+    let curr_flags = target[0].flags();
+    target[0].set_flags(curr_flags | PageTableFlags::WRITABLE | PageTableFlags::PRESENT);
+    let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
+
+    let mut flags = PageTableFlags::PRESENT;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    let parent = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+    for i in 0..count {
+        let v = virt + i * 4096;
+        let p = phys_start + i * 4096;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(v));
+        let frame = PhysFrame::<Size4KiB>::containing_address(p);
+
+        unsafe {
+            match mapper.map_to_with_table_flags(page, frame, flags, parent, &mut UserFrameAllocatorAdapter) {
+                Ok(tlb) => tlb.flush(),
+                Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
+                    let _ = mapper.update_flags(page, flags);
+                },
+                Err(_) => return Err("failed to map kernel phys page"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unmaps kernel-only physical range and flushes TLB.
+pub fn unmap_kernel_phys_range(virt: u64, count: u64) -> Result<(), &'static str> {
+    let phys_offset = VirtAddr::new(unsafe { PHYS_OFFSET });
+    let target = unsafe { active_level_4_table(phys_offset) };
+    let mut mapper = unsafe { OffsetPageTable::new(target, phys_offset) };
+
+    for i in 0..count {
+        let v = virt + i * 4096;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(v));
+        if let Ok((_, flush)) = mapper.unmap(page) {
+            flush.flush();
+        }
+    }
+    drop(mapper);
+    Ok(())
+}
+
 
 /// Frame allocator adapter multiplexing to the dedicated user pool.
 /// Only internal page-table table frames are allocated through this path.

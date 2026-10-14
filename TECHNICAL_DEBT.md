@@ -33,11 +33,12 @@
 ## 2. Active Technical Debt (Monitored)
 
 - **Userspace migration:** compositor and built-in app logic still run in Ring 0. Ring-3 process records do not establish app isolation by themselves.
-- **Scheduling:** `SYS_YIELD` currently returns immediately; AP startup/work-stealing demonstrations are not an integrated concurrent userspace scheduler.
-- **Fork:** user register continuation and private page copying still need a complete implementation; the current fork path is not a supported POSIX fork.
-- **SMP reclamation:** the TLB shootdown timeout is not a proof of remote acknowledgement. Concurrent execution of one address space on APs must remain unsupported until shootdown/lifetime synchronization is completed.
-- **ABI:** SDK exec/waitpid numbering reconciled with kernel (SYS_FORK=14, SYS_EXEC=15, SYS_WAITPID=16).
-- **Scope:** heap exhaustion, all driver/DMA ownership paths, and physical hardware have not been comprehensively verified. See [hardening notes](docs/HARDENING.md).
+- **Scheduling:** `SYS_YIELD` triggers cooperative rescheduling via `schedule()`; SleepMutex / WaitQueue based kernel lock migration (WM, VFS) planned for Faz 4.
+- **Fork:** `SYS_FORK` returns `ENOSYS` (-38) by architectural decision; SparkOS explicitly follows spawn/capability-oriented process model (`kernel/src/task/process.rs`). Legacy fork semantics will not be added to kernel core.
+- **SMP reclamation:** cross-core TLB shootdown IPI lifetime synchronization in progress (Faz 4.5); concurrent execution of shared user address spaces on APs remains gated by completion of remote ACK protocols.
+- **ABI:** SDK exec/waitpid numbering reconciled with kernel (`kernel/src/syscall.rs`: SYS_FORK=14, SYS_EXEC=15, SYS_WAITPID=16).
+- **Scope:** heap exhaustion, all driver/DMA ownership paths (`kernel/src/dma_region.rs`), and physical hardware have not been comprehensively verified. See [hardening notes](docs/HARDENING.md).
+- **Architectural Freeze:** "Freeze #5" refers to the baseline capability and memory architecture frozen prior to Faz 4 SMP multi-core development.
 
 ---
 

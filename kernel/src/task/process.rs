@@ -30,7 +30,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::naked_asm;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants / defaults
@@ -73,10 +73,6 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 
 use crate::sync::IrqMutex;
 
-/// Master flag: is the preemptive scheduler running?
-static PREEMPTION_ENABLED: AtomicBool = AtomicBool::new(false);
-/// Ticks left in the current process's quantum.
-static TICKS_LEFT: AtomicU64 = AtomicU64::new(0);
 /// Total scheduler timer ticks (preemptive clock).
 static SCHED_TICK: AtomicU64 = AtomicU64::new(0);
 /// Faz 0.6: Timer IRQ'sunda SCHEDULER meşgul olduğu için atlanan tick sayısı.
@@ -186,6 +182,12 @@ impl WaitQueue {
     pub fn finish_wait(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) {
         if let Some(cur) = s.current {
             self.remove_internal(cur, s);
+            if let Some(proc) = s.table.get_mut(&cur) {
+                if proc.state == ProcessState::Blocked {
+                    proc.state = ProcessState::Running;
+                    proc.block_reason = None;
+                }
+            }
         }
     }
 
@@ -488,6 +490,8 @@ pub struct Process {
     /// WaitQueue intrusive çift yönlü bağlı liste işaretçileri
     pub wait_next: Option<u64>,
     pub wait_prev: Option<u64>,
+    /// Hangi çekirdekte çalıştığı (None == hiçbir çekirdekte aktif çalışmıyor)
+    pub on_cpu: Option<usize>,
 }
 
 impl Process {
@@ -523,6 +527,7 @@ impl Process {
             cap_table: alloc::vec::Vec::new(),
             allowed_ports: None,
             cpu_affinity: None,
+            on_cpu: None,
             pending_signals: 0,
             blocked_signals: 0,
             signal_handlers: BTreeMap::new(),
@@ -712,6 +717,8 @@ pub struct Scheduler {
     pub sleep_queue: WaitQueue,
 }
 
+pub static EARLIEST_SLEEP_TICK: AtomicU64 = AtomicU64::new(u64::MAX);
+
 impl Scheduler {
     const fn uninit() -> Self {
         Scheduler {
@@ -741,6 +748,27 @@ impl Scheduler {
             }
             *tail_ptr = Some(pid);
         }
+        EARLIEST_SLEEP_TICK.fetch_min(target_tick, Ordering::Relaxed);
+    }
+
+    pub fn recalculate_earliest_sleep(&self) {
+        let mut min_tick = u64::MAX;
+        unsafe {
+            let mut curr = *self.sleep_queue.head.get();
+            while let Some(pid) = curr {
+                if let Some(proc) = self.table.get(&pid) {
+                    if let Some(BlockReason::Sleep(target_tick)) = proc.block_reason {
+                        if target_tick < min_tick {
+                            min_tick = target_tick;
+                        }
+                    }
+                    curr = proc.wait_next;
+                } else {
+                    break;
+                }
+            }
+        }
+        EARLIEST_SLEEP_TICK.store(min_tick, Ordering::Relaxed);
     }
 
     pub fn remove_sleep(&mut self, pid: u64) {
@@ -773,6 +801,30 @@ impl Scheduler {
                 *tail_ptr = prev;
             }
         }
+        self.recalculate_earliest_sleep();
+    }
+
+    pub fn has_expired_sleep(&self, current_tick: u64) -> bool {
+        unsafe {
+            let mut curr = *self.sleep_queue.head.get();
+            while let Some(pid) = curr {
+                if let Some(proc) = self.table.get(&pid) {
+                    if let Some(BlockReason::Sleep(target_tick)) = proc.block_reason {
+                        if current_tick >= target_tick {
+                            return true;
+                        }
+                    }
+                    curr = proc.wait_next;
+                } else {
+                    break;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn current(&self) -> Option<u64> {
+        self.current
     }
 
     pub fn get_process(&self, pid: u64) -> Option<&Process> {
@@ -1378,7 +1430,7 @@ fn idle_forever() -> ! {
 // ---------------------------------------------------------------------------
 
 fn arm_quantum() {
-    TICKS_LEFT.store(QUANTUM_TICKS, Ordering::Relaxed);
+    crate::smp::this_cpu().ticks_left.store(QUANTUM_TICKS as u32, Ordering::Relaxed);
 }
 
 /// Total scheduler ticks (independent of the PIT's own TICK counter).
@@ -1395,19 +1447,27 @@ pub fn get_tick() -> u64 {
 /// No-op otherwise (keeps existing behavior identical).
 pub fn timer_tick() {
     SCHED_TICK.fetch_add(1, Ordering::Relaxed);
-    if !PREEMPTION_ENABLED.load(Ordering::Relaxed) {
+    let cpu = crate::smp::this_cpu();
+    if !cpu.preemption_enabled.load(Ordering::Relaxed) {
         return;
     }
-    let left = TICKS_LEFT.load(Ordering::Relaxed);
-    if left > 1 {
-        TICKS_LEFT.store(left - 1, Ordering::Relaxed);
-        return;
-    }
-    // Faz 0.6 / Madde 1: is_locked() TOCTOU açığı yerine atomik try_lock()
-    if let Some(s) = SCHEDULER.try_lock() {
-        schedule_internal(s);
+    let left = cpu.ticks_left.load(Ordering::Relaxed);
+    let expired_quantum = if left > 1 {
+        cpu.ticks_left.store(left - 1, Ordering::Relaxed);
+        false
     } else {
-        TICKS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        true
+    };
+
+    let current_tick = crate::interrupts::get_tick();
+    let has_waking = current_tick >= EARLIEST_SLEEP_TICK.load(Ordering::Relaxed);
+
+    if expired_quantum || has_waking {
+        if let Some(s) = SCHEDULER.try_lock() {
+            schedule_internal(s);
+        } else {
+            TICKS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1483,13 +1543,6 @@ pub fn schedule() {
     // Faz 0.6: Timer IRQ'sunda ertelenen ödünç capability iadelerini SCHEDULER kilidi öncesinde işle
     crate::cap::poll_pending_lend_expiries();
     let s = SCHEDULER.lock();
-    if let Some(cur) = s.current {
-        if let Some(p) = s.table.get(&cur) {
-            if p.state == ProcessState::Running && p.block_reason.is_none() {
-                return;
-            }
-        }
-    }
     schedule_internal(s);
 }
 
@@ -1499,7 +1552,9 @@ pub fn yield_to(target_pid: u64) {
     let mut s = SCHEDULER.lock();
     if let Some(target_proc) = s.table.get_mut(&target_pid) {
         if target_proc.state == ProcessState::Ready && !target_proc.exited && !target_proc.reaped {
-            s.ready.retain(|&p| p != target_pid);
+            if let Some(idx) = s.ready.iter().position(|&p| p == target_pid) {
+                s.ready.remove(idx);
+            }
             s.ready.push_front(target_pid);
         }
     }
@@ -1561,7 +1616,12 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                 }
             }
         }
+        let mut attempts = s.ready.len();
         let next = loop {
+            if attempts == 0 {
+                break None;
+            }
+            attempts -= 1;
             match s.ready.pop_front() {
                 Some(candidate) => {
                     if let Some(p) = s.table.get(&candidate) {
@@ -1574,47 +1634,49 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                                     continue;
                                 }
                             }
-                            break candidate;
+                            break Some(candidate);
                         }
                     }
                 }
                 None => {
-                    // Nothing runnable: CPU idles via the idle process (pid 0).
-                    if let Some(idle_proc) = s.table.get(&0) {
-                        idle_proc.check_stack_canary();
-                        crate::gdt::set_tss_rsp0_for_cpu(cpu_id, idle_proc.kernel_stack_top());
-                        let idle_ctx: *const RegisterContext = &idle_proc.ctx;
-                        drop(s);
-                        jump_to_initial(idle_ctx);
-                    } else {
-                        drop(s);
-                        loop {
-                            x86_64::instructions::hlt();
-                        }
-                    }
+                    break None;
                 }
             }
         };
-        s.current = Some(next);
-        set_cpu_current_pid(cpu_id, Some(next));
-        if let Some(p) = s.table.get_mut(&next) {
-            p.state = ProcessState::Running;
-            p.check_stack_canary();
-            crate::gdt::set_tss_rsp0_for_cpu(cpu_id, p.kernel_stack_top());
-        }
-        let ports = s.table.get(&next).and_then(|p| p.allowed_ports);
-        sync_iopb_for_process_for_cpu(cpu_id, ports);
 
-        arm_quantum();
-        let next_raw = if let Some(p) = s.table.get(&next) {
-            &p.ctx as *const RegisterContext
-        } else if let Some(idle_p) = s.table.get(&0) {
-            &idle_p.ctx as *const RegisterContext
-        } else {
-            core::ptr::null()
-        };
-        crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", next));
-        (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
+        match next {
+            Some(pid) => {
+                s.current = Some(pid);
+                set_cpu_current_pid(cpu_id, Some(pid));
+                if let Some(p) = s.table.get_mut(&pid) {
+                    p.state = ProcessState::Running;
+                    p.on_cpu = Some(cpu_id);
+                    p.check_stack_canary();
+                    crate::gdt::set_tss_rsp0_for_cpu(cpu_id, p.kernel_stack_top());
+                }
+                let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
+                sync_iopb_for_process_for_cpu(cpu_id, ports);
+                arm_quantum();
+                let next_raw = s.table.get(&pid).map(|p| &p.ctx as *const RegisterContext).unwrap_or(core::ptr::null());
+                crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", pid));
+                (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
+            }
+            None => {
+                // Nothing runnable: CPU idles via the idle process (pid 0).
+                if let Some(idle_proc) = s.table.get(&0) {
+                    idle_proc.check_stack_canary();
+                    crate::gdt::set_tss_rsp0_for_cpu(cpu_id, idle_proc.kernel_stack_top());
+                    let idle_ctx: *const RegisterContext = &idle_proc.ctx;
+                    drop(s);
+                    jump_to_initial(idle_ctx);
+                } else {
+                    drop(s);
+                    loop {
+                        x86_64::instructions::hlt();
+                    }
+                }
+            }
+        }
     };
 
     // drop(s) → switch_context penceresi SMP için güvensiz; Faz 4'te finish_switch kalıbı
@@ -3154,7 +3216,7 @@ pub fn init_preemptive() {
 
 /// Turn the preemptive scheduler on/off.
 pub fn set_preemption_enabled(on: bool) {
-    PREEMPTION_ENABLED.store(on, Ordering::Relaxed);
+    crate::smp::this_cpu().preemption_enabled.store(on, Ordering::Relaxed);
     if on {
         arm_quantum();
     }
@@ -3162,18 +3224,24 @@ pub fn set_preemption_enabled(on: bool) {
 
 /// Is the preemptive scheduler running?
 pub fn preemption_enabled() -> bool {
-    PREEMPTION_ENABLED.load(Ordering::Relaxed)
+    crate::smp::this_cpu().preemption_enabled.load(Ordering::Relaxed)
 }
 
 #[inline(always)]
 pub fn current_pid() -> u64 {
+    crate::smp::this_cpu().current_pid.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+pub fn current_pid_opt() -> Option<u64> {
     let pid = crate::smp::this_cpu().current_pid.load(Ordering::Relaxed);
-    if pid != 0 {
-        pid
+    if pid == 0 {
+        None
     } else {
-        SCHEDULER.lock().current.unwrap_or(0)
+        Some(pid)
     }
 }
+
 
 /// Look up a process by pid (returns a shallow snapshot for read-only use).
 #[allow(dead_code)]

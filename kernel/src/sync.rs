@@ -258,6 +258,10 @@ impl<M> BlockingChannel<M> {
         &self.not_empty
     }
 
+    pub fn wait_queue_not_full(&self) -> &crate::task::process::WaitQueue {
+        &self.not_full
+    }
+
     pub fn send(&self, msg: M) -> Option<u64> {
         let mut pending = Some(msg);
         loop {

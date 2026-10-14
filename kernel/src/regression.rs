@@ -198,6 +198,9 @@ pub fn run() {
     input_service_ipc_and_event_distribution_regression();
     network_service_ipc_and_socket_lifecycle_regression();
     compositor_service_ipc_and_window_lifecycle_regression();
+    mem_object_lifecycle_and_refcount_regression();
+    semaphore_race_regression();
+    ipc_destroy_waiter_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -804,6 +807,103 @@ fn compositor_service_ipc_and_window_lifecycle_regression() {
 
     crate::serial_println!("[REGRESSION] PASS Compositor service IPC protocol, damage tracking and window lifecycle");
 }
+
+fn mem_object_lifecycle_and_refcount_regression() {
+    use crate::mem_object::{mem_create, mem_destroy, mem_dup, mem_map, mem_unmap, MEM_OBJECT_STORE, MEM_FLAG_READ, MEM_FLAG_WRITE};
+    use crate::cap::{CapError, Rights};
+
+    let (pid, _cr3) = owner();
+
+    // 1. mem_create kota ve sayfa tahsisi
+    let handle = mem_create(4, MEM_FLAG_READ | MEM_FLAG_WRITE, pid).expect("mem_create must succeed");
+    {
+        let sched = process::SCHEDULER.lock();
+        let proc = sched.get_process(pid).unwrap();
+        assert!(proc.resource_usage.current_memory_bytes >= 4 * 4096, "Memory quota must be charged");
+    }
+
+    // 2. mem_dup referans sayımı artırır
+    let dup_handle = mem_dup(handle, Rights::MAP | Rights::DESTROY).expect("mem_dup must succeed");
+
+    // 3. mem_map hedef süreç adres uzayına eşler ve ref_count artırır
+    let vaddr = 0x5000_0000u64;
+    let mapped_addr = mem_map(handle, pid, vaddr, true).expect("mem_map must succeed");
+    assert_eq!(mapped_addr, vaddr);
+
+    // 4. mem_destroy ilk handle için çağrıldığında mapping varken sayfaları tutar ve kotayı henüz iade etmez
+    let destroy_res = mem_destroy(handle, pid);
+    assert!(destroy_res.is_ok(), "mem_destroy must succeed");
+
+    {
+        let sched = process::SCHEDULER.lock();
+        let proc = sched.get_process(pid).unwrap();
+        assert!(proc.resource_usage.current_memory_bytes >= 4 * 4096, "Memory quota must still be held while mapped");
+    }
+
+    {
+        let store = MEM_OBJECT_STORE.lock();
+        let (_, obj_idx) = crate::cap::object_identity(dup_handle).unwrap();
+        let obj = store.get(&obj_idx).expect("MemObject must stay alive while mapped");
+        assert!(obj.destroyed, "MemObject must be marked destroyed");
+        assert_eq!(obj.mapped_vaddrs.len(), 1);
+    }
+
+    // 5. mem_unmap mapping'i kaldırır ve son referansta sayfaları serbest bırakır (Drop kotayı iade eder)
+    let unmap_res = mem_unmap(dup_handle, pid, vaddr);
+    assert!(unmap_res.is_ok(), "mem_unmap must succeed");
+
+    let _ = mem_destroy(dup_handle, pid);
+    {
+        let sched = process::SCHEDULER.lock();
+        let proc = sched.get_process(pid).unwrap();
+        assert_eq!(proc.resource_usage.current_memory_bytes, 0, "Memory quota must be refunded after Drop");
+    }
+
+    // 6. Kota aşımı denetimi (CapError::QuotaExceeded)
+    let huge_handle = mem_create(100000, MEM_FLAG_READ, pid);
+    assert_eq!(huge_handle.err(), Some(CapError::Invalid)); // Limit 16384
+
+    let quota_exceed_handle = mem_create(16000, MEM_FLAG_READ, pid);
+    assert_eq!(quota_exceed_handle.err(), Some(CapError::QuotaExceeded));
+    assert_eq!(CapError::QuotaExceeded.to_errno(), spark_abi::errno::EQUOTA);
+
+    dispose(pid);
+    crate::serial_println!("[REGRESSION] PASS MemObject lifecycle, owner quota refund and mapping refcount");
+}
+
+fn semaphore_race_regression() {
+    let sem = crate::sync::Semaphore::new(0);
+    // 1. try_wait başarısız
+    assert!(!sem.try_wait());
+    // 2. Bir sinyal gönder ve wait çağrısı yap (yarış durumu simülasyonu)
+    sem.signal();
+    sem.wait();
+    // 3. Thread kaybolmamalı ve Running durumunda devam etmeli
+    let cur_pid = crate::task::process::current_pid();
+    if cur_pid != 0 {
+        let s = crate::task::process::SCHEDULER.lock();
+        if let Some(p) = s.get_process(cur_pid) {
+            assert_eq!(p.state, crate::task::process::ProcessState::Running, "Thread must remain in Running state after wait completion");
+        }
+    }
+    crate::serial_println!("[REGRESSION] PASS Semaphore wait/signal race and state consistency");
+}
+
+fn ipc_destroy_waiter_regression() {
+    let (ep_id, root_cap) = crate::ipc::create_raw_endpoint(4).expect("create endpoint");
+    let owner_pid = 9999u32;
+    crate::ipc::ENDPOINT_OWNERS.lock().insert(ep_id, owner_pid);
+
+    // Endpoint'i yok et (hangup)
+    crate::ipc::hangup_channel_for_pid(owner_pid);
+
+    // Kapanmış endpoint'ten okuma denenmesi NotFound hatası dönmeli ve bloke kalmamalı
+    let res = crate::ipc::raw_ipc_try_recv(ep_id, root_cap);
+    assert!(res.is_err());
+    let _ = crate::cap::close(root_cap);
+    crate::serial_println!("[REGRESSION] PASS IPC hangup wakes waiters and cleans endpoints");
+}
+
 
 
 

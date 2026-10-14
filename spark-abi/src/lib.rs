@@ -85,6 +85,20 @@ pub mod cap {
         NotFound,
         Exhausted,
         AlreadyExists,
+        QuotaExceeded,
+    }
+
+    impl CapError {
+        pub const fn to_errno(&self) -> u64 {
+            match self {
+                CapError::Invalid => crate::errno::EINVAL,
+                CapError::Revoked | CapError::NoRights => crate::errno::EACCES,
+                CapError::NotFound => crate::errno::ENOENT,
+                CapError::Exhausted => crate::errno::ENOMEM,
+                CapError::AlreadyExists => crate::errno::EAGAIN,
+                CapError::QuotaExceeded => crate::errno::EQUOTA,
+            }
+        }
     }
 
     pub type Result<T> = core::result::Result<T, CapError>;

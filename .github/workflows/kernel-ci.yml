@@ -9,12 +9,22 @@ on:
 jobs:
   regression:
     name: Build & QEMU Headless Regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Cache Cargo & bootimage
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/bootimage
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-bootimage-v1
 
       - name: Install QEMU and dependencies
         run: |
@@ -29,7 +39,7 @@ jobs:
           targets: x86_64-unknown-none
 
       - name: Install bootimage
-        run: cargo install bootimage
+        run: which bootimage || cargo install bootimage
 
       - name: Ensure disk image exists
         run: |

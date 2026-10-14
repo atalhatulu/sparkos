@@ -113,6 +113,10 @@ impl<M> CapChannel<M> {
     pub fn wait_queue_not_empty(&self) -> &crate::task::process::WaitQueue {
         self.inner.wait_queue_not_empty()
     }
+
+    pub fn wait_queue_not_full(&self) -> &crate::task::process::WaitQueue {
+        self.inner.wait_queue_not_full()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -181,6 +185,12 @@ pub fn hangup_channel_for_pid(pid: u32) {
     for ep_id in to_remove {
         owners.remove(&ep_id);
         if let Some(channel) = endpoints.remove(&ep_id) {
+            // Kanal kapanmadan ÖNCE bekleyen tüm alıcı/gönderici thread'leri uyandır
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                channel.wait_queue_not_empty().wake_all(&mut s);
+                channel.wait_queue_not_full().wake_all(&mut s);
+            }
             // Kanal kapanırken kuyrukta bekleyen in-flight capability'leri kapat (Zero-Leak)
             let root = channel.endpoint();
             while let Ok(Some(msg)) = channel.try_recv(root) {
@@ -257,9 +267,20 @@ pub fn raw_ipc_recv(
         crate::task::process::schedule();
         {
             let guard = ENDPOINTS.lock();
+            let mut s = crate::task::process::SCHEDULER.lock();
             if let Some(channel) = guard.get(&ep_id) {
-                let mut s = crate::task::process::SCHEDULER.lock();
                 channel.wait_queue_not_empty().finish_wait(&mut s);
+            } else {
+                // Endpoint hangup ile yok edilmiş: thread'i Running durumuna getirip NotFound dön
+                if let Some(cur) = s.current() {
+                    if let Some(proc) = s.get_process_mut(cur) {
+                        if proc.state == crate::task::process::ProcessState::Blocked {
+                            proc.state = crate::task::process::ProcessState::Running;
+                            proc.block_reason = None;
+                        }
+                    }
+                }
+                return Err(CapError::NotFound);
             }
         }
     }

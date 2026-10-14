@@ -32,23 +32,31 @@ pub static CPU_STATES: crate::sync::IrqMutex<[PerCpuState; MAX_CPUS]> = crate::s
 
 #[repr(C, align(64))]
 pub struct PerCpuBlock {
+    pub self_ptr: *const PerCpuBlock, // offset 0 -> gs:[0]
     pub cpu_id: usize,
     pub apic_id: u8,
     pub current_pid: core::sync::atomic::AtomicU64,
     pub ticks: core::sync::atomic::AtomicU64,
     pub heartbeat: core::sync::atomic::AtomicU64,
     pub online: core::sync::atomic::AtomicBool,
+    pub ticks_left: core::sync::atomic::AtomicU32,
+    pub preemption_enabled: core::sync::atomic::AtomicBool,
 }
+
+unsafe impl Sync for PerCpuBlock {}
 
 impl PerCpuBlock {
     pub const fn new(cpu_id: usize) -> Self {
         Self {
+            self_ptr: core::ptr::null(),
             cpu_id,
             apic_id: 0,
             current_pid: core::sync::atomic::AtomicU64::new(0),
             ticks: core::sync::atomic::AtomicU64::new(0),
             heartbeat: core::sync::atomic::AtomicU64::new(0),
             online: core::sync::atomic::AtomicBool::new(false),
+            ticks_left: core::sync::atomic::AtomicU32::new(5),
+            preemption_enabled: core::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -66,26 +74,36 @@ pub static PER_CPU_BLOCKS: [PerCpuBlock; MAX_CPUS] = [
 
 #[inline(always)]
 pub fn this_cpu() -> &'static PerCpuBlock {
-    let addr = x86_64::registers::model_specific::GsBase::read().as_u64();
-    if addr != 0 {
-        unsafe { &*(addr as *const PerCpuBlock) }
-    } else {
-        &PER_CPU_BLOCKS[0]
+    let ptr: *const PerCpuBlock;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[0]",
+            out(reg) ptr,
+            options(nostack, preserves_flags, readonly)
+        );
     }
+    if ptr.is_null() {
+        panic!("this_cpu(): GsBase or gs:[0] is null! Check setup_per_cpu_for initialization.");
+    }
+    unsafe { &*ptr }
 }
 
 pub fn setup_per_cpu_for(cpu_id: usize, apic_id: u8) {
     if cpu_id < MAX_CPUS {
         unsafe {
             let block_ptr = &PER_CPU_BLOCKS[cpu_id] as *const _ as *mut PerCpuBlock;
+            (*block_ptr).self_ptr = block_ptr;
             (*block_ptr).apic_id = apic_id;
             (*block_ptr).online.store(true, core::sync::atomic::Ordering::SeqCst);
         }
         x86_64::registers::model_specific::GsBase::write(
             x86_64::VirtAddr::new(&PER_CPU_BLOCKS[cpu_id] as *const _ as u64)
         );
+        let verified_id = this_cpu().cpu_id;
+        crate::serial_println!("[SMP] CPU {}: this_cpu().cpu_id == {} verified (gs:[0] self-pointer active)", cpu_id, verified_id);
     }
 }
+
 
 pub struct LocalApic {
     base_addr: u64,
@@ -366,7 +384,7 @@ pub fn setup_ap_trampoline(trampoline_addr: u32, cpu_id: usize, apic_id: u8) {
             0x0F, 0x22, 0xD8,             // mov cr3, eax
             0xB9, 0x80, 0x00, 0x00, 0xC0, // mov ecx, 0xC0000080 (EFER MSR)
             0x0F, 0x32,                   // rdmsr
-            0x0D, 0x00, 0x01, 0x00, 0x00, // or eax, 0x100 (EFER.LME)
+            0x0D, 0x00, 0x09, 0x00, 0x00, // or eax, 0x900 (EFER.LME | EFER.NXE)
             0x0F, 0x30,                   // wrmsr
             0x0F, 0x20, 0xC0,             // mov eax, cr0
             0x0D, 0x00, 0x00, 0x00, 0x80, // or eax, 0x80000000 (CR0.PG)
@@ -400,44 +418,30 @@ pub static TSC_END_0: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomic
 pub static TSC_START_1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static TSC_END_1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static STRESS_READY_1: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-pub fn ap_kernel_entry(_cpu_id: usize, _apic_id: u8) {
+pub fn ap_kernel_entry(cpu_id: usize, apic_id: u8) {
     unsafe {
         // Write Long Mode entry confirmation marker
+        core::ptr::write_volatile((0x8000 + crate::memory::PHYS_OFFSET + 0x1F8) as *mut u32, 0x11112222);
         core::ptr::write_volatile(0x81F8 as *mut u32, 0x11112222);
 
-        let ptr_ready = 0x81E0 as *mut u32;
-        let ptr_gate = 0x81E4 as *const u32;
-        let ptr_s1 = 0x81E8 as *mut u64;
-        let ptr_e1 = 0x81B0 as *mut u64;
-        let ptr_done = 0x81B8 as *mut u32;
+        // 1. AP GDT and TSS initialization
+        crate::gdt::init_cpu_gdt_tss(cpu_id);
 
-        let ptr_counter1 = 0x81C8 as *mut u64;
-        let ptr_shared = 0x81D8 as *mut u64;
+        // 2. AP IDT initialization
+        crate::interrupts::load_cpu_idt();
 
-        // 1. Signal AP 1 is READY at gate
-        core::ptr::write_volatile(ptr_ready, 1);
+        // 3. Setup per-CPU GS base
+        setup_per_cpu_for(cpu_id, apic_id);
 
-        // 2. Wait for CPU 0 to open the start gate
-        while core::ptr::read_volatile(ptr_gate) == 0 {
-            core::hint::spin_loop();
-        }
+        // 4. Initialize CPU Security (SMEP)
+        crate::memory::init_cpu_security();
 
-        // 3. Record starting TSC
-        let s1 = read_tsc();
-        core::ptr::write_volatile(ptr_s1, s1);
+        // 5. Verify TSS and SMEP via hardware registers
+        let str_val: u16;
+        core::arch::asm!("str {:x}", out(reg) str_val);
+        let cr4_val = x86_64::registers::control::Cr4::read_raw();
+        crate::serial_println!("[AP] CPU {}: online, TSS loaded (STR={:#x}), SMEP active (CR4={:#x})", cpu_id, str_val, cr4_val);
 
-        for _ in 0..20_000 {
-            let v1 = core::ptr::read_volatile(ptr_counter1);
-            core::ptr::write_volatile(ptr_counter1, v1.wrapping_add(1));
-
-            let vs = core::ptr::read_volatile(ptr_shared);
-            core::ptr::write_volatile(ptr_shared, vs.wrapping_add(1));
-        }
-
-        // 5. Record ending TSC
-        let e1 = read_tsc();
-        core::ptr::write_volatile(ptr_e1, e1);
-        core::ptr::write_volatile(ptr_done, 1);
 
         // 6. AP remains online and ready
         loop {
@@ -450,9 +454,9 @@ pub fn ap_kernel_entry(_cpu_id: usize, _apic_id: u8) {
 pub fn start_ap(cpu_id: usize, apic_id: u8, trampoline_addr: u32) {
     crate::serial_println!("SMP: Booting AP CPU {} (apic_id={}, trampoline={:#x})...", cpu_id, apic_id, trampoline_addr);
     
-    // Low 1MB Trampoline ve Stack sayfalarını (0x8000..0x30000) sayfa tablosunda identity-map et
-    let _ = crate::memory::map_user_phys_range(trampoline_addr as u64, x86_64::PhysAddr::new(trampoline_addr as u64), 1, true);
-    let _ = crate::memory::map_user_phys_range(0x20000, x86_64::PhysAddr::new(0x20000), 16, true);
+    // Low 1MB Trampoline ve Stack sayfalarını (0x8000..0x30000) sayfa tablosunda KERNEL-ONLY identity-map et
+    let _ = crate::memory::map_kernel_phys_range(trampoline_addr as u64, x86_64::PhysAddr::new(trampoline_addr as u64), 1, true);
+    let _ = crate::memory::map_kernel_phys_range(0x20000, x86_64::PhysAddr::new(0x20000), 16, true);
 
     // Gerçek Long Mode Trampoline kurulumu
     setup_ap_trampoline(trampoline_addr, cpu_id, apic_id);
@@ -498,6 +502,11 @@ pub fn start_ap(cpu_id: usize, apic_id: u8, trampoline_addr: u32) {
     }
     crate::serial_println!("[SMP] AP CPU {} Long Mode startup confirmation: {} (Marker: {:#X})", 
         cpu_id, ap_confirmed, unsafe { core::ptr::read_volatile((trampoline_virt + 0x1F8) as *const u32) });
+
+    // AP açıldıktan sonra low-memory trampoline ve stack identity eşlemelerini kaldır
+    let _ = crate::memory::unmap_kernel_phys_range(trampoline_addr as u64, 1);
+    let _ = crate::memory::unmap_kernel_phys_range(0x20000, 16);
+    crate::serial_println!("[SMP] Low-memory trampoline mappings (0x{:x}, 0x20000..0x30000) unmapped from CR3", trampoline_addr);
 
     // AP durumunu online ve per-cpu state olarak kaydet
     let mut states = CPU_STATES.lock();
