@@ -1488,7 +1488,7 @@ pub fn timer_tick() {
 
     if expired_quantum || has_waking {
         if let Some(s) = SCHEDULER.try_lock() {
-            schedule_internal(s);
+            schedule_internal(s, None);
         } else {
             TICKS_SKIPPED.fetch_add(1, Ordering::Relaxed);
         }
@@ -1567,22 +1567,15 @@ pub fn schedule() {
     // Faz 0.6: Timer IRQ'sunda ertelenen ödünç capability iadelerini SCHEDULER kilidi öncesinde işle
     crate::cap::poll_pending_lend_expiries();
     let s = SCHEDULER.lock();
-    schedule_internal(s);
+    schedule_internal(s, None);
 }
 
 /// Hızlı IPC Yolu: Kalan zaman dilimini doğrudan hedef alıcı thread'e devreder (Faz 4.6).
+/// O(1) doğrudan hedef adayı (hint_next) geçirir, ready kuyruğu üzerinde O(n) tarama ve kaydırma yapmaz.
 pub fn yield_to(target_pid: u64) {
     debug_assert_eq!(crate::sync::irq_locks_held(), 0, "schedule hiyerarşi ihlali: yield_to()");
-    let mut s = SCHEDULER.lock();
-    if let Some(target_proc) = s.table.get_mut(&target_pid) {
-        if target_proc.state == ProcessState::Ready && !target_proc.exited && !target_proc.reaped {
-            if let Some(idx) = s.ready.iter().position(|&p| p == target_pid) {
-                s.ready.remove(idx);
-            }
-            s.ready.push_front(target_pid);
-        }
-    }
-    schedule_internal(s);
+    let s = SCHEDULER.lock();
+    schedule_internal(s, Some(target_pid));
 }
 
 static CURRENT_IOPB_PORTS: [core::sync::atomic::AtomicU32; crate::gdt::MAX_CPUS] = [
@@ -1615,7 +1608,7 @@ pub fn sync_iopb_for_process(ports: Option<(u16, u16)>) {
     sync_iopb_for_process_for_cpu(crate::smp::current_cpu_id(), ports);
 }
 
-fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
+fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>, hint_next: Option<u64>) {
     let cpu_id = crate::smp::current_cpu_id();
 
     // Faz 2.2: Uyanma zamanı gelmiş thread'leri uyandır
@@ -1641,37 +1634,56 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                 }
             }
         }
-        let mut attempts = s.ready.len();
-        let next = loop {
-            if attempts == 0 {
-                break None;
-            }
-            attempts -= 1;
-            match s.ready.pop_front() {
-                Some(candidate) => {
-                    if let Some(p) = s.table.get(&candidate) {
-                        if !p.exited && !p.reaped && p.state != ProcessState::Terminated && p.state != ProcessState::Exited {
-                            // SMP Güvenliği: Eğer süreç başka bir çekirdekte hâlâ çalışıyorsa alma!
-                            if let Some(running_cpu) = p.on_cpu {
-                                if running_cpu != cpu_id {
-                                    s.ready.push_back(candidate);
-                                    continue;
-                                }
-                            }
-                            // Faz 34: CPU Affinity kontrolü
-                            if let Some(aff_cpu) = p.cpu_affinity {
-                                if aff_cpu != cpu_id {
-                                    // Başka bir CPU'ya sabitlenmiş; hazır kuyruğunun arkasına bırakıp sonrakine bak
-                                    s.ready.push_back(candidate);
-                                    continue;
-                                }
-                            }
-                            break Some(candidate);
-                        }
+
+        // O(1) Doğrudan Hedef Adayı (Hızlı IPC yield_to yolu)
+        let mut picked_hint = None;
+        if let Some(target) = hint_next {
+            if let Some(p) = s.table.get(&target) {
+                if !p.exited && !p.reaped && (p.state == ProcessState::Ready || p.state == ProcessState::Running) {
+                    let on_other_cpu = p.on_cpu.map(|c| c != cpu_id).unwrap_or(false);
+                    let aff_mismatch = p.cpu_affinity.map(|c| c != cpu_id).unwrap_or(false);
+                    if !on_other_cpu && !aff_mismatch {
+                        picked_hint = Some(target);
                     }
                 }
-                None => {
+            }
+        }
+
+        let next = if let Some(target) = picked_hint {
+            Some(target)
+        } else {
+            let mut attempts = s.ready.len();
+            loop {
+                if attempts == 0 {
                     break None;
+                }
+                attempts -= 1;
+                match s.ready.pop_front() {
+                    Some(candidate) => {
+                        if let Some(p) = s.table.get(&candidate) {
+                            if !p.exited && !p.reaped && p.state != ProcessState::Terminated && p.state != ProcessState::Exited {
+                                // SMP Güvenliği: Eğer süreç başka bir çekirdekte hâlâ çalışıyorsa alma!
+                                if let Some(running_cpu) = p.on_cpu {
+                                    if running_cpu != cpu_id {
+                                        s.ready.push_back(candidate);
+                                        continue;
+                                    }
+                                }
+                                // Faz 34: CPU Affinity kontrolü
+                                if let Some(aff_cpu) = p.cpu_affinity {
+                                    if aff_cpu != cpu_id {
+                                        // Başka bir CPU'ya sabitlenmiş; hazır kuyruğunun arkasına bırakıp sonrakine bak
+                                        s.ready.push_back(candidate);
+                                        continue;
+                                    }
+                                }
+                                break Some(candidate);
+                            }
+                        }
+                    }
+                    None => {
+                        break None;
+                    }
                 }
             }
         };
