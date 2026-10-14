@@ -323,7 +323,7 @@ fn kill_user_task() -> ! {
 /// faulted and its `user::KERNEL_RSP`/`KERNEL_RIP` frame is valid.
 ///
 /// Safety: the faulting process runs in Ring 3, so no kernel `Mutex` guard is
-/// held by it (`SCHEDULER`/`EXECUTOR_RESUME` guards are dropped before every
+/// held by it (`SCHEDULER` guards are dropped before every
 /// `iretq`). The handler executes on TSS RSP0 — the faulting process's own
 /// kernel stack — and `exit_current` abandons that stack via `jump_to_initial`
 /// once the process is terminated, which is sound.

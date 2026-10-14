@@ -135,7 +135,7 @@ fn panic(info: &PanicInfo) -> ! {
 
 entry_point!(kernel_main);
 
-async fn clock_task() {
+extern "C" fn clock_thread() {
     loop {
         #[cfg(feature = "legacy-desktop")]
         if crate::vga_buffer::GUI_MODE.load(core::sync::atomic::Ordering::Relaxed) {
@@ -162,12 +162,7 @@ async fn clock_task() {
             w.write_at(0, 69, &time_str, crate::vga_buffer::Color::Yellow, crate::vga_buffer::Color::Blue);
         }
         
-        // 500 ms periyotla saat HUD'ını canlı ve akıcı güncelle
-        let current_tick = crate::interrupts::get_tick();
-        let target = current_tick + 500;
-        while crate::interrupts::get_tick() < target {
-            crate::task::yield_now().await;
-        }
+        crate::task::process::sleep_ms(500);
     }
 }
 
@@ -175,38 +170,31 @@ async fn clock_task() {
 static TEST_CHAN: crate::sync::BlockingChannel<u32> = crate::sync::BlockingChannel::new(10);
 
 #[allow(dead_code)]
-async fn ipc_consumer() {
+fn ipc_consumer() {
     let mut count = 0;
     while count < 4 {
-        if let Some(val) = TEST_CHAN.try_recv() {
-            crate::serial_println!("[IPC Consumer] Received: {}", val);
-            count += 1;
-        } else {
-            crate::task::yield_now().await;
-        }
+        let val = TEST_CHAN.recv();
+        crate::serial_println!("[IPC Consumer] Received: {}", val);
+        count += 1;
     }
     crate::serial_println!("[IPC Consumer] Test complete.");
 }
 
 #[allow(dead_code)]
-async fn ipc_producer_1() {
+fn ipc_producer_1() {
     for i in 1..=2 {
-        while TEST_CHAN.try_send(i).is_err() {
-            crate::task::yield_now().await;
-        }
+        TEST_CHAN.send(i);
         crate::serial_println!("[IPC Producer 1] Sent: {}", i);
-        crate::task::yield_now().await;
+        crate::task::process::sleep_ms(1);
     }
 }
 
 #[allow(dead_code)]
-async fn ipc_producer_2() {
+fn ipc_producer_2() {
     for i in 3..=4 {
-        while TEST_CHAN.try_send(i).is_err() {
-            crate::task::yield_now().await;
-        }
+        TEST_CHAN.send(i);
         crate::serial_println!("[IPC Producer 2] Sent: {}", i);
-        crate::task::yield_now().await;
+        crate::task::process::sleep_ms(1);
     }
 }
 
@@ -214,15 +202,15 @@ async fn ipc_producer_2() {
 /// Bir Device capability üretir, `keysvc` servisini Ring 3'te spawn eder ve
 /// cooperative girer. Servis kendi endpoint'ini (SYS_IPC_CREATE_ENDPOINT) kurar,
 /// timer + klavye IRQ'larını bağlar (SYS_IPC_BIND_IRQ), 64 olayı poll'layıp
-/// echo'lar ve SYS_EXIT ile kapanır; `enter_service` geri dönünce IRQ'lar
+/// echo'lar ve SYS_EXIT ile kapanır; servis bitince IRQ'lar
 /// unbind edilir. Headless QEMU'da timer her tick deterministik olay üretir.
 #[allow(dead_code)]
-async fn service_demo() {
+fn service_demo() {
     let dev = crate::cap::create_object(crate::cap::ObjectKind::Device).unwrap();
     match crate::task::process::spawn_service("keysvc", dev, crate::task::process::service_machine_code) {
         Ok(pid) => {
-            crate::serial_println!("[SERVICE] keysvc pid={} entering (cooperative)", pid);
-            crate::task::process::enter_service(pid);
+            crate::serial_println!("[SERVICE] keysvc pid={} entering (preemptive)", pid);
+            let _ = crate::task::process::waitpid(pid);
             let _ = crate::ipc::unbind_irq(dev, 0);
             let _ = crate::ipc::unbind_irq(dev, 1);
             crate::serial_println!("[SERVICE] demo complete (IRQs unbound).");
@@ -233,19 +221,13 @@ async fn service_demo() {
     }
 }
 
-/// Aşama 5.3 boot regresyonu: user-space serial driver. `create_device_ports`
-/// COM1 (0x3F8..=0x3FF) aralığına bağlı bir Device capability üretir ve servise
-/// IO|MANAGE haklı handle provision edilir. Servis Ring 3'te `sys_ioperm` ile
-/// portları açar (capability-gated; TSS IOPB'de 0x3F8..=0x3FF izinli yapılır),
-/// sonra raw `outb` ile COM1'e "[SERDRV] alive\r\n" yazar (LSR poll) ve SYS_EXIT
-/// ile kapanır. Yazılan baytlar QEMU `-serial stdio` üzerinden boot log'una
-/// düşer — Ring-3 port I/O'nun canlı kanıtı.
+/// Aşama 5.3 boot regresyonu: user-space serial driver.
 #[allow(dead_code)]
-async fn serial_demo() {
+fn serial_demo() {
     match crate::task::process::spawn_serial_service("serdrv") {
         Ok(pid) => {
-            crate::serial_println!("[SERIAL] serdrv pid={} entering (cooperative)", pid);
-            crate::task::process::enter_service(pid);
+            crate::serial_println!("[SERIAL] serdrv pid={} entering (preemptive)", pid);
+            let _ = crate::task::process::waitpid(pid);
             crate::serial_println!("[SERIAL] demo complete (Ring-3 COM1 TX verified).");
         }
         Err(e) => {
@@ -254,20 +236,14 @@ async fn serial_demo() {
     }
 }
 
-/// Aşama 5.4 boot regresyonu: user-space fault recovery. `faultsvc` Ring 3'te
-/// `mov eax, [0x5000_0000]` çalıştırır — user yarısında deterministik olarak
-/// eşlenmemiş bir adres. Kernel fault'u process modeli altında kurtarmalı
-/// (`exit_current` → Terminated + KILLED_PROCESSES + executor devam), legacy
-/// `user::KERNEL_RSP`/`KERNEL_RIP` çerçevesine asla dokunmamalı. Başarı: boot
-/// log'unda "[USER-FAULT] process N ('faultsvc') faulted" ve "[FAULT] demo
-/// complete" görülmeli; "[PANIC] Kernel Page Fault" OLMAMALI.
+/// Aşama 5.4 boot regresyonu: user-space fault recovery.
 #[allow(dead_code)]
-async fn fault_demo() {
+fn fault_demo() {
     match crate::task::process::spawn_fault_service("faultsvc") {
         Ok(pid) => {
-            crate::serial_println!("[FAULT] faultsvc pid={} entering (cooperative)", pid);
-            crate::task::process::enter_service(pid);
-            crate::serial_println!("[FAULT] demo complete (user fault recovered, executor resumed).");
+            crate::serial_println!("[FAULT] faultsvc pid={} entering (preemptive)", pid);
+            let _ = crate::task::process::waitpid(pid);
+            crate::serial_println!("[FAULT] demo complete (user fault recovered).");
         }
         Err(e) => {
             crate::serial_println!("[FAULT] spawn failed: {}", e);
@@ -276,11 +252,8 @@ async fn fault_demo() {
 }
 
 /// Aşama 6.3 boot regresyonu: Ring-3 RTL8139 driver'ın üst yığına zero-copy frame.
-///
-/// Kernel bir IPC endpoint'i kurar, WRITE hakkını grant edip `ep_writer` handle'ını
-/// netdrv'e provision eder (fd == `kern_ep_id`). netdrv RX'te doğruladığı ARP reply/// Aşama 6.3: netdrv (RTL8139 Ring 3 DMA) <-> netsvc (Ring 3 TCP/IP) Zero-Copy Frame Hand-off.
 #[allow(dead_code)]
-async fn net_demo() {
+fn net_demo() {
     let (rx_ep_id, rx_root) = match crate::ipc::create_raw_endpoint(8) {
         Ok(pair) => pair,
         Err(e) => {
@@ -309,17 +282,17 @@ async fn net_demo() {
         Err(_) => return,
     };
 
-    // 1. netdrv sürücüsünü başlat (RX frame'i rx_ep_id'ye iletir)
+    // 1. netdrv sürücüsünü başlat
     match crate::task::process::spawn_net_service("netdrv", rx_ep_id, rx_writer) {
         Ok(drv_pid) => {
-            crate::serial_println!("[NETDRV] netdrv pid={} entering (cooperative)", drv_pid);
-            crate::task::process::enter_service(drv_pid);
+            crate::serial_println!("[NETDRV] netdrv pid={} entering (preemptive)", drv_pid);
+            let _ = crate::task::process::waitpid(drv_pid);
 
-            // 2. netsvc TCP/IP servisini başlat (rx_ep_id'den paketi alır ve recycle_ep_id ile iade eder)
+            // 2. netsvc TCP/IP servisini başlat
             match crate::task::process::spawn_netsvc("netsvc", rx_ep_id, rx_reader, recycle_ep_id, recycle_writer) {
                 Ok(svc_pid) => {
-                    crate::serial_println!("[NETSVC] netsvc pid={} entering (cooperative)", svc_pid);
-                    crate::task::process::enter_service(svc_pid);
+                    crate::serial_println!("[NETSVC] netsvc pid={} entering (preemptive)", svc_pid);
+                    let _ = crate::task::process::waitpid(svc_pid);
                     crate::serial_println!("[NETDRV] demo complete (Ring-3 RTL8139 + netsvc Zero-Copy Frame Bridge).");
                 }
                 Err(e) => {
@@ -335,11 +308,11 @@ async fn net_demo() {
 
 /// Aşama 8.1 boot regresyonu: user-space ATA disk driver.
 #[allow(dead_code)]
-async fn disk_demo() {
+fn disk_demo() {
     match crate::task::process::spawn_disk_service("disksvc") {
         Ok(pid) => {
-            crate::serial_println!("[DISK] disksvc pid={} entering (cooperative)", pid);
-            crate::task::process::enter_service(pid);
+            crate::serial_println!("[DISK] disksvc pid={} entering (preemptive)", pid);
+            let _ = crate::task::process::waitpid(pid);
             crate::serial_println!("[DISK] demo complete (Ring-3 ATA PIO 0x1F0 verified).");
         }
         Err(e) => {
@@ -350,8 +323,8 @@ async fn disk_demo() {
     // Faz 5: Ring-3 Filesystem Servisi (`fssvc`)
     match crate::task::process::spawn_fs_service("fssvc") {
         Ok(pid) => {
-            crate::serial_println!("[FSSVC] fssvc pid={} entering (cooperative)", pid);
-            crate::task::process::enter_service(pid);
+            crate::serial_println!("[FSSVC] fssvc pid={} entering (preemptive)", pid);
+            let _ = crate::task::process::waitpid(pid);
             crate::serial_println!("[FSSVC] demo complete (SPFS & VFS Service Isolation verified).");
         }
         Err(e) => {
@@ -363,7 +336,7 @@ async fn disk_demo() {
     match crate::task::process::spawn_user_shell("sh") {
         Ok(pid) => {
             crate::serial_println!("[SHELL] sh pid={} entering (Ring 3)", pid);
-            crate::task::process::enter_service(pid);
+            let _ = crate::task::process::waitpid(pid);
             crate::serial_println!("[SHELL] demo complete (Ring-3 Shell & User Environment verified).");
         }
         Err(e) => {
@@ -377,7 +350,7 @@ async fn disk_demo() {
         match crate::task::process::spawn_display_server("displaysvc") {
             Ok(pid) => {
                 crate::serial_println!("[DISPLAYSVC] displaysvc pid={} entering (Ring 3)", pid);
-                crate::task::process::enter_service(pid);
+                let _ = crate::task::process::waitpid(pid);
                 crate::serial_println!("[DISPLAYSVC] demo complete (Ring-3 Framebuffer Display Server verified).");
             }
             Err(e) => {
@@ -389,7 +362,7 @@ async fn disk_demo() {
         match crate::task::process::spawn_window_manager("wm") {
             Ok(pid) => {
                 crate::serial_println!("[WM] wm pid={} entering (Ring 3)", pid);
-                crate::task::process::enter_service(pid);
+                let _ = crate::task::process::waitpid(pid);
                 crate::serial_println!("[WM] demo complete (Ring-3 Window Manager & Compositor verified).");
             }
             Err(e) => {
@@ -399,7 +372,7 @@ async fn disk_demo() {
     }
 }
 
-async fn boot_orchestrator() {
+extern "C" fn boot_orchestrator() {
     #[cfg(feature = "legacy-desktop")]
     {
         // Otomatik olarak GUI Desktop Ortamını Başlat
@@ -435,7 +408,7 @@ async fn boot_orchestrator() {
 
     let mut shell = shell::Shell::new();
     loop {
-        shell.run().await;
+        shell.run();
     }
 }
 
@@ -593,22 +566,19 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         unsafe { port.write(0x2000u16); }
     }
 
-    core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
+    core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting kernel threads (Preemptive)...\n").unwrap();
     
-    let mut executor = task::simple_executor::SimpleExecutor::new();
-
-    // Tasks for interactive desktop multitasking
-    executor.spawn(task::Task::new("clock", clock_task()));
-    executor.spawn(task::Task::new("mouse", mouse::mouse_task()));
-    executor.spawn(task::Task::new("keyboard", task::keyboard::keyboard_task()));
+    // Spawn interactive desktop and shell kernel threads
+    crate::task::process::create_kernel_process("clock", clock_thread);
+    crate::task::process::create_kernel_process("mouse", mouse::mouse_thread);
+    crate::task::process::create_kernel_process("keyboard", task::keyboard::keyboard_thread);
     #[cfg(feature = "legacy-desktop")]
-    executor.spawn(task::Task::new("compositor", wm::compositor_task()));
+    crate::task::process::create_kernel_process("compositor", wm::compositor_thread);
 
     // Boot dizisini tamamlayıp ardından interaktif shell'i açık tutan ana görev
-    executor.spawn(task::Task::new("boot_orchestrator", boot_orchestrator()));
+    crate::task::process::create_kernel_process("boot_orchestrator", boot_orchestrator);
 
-    executor.run();
-    
-    // Fallback loop in case executor exits
+    // Switch to first ready thread and fall back to idle loop
+    crate::task::process::schedule();
     loop { x86_64::instructions::hlt(); }
 }

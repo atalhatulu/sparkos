@@ -4,12 +4,10 @@
 //! user-process context switching, and a timer-driven PREEMPTIVE round-robin
 //! scheduler. It is intentionally self-contained:
 //!
-//! * It does NOT modify `SimpleExecutor`, `Task`, or the existing cooperative
-//!   async system; those keep working untouched via their own waker/poll.
-//! * The preemptive scheduler is OFF by default. Until
-//!   [`set_preemption_enabled(true)`] is called, [`timer_tick`] is a no-op so
-//!   existing behavior is unchanged. The orchestrator arms it with
-//!   [`init_preemptive`] + [`set_preemption_enabled(true)`].
+//! * Fully replaces the legacy cooperative async system with pure preemptive
+//!   kernel threads and intrusive `WaitQueue` primitives.
+//! * The preemptive scheduler is armed during boot via
+//!   [`init_preemptive`].
 //! * A bare-metal single address space is assumed (user pages are mapped with
 //!   `USER_ACCESSIBLE` into the shared page table), mirroring `user.rs`.
 //!   `user_cr3` is stored per-PCB so the model is ready for per-process
@@ -87,25 +85,14 @@ pub static TICKS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 /// The scheduler core state.
 pub static SCHEDULER: IrqMutex<Scheduler> = IrqMutex::new(Scheduler::uninit());
 
-/// Cooperative-resume slot (Aşama 5.2). A Ring-3 service entered via
-/// [`enter_service`] saves the executor's kernel context here; when the service
-/// calls SYS_EXIT, [`exit_current`] jumps back to this saved context so the
-/// executor continues exactly where it left off. Only meaningful while a
-/// cooperative service holds the CPU (preemption stays off), so the value lives
-/// on the CPU unguarded during the service run; the Mutex only serializes the
-/// brief set/take windows around the switch.
-pub static EXECUTOR_RESUME: IrqMutex<Option<RegisterContext>> = IrqMutex::new(None);
 
 /// Reference to the dynamically-allocated idle kernel-stack array. Kept so the
 /// idle process's `ctx.rsp` stays valid for the kernel's lifetime.
 static IDLE_STACK: spin::Once<Box<[u8]>> = spin::Once::new();
 
 /// Physical address of the shared kernel page table (CR3), captured the first
-/// time the kernel switches away from its own address space: [`enter_service`]
-/// (cooperative) or [`alloc_idle`] (preemptive). [`exit_current`] uses it to
-/// resume the cooperative executor in the kernel's own table instead of a
-/// terminated process's cloned table — never letting kernel execution run in a
-/// dead process's address space.
+/// time the kernel switches away from its own address space in [`alloc_idle`].
+/// Used to keep kernel execution in a safe shared address space.
 static SHARED_KERNEL_CR3: spin::Once<u64> = spin::Once::new();
 
 /// Record the current CR3 as the shared kernel address space. Both capture
@@ -1247,66 +1234,6 @@ pub fn create_user_process_with_caps(
 // Cooperative service entry (Aşama 5.2)
 // ---------------------------------------------------------------------------
 
-/// Run a service process to completion cooperatively, then return to the
-/// caller (the executor) exactly where it left off.
-///
-/// The executor context is saved into [`EXECUTOR_RESUME`] and control is
-/// switched to `pid`'s kernel context. When the service calls SYS_EXIT,
-/// [`exit_current`]'s resume branch marks it terminated and `jump_to_initial`s
-/// back to the saved executor context; this function then returns normally and
-/// the executor's async task continues (e.g. unbinding the IRQs).
-///
-/// # Locking
-/// `switch_context` is `-> !`, so a MutexGuard held across the switch would
-/// stay locked inside the frozen executor frame while the service runs — and
-/// `exit_current`'s `EXECUTOR_RESUME.lock().take()` would deadlock against it.
-/// The guard is therefore taken, its target written, a raw pointer captured,
-/// and the guard dropped BEFORE switching. Single-CPU cooperative model means
-/// nothing races during the service run.
-pub fn enter_service(pid: u64) {
-    // int 0x80 is an interrupt gate: SYS_EXIT returns with IF cleared. The
-    // register-context switch does not save RFLAGS, so restore the executor's
-    // original interrupt state explicitly when the service returns.
-    let interrupts_were_enabled = x86_64::instructions::interrupts::are_enabled();
-    // We are about to switch away from the kernel's own address space; remember
-    // it so `exit_current` can resume the executor here (see `exit_current`).
-    capture_shared_kernel_cr3();
-    let (target_ctx, allowed_ports, user_cr3) = {
-        let mut s = SCHEDULER.lock();
-        s.current = Some(pid);
-        set_cpu_current_pid(0, Some(pid));
-        if let Some(p) = s.table.get_mut(&pid) {
-            p.state = ProcessState::Running;
-        }
-        let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
-        let cr3 = s.table.get(&pid).map(|p| p.user_cr3).unwrap_or(0);
-        (&s.table[&pid].ctx as *const RegisterContext, ports, cr3)
-    };
-
-    crate::serial_println!("[SCHED-RUN] pid={}", pid);
-    crate::serial_println!("[CR3-SWITCH] pid={} cr3=0x{:x}", pid, user_cr3);
-
-    // TSS IOPB senkronizasyonu (Görev C, CAP_INV-14):
-    if let Some((start, end)) = allowed_ports {
-        crate::gdt::reset_io_bitmap();
-        crate::gdt::allow_port_range(start, end);
-    } else {
-        crate::gdt::reset_io_bitmap();
-    }
-
-    let save_ctx: *mut RegisterContext = {
-        let mut guard = EXECUTOR_RESUME.lock();
-        *guard = Some(RegisterContext::default());
-        guard.as_mut().unwrap() as *mut RegisterContext
-    };
-    // Guard dropped here; `save_ctx` still points into the static's storage.
-    switch_context(save_ctx, target_ctx);
-    if interrupts_were_enabled {
-        x86_64::instructions::interrupts::enable();
-    } else {
-        x86_64::instructions::interrupts::disable();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // User-mode transitions (Ring 3)
@@ -1691,9 +1618,7 @@ pub fn release_process_address_space(pid: u64) -> bool {
     true
 }
 
-/// Terminate the running process and switch to the next ready one (or idle),
-/// or — Aşama 5.2 — resume the cooperative executor that entered a service via
-/// [`enter_service`]. Never returns.
+/// Terminate the running process and switch to the next ready one (or idle). Never returns.
 pub fn exit_current() -> ! {
     // 1. Immediately reload the pristine shared kernel address space so all
     // subsequent teardown (surface cleanup, window cleanup, memory unmapping)
@@ -1738,62 +1663,6 @@ pub fn exit_current() -> ! {
         crate::cap::destroy_process_cspace(&mut caps);
     }
 
-    let exec_ctx: Option<RegisterContext> = EXECUTOR_RESUME.lock().take();
-    if let Some(mut ctx) = exec_ctx {
-        let mut killed_pid = None;
-        {
-            let mut s = SCHEDULER.lock();
-            if let Some(pid) = s.current {
-                let (parent_pid, is_user) = if let Some(p) = s.table.get_mut(&pid) {
-                    p.state = ProcessState::Terminated;
-                    p.exited = true;
-                    crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
-                    p.allowed_ports = None;
-                    (p.parent_pid, p.is_user)
-                } else {
-                    (None, false)
-                };
-
-                if let Some(parent_pid) = parent_pid {
-                    if let Some(parent) = s.table.get_mut(&parent_pid) {
-                        let should_wake = match parent.block_reason {
-                            Some(BlockReason::WaitPid(waited_child)) => waited_child == pid,
-                            _ => parent.state == ProcessState::Blocked,
-                        };
-                        if should_wake {
-                            parent.state = ProcessState::Ready;
-                            parent.block_reason = None;
-                            s.ready.push_back(parent_pid);
-                        }
-                    }
-                }
-                if !is_user {
-                    killed_pid = Some(pid);
-                }
-            }
-            // Executor is not a process; nothing is "current" after the resume.
-            s.current = None;
-            set_cpu_current_pid(0, None);
-        }
-        if let Some(kpid) = killed_pid {
-            crate::task::KILLED_PROCESSES.lock().push(kpid);
-        }
-        // Görev C (CAP_INV-14): Executor'a dönerken tüm IO portlarını sıfırla/kapat
-        crate::gdt::reset_io_bitmap();
-
-        // Resume the executor in the shared kernel address space, never in the
-        // terminating process's cloned table. The executor's saved context
-        // carries cr3=0 ("keep current"), which would otherwise strand kernel
-        // execution in a dead process's address space.
-        if let Some(kcr3) = SHARED_KERNEL_CR3.get().copied() {
-            ctx.cr3 = kcr3;
-        }
-        // Cooperative model: preemption stays off so no quantum is armed for
-        // the executor and the service cannot be preempted mid-poll.
-        set_preemption_enabled(false);
-        jump_to_initial(&ctx);
-    }
-
     let mut killed_pid = None;
     let next_ctx: *const RegisterContext = {
         let mut s = SCHEDULER.lock();
@@ -1801,6 +1670,7 @@ pub fn exit_current() -> ! {
             let (parent_pid, is_user) = if let Some(p) = s.table.get_mut(&pid) {
                 p.state = ProcessState::Terminated;
                 p.exited = true;
+                crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
                 p.allowed_ports = None;
                 (p.parent_pid, p.is_user)
             } else {
@@ -2069,8 +1939,7 @@ fn demo_machine_code(_tag: u8, writes: u32, delay: u32) -> Vec<u8> {
 
 /// Emit x86-64 machine code for the hardware-less service demo process.
 ///
-/// The service runs cooperatively in Ring 3 (entered via [`enter_service`],
-/// never preempted). Flow:
+/// The service runs in Ring 3. Flow:
 ///   1. SYS_IPC_CREATE_ENDPOINT(16) — Ring-3 kendi endpoint'ini oluşturur.
 ///   2. SYS_IPC_BIND_IRQ(SERVICE_DEVICE_FD, 0) + (…, 1) — timer + klavye IRQ'ları.
 ///   3. Banner'ı stdout'a yazar ("SVC UP").
@@ -2222,8 +2091,7 @@ pub fn service_machine_code() -> Vec<u8> {
 /// handle grant edilir ve [`SERVICE_DEVICE_FD`] fd'sine yerleştirilir. Kod +
 /// data slotu (`USER_ADDR_BASE + 0x2000`, WRITABLE — servis kendi data slotunu
 /// yazar) + stack, klonlanmış bir CR3 içine haritalanır. `build_code` ile
-/// üretilen makine kodu servis başlangıcıdır; servis [`enter_service`] ile
-/// cooperative çalıştırılır (preemption değil).
+/// üretilen makine kodu servis başlangıcıdır; servis preemptive çalıştırılır.
 pub fn spawn_service<F>(
     name: &str,
     dev: crate::cap::CapHandle,
@@ -2277,8 +2145,7 @@ where
 
 /// Emit x86-64 machine code for the user-space serial driver demo (Aşama 5.3).
 ///
-/// The driver runs cooperatively in Ring 3 (entered via [`enter_service`],
-/// never preempted). Flow:
+/// The driver runs in Ring 3. Flow:
 ///   1. SYS_IOPERM(0x3F8, 0x3FF, 1) — COM1 port aralığını capability-gated
 ///      olarak açar. Kernel'de gate: process'in cap_table'ında Device cap var
 ///      (SERVICE_DEVICE_FD) VE istenen aralık o cihaza bağlı aralığın
@@ -3160,7 +3027,7 @@ pub fn init_user_test() -> (u64, u64) {
 /// nothing else is runnable.
 fn alloc_idle() {
     // Arming the preemptive scheduler happens from the kernel's own address
-    // space; remember it for `exit_current` (see `enter_service`).
+    // space; remember it for `exit_current`.
     capture_shared_kernel_cr3();
     IDLE_STACK.call_once(|| alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice());
     let stack_top =
