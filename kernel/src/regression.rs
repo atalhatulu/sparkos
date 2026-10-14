@@ -193,6 +193,7 @@ pub fn run() {
 
     two_user_processes_preemptive_regression();
     blocking_channel_stress_regression();
+    service_supervisor_and_discovery_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -460,3 +461,118 @@ fn live_resize_regression() {
     assert_eq!(memory::get_memory_stats().0, baseline);
     crate::serial_println!("[REGRESSION] PASS live resize coalesces input per frame and flushes final geometry");
 }
+
+fn service_supervisor_and_discovery_regression() {
+    use crate::service::{ServiceManager, ServiceDefinition, SupervisorAction, ServiceState, RestartPolicy};
+    use crate::cap::CapHandle;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    let mut sm = ServiceManager::new();
+
+    // 1. Bağımlılık ağacı ve topolojik sıralama
+    let disk_id = sm.register(ServiceDefinition {
+        name: String::from("disk"),
+        path: String::from("disksvc"),
+        dependencies: Vec::new(),
+        restart_policy: RestartPolicy::Always,
+        is_critical: true,
+        max_retries: 3,
+    }).unwrap();
+
+    let fs_id = sm.register(ServiceDefinition {
+        name: String::from("fs"),
+        path: String::from("fssvc"),
+        dependencies: alloc::vec![String::from("disk")],
+        restart_policy: RestartPolicy::Always,
+        is_critical: true,
+        max_retries: 3,
+    }).unwrap();
+
+    let app_id = sm.register(ServiceDefinition {
+        name: String::from("shell"),
+        path: String::from("sh"),
+        dependencies: alloc::vec![String::from("fs")],
+        restart_policy: RestartPolicy::OnFailure,
+        is_critical: false,
+        max_retries: 3,
+    }).unwrap();
+
+    assert!(!sm.has_cycle(), "Service graph must not have cycles");
+    let boot_order = sm.get_boot_order().unwrap();
+    let pos_disk = boot_order.iter().position(|&x| x == disk_id).unwrap();
+    let pos_fs = boot_order.iter().position(|&x| x == fs_id).unwrap();
+    let pos_app = boot_order.iter().position(|&x| x == app_id).unwrap();
+    assert!(pos_disk < pos_fs, "disk must boot before fs");
+    assert!(pos_fs < pos_app, "fs must boot before shell");
+
+    let shutdown_order = sm.get_shutdown_order().unwrap();
+    assert_eq!(shutdown_order[0], app_id, "shell must shutdown first");
+    assert_eq!(*shutdown_order.last().unwrap(), disk_id, "disk must shutdown last");
+
+    // 2. Döngüsel bağımlılık (Cycle) tespiti
+    let mut cycle_sm = ServiceManager::new();
+    cycle_sm.register(ServiceDefinition {
+        name: String::from("A"),
+        path: String::from("A"),
+        dependencies: alloc::vec![String::from("B")],
+        restart_policy: RestartPolicy::Never,
+        is_critical: false,
+        max_retries: 1,
+    }).unwrap();
+    cycle_sm.register(ServiceDefinition {
+        name: String::from("B"),
+        path: String::from("B"),
+        dependencies: alloc::vec![String::from("A")],
+        restart_policy: RestartPolicy::Never,
+        is_critical: false,
+        max_retries: 1,
+    }).unwrap();
+    assert!(cycle_sm.has_cycle(), "Cycle detection must identify A <-> B loop");
+    assert!(cycle_sm.get_boot_order().is_err(), "Cyclic graph must fail boot ordering");
+
+    // 3. Service Discovery & Ready Handshake
+    let dummy_cap = CapHandle { slot: 7, generation: 1 };
+    let initial_pid = 101u64;
+    let endpoint_id = 42u32;
+    sm.set_service_ready("fs", initial_pid, endpoint_id, Some(dummy_cap)).unwrap();
+
+    let lookup_res = sm.lookup("fs");
+    assert!(lookup_res.is_some(), "Running service must be discoverable");
+    let (ep, cap, pid, gen) = lookup_res.unwrap();
+    assert_eq!(ep, endpoint_id);
+    assert_eq!(cap, Some(dummy_cap));
+    assert_eq!(pid, initial_pid);
+    assert_eq!(gen, 1);
+
+    // 4. Çökme ve Supervisor Yeniden Başlatma (Crash Recovery)
+    let action = sm.handle_process_exit(initial_pid, 1);
+    assert_eq!(action, SupervisorAction::Restart(fs_id), "Always policy must restart crashed service");
+    assert!(sm.lookup("fs").is_none(), "Restarting service must not be returned as running");
+
+    // 5. İstemci Yeniden Bağlanma (Reconnect Protocol)
+    let new_pid = 202u64;
+    let new_endpoint_id = 43u32;
+    let new_cap = CapHandle { slot: 8, generation: 1 };
+    sm.set_service_ready("fs", new_pid, new_endpoint_id, Some(new_cap)).unwrap();
+
+    let reconnect_res = sm.reconnect("fs", 1).unwrap();
+    let (rec_ep, rec_cap, rec_pid, rec_gen) = reconnect_res;
+    assert_eq!(rec_ep, new_endpoint_id);
+    assert_eq!(rec_cap, Some(new_cap));
+    assert_eq!(rec_pid, new_pid);
+    assert_eq!(rec_gen, 2, "Generation must increment on restart");
+
+    // 6. Flapping Loop Koruması (Max Retries)
+    // fs servisi max_retries = 3 olarak tanımlanmıştı; zaten 1 kez restart oldu
+    assert_eq!(sm.handle_process_exit(new_pid, 1), SupervisorAction::Restart(fs_id)); // restart 2
+    sm.set_service_ready("fs", 303, new_endpoint_id, Some(new_cap)).unwrap();
+    assert_eq!(sm.handle_process_exit(303, 1), SupervisorAction::Restart(fs_id)); // restart 3
+    sm.set_service_ready("fs", 404, new_endpoint_id, Some(new_cap)).unwrap();
+    let flap_action = sm.handle_process_exit(404, 1); // retry aşımı!
+    assert_eq!(flap_action, SupervisorAction::CriticalFailure(fs_id), "Critical service must trigger CriticalFailure on flapping");
+    assert_eq!(sm.services[fs_id].state, ServiceState::Failed);
+
+    crate::serial_println!("[REGRESSION] PASS service supervisor dependency ordering, crash recovery, reconnect and flapping defense");
+}
+

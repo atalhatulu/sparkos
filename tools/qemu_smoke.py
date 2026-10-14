@@ -12,6 +12,7 @@ def main():
     parser.add_argument('--disk', type=pathlib.Path, required=True)
     parser.add_argument('--output', type=pathlib.Path, required=True)
     parser.add_argument('--regression', action='store_true')
+    parser.add_argument('--stress', action='store_true')
     parser.add_argument('--cpus', type=int, default=2)
     parser.add_argument('--memory', default='256M')
     parser.add_argument('--timeout', type=int, default=180)
@@ -38,6 +39,11 @@ def main():
                 serial = log.read_text(errors='replace') if log.exists() else ''
                 if any(marker in serial for marker in ['KERNEL PANIC', '[PANIC]', '[FATAL]', '[USER-FAULT]']):
                     raise RuntimeError(f'Kernel fault; see {log}\n{serial[-5000:]}')
+                if args.stress and '[DEADLOCK-STRESS] ALL PASS' in serial:
+                    print(f'PASS: deadlock stress test completed, {args.cpus} CPUs, {args.memory}; serial log: {log}')
+                    for line in serial.splitlines():
+                        if '[DEADLOCK-STRESS]' in line: print(line)
+                    return
                 booted = '[DESKTOP] Auto-booted' in serial and '[DESKTOP] First frame presented.' in serial
                 tested = not args.regression or '[REGRESSION] ALL PASS' in serial
                 if booted and tested:

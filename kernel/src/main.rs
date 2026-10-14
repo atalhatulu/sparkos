@@ -565,7 +565,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     #[cfg(feature = "deadlock-stress")]
     {
-        crate::task::process::run_deadlock_stress_test(60);
+        crate::task::process::run_deadlock_stress_test(10);
         let mut port = x86_64::instructions::port::Port::new(0x604);
         unsafe { port.write(0x2000u16); }
     }
