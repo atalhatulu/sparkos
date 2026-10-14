@@ -418,6 +418,7 @@ async fn boot_orchestrator() {
     crate::metric!("boot_ms", boot_ms);
     crate::metric!("heap_used_kb", crate::allocator::heap_used_kb());
     crate::metric!("frames_free", crate::memory::frames_free());
+    crate::metric!("max_irq_off_cycles", crate::perf::MAX_IRQ_OFF_CYCLES.load(core::sync::atomic::Ordering::Relaxed));
 
     #[cfg(feature = "bench")]
     crate::perf::run_benchmarks();
@@ -580,8 +581,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "\n[OK] Loading filesystem from ATA disk...\n").unwrap();
     fs::load_from_disk();
 
+    crate::task::process::init_preemptive();
+
     #[cfg(feature = "kernel-regression")]
     regression::run();
+
+    #[cfg(feature = "deadlock-stress")]
+    {
+        crate::task::process::run_deadlock_stress_test(60);
+        let mut port = x86_64::instructions::port::Port::new(0x604);
+        unsafe { port.write(0x2000u16); }
+    }
 
     core::fmt::Write::write_str(&mut *vga_buffer::WRITE_LOCK.lock(), "[OK] Starting shell task (Async)...\n").unwrap();
     

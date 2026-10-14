@@ -34,6 +34,23 @@ pub fn rdtsc() -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
+pub static MAX_IRQ_OFF_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+pub fn record_irq_off_cycles(cycles: u64) {
+    let mut current = MAX_IRQ_OFF_CYCLES.load(core::sync::atomic::Ordering::Relaxed);
+    while cycles > current {
+        match MAX_IRQ_OFF_CYCLES.compare_exchange_weak(
+            current, cycles,
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 pub fn run_benchmarks() {
     let mut total_ctx = 0u64;
     for _ in 0..10 {
@@ -57,6 +74,7 @@ pub fn run_benchmarks() {
 
     metric!("ctx_switch_cycles", ctx_switch_cycles);
     metric!("ipc_rtt_cycles", ipc_rtt_cycles);
+    metric!("max_irq_off_cycles", MAX_IRQ_OFF_CYCLES.load(core::sync::atomic::Ordering::Relaxed));
 }
 
 pub struct Span { metric: Metric, start: u64 }

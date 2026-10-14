@@ -11,6 +11,7 @@ legacy-fs-inkernel = []
 kernel-regression = []
 perf-metrics = []
 bench = []
+deadlock-stress = []
 
 [dependencies]
 bootloader = { version = "0.9", features = ["map_physical_memory", "recursive_page_table"] }

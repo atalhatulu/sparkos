@@ -66,12 +66,20 @@ unsafe impl<T: Send, C: InterruptController> Send for GenericIrqMutex<T, C> {}
 pub struct GenericIrqGuard<'a, T, C: InterruptController = NativeInterrupts> {
     guard: ManuallyDrop<SpinMutexGuard<'a, T>>,
     was_enabled: bool,
+    start_tsc: u64,
     _not_send: PhantomData<*mut ()>,
     _ctrl: PhantomData<C>,
 }
 
 pub type IrqMutex<T> = GenericIrqMutex<T, NativeInterrupts>;
 pub type IrqGuard<'a, T> = GenericIrqGuard<'a, T, NativeInterrupts>;
+
+pub static HELD_IRQ_LOCKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+pub fn irq_locks_held() -> usize {
+    HELD_IRQ_LOCKS.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 impl<T, C: InterruptController> GenericIrqMutex<T, C> {
     pub const fn new(data: T) -> Self {
@@ -84,10 +92,13 @@ impl<T, C: InterruptController> GenericIrqMutex<T, C> {
     pub fn lock(&self) -> GenericIrqGuard<'_, T, C> {
         let was_enabled = C::are_enabled();
         C::disable();
+        let start_tsc = if was_enabled { crate::perf::rdtsc() } else { 0 };
         let guard = self.inner.lock();
+        HELD_IRQ_LOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         GenericIrqGuard {
             guard: ManuallyDrop::new(guard),
             was_enabled,
+            start_tsc,
             _not_send: PhantomData,
             _ctrl: PhantomData,
         }
@@ -96,10 +107,13 @@ impl<T, C: InterruptController> GenericIrqMutex<T, C> {
     pub fn try_lock(&self) -> Option<GenericIrqGuard<'_, T, C>> {
         let was_enabled = C::are_enabled();
         C::disable();
+        let start_tsc = if was_enabled { crate::perf::rdtsc() } else { 0 };
         if let Some(guard) = self.inner.try_lock() {
+            HELD_IRQ_LOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Some(GenericIrqGuard {
                 guard: ManuallyDrop::new(guard),
                 was_enabled,
+                start_tsc,
                 _not_send: PhantomData,
                 _ctrl: PhantomData,
             })
@@ -133,6 +147,7 @@ impl<T, C: InterruptController> DerefMut for GenericIrqGuard<'_, T, C> {
 
 impl<T, C: InterruptController> Drop for GenericIrqGuard<'_, T, C> {
     fn drop(&mut self) {
+        HELD_IRQ_LOCKS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         // SAFETY: The inner spinlock guard is explicitly dropped before restoring
         // interrupt flags. This ensures any hardware IRQ will see the spinlock
         // fully unlocked when interrupts are re-enabled.
@@ -140,6 +155,8 @@ impl<T, C: InterruptController> Drop for GenericIrqGuard<'_, T, C> {
             ManuallyDrop::drop(&mut self.guard);
         }
         if self.was_enabled {
+            let elapsed = crate::perf::rdtsc().saturating_sub(self.start_tsc);
+            crate::perf::record_irq_off_cycles(elapsed);
             C::enable();
         }
     }

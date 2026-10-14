@@ -1,14 +1,21 @@
 //! Opt-in QEMU regressions against the real allocator, page tables and GUI code.
-use crate::{memory, surface, task::process, wm};
+use crate::{memory, task::process};
+
+#[cfg(feature = "legacy-desktop")]
+use crate::{surface, wm};
 
 fn owner() -> (u64, u64) {
     let cr3 = memory::clone_active_cr3().expect("regression CR3");
+    process::set_preemption_enabled(false);
     let pid = process::create_user_process("surface-regression", memory::USER_ADDR_BASE,
         memory::USER_STACK_TOP, cr3, crate::gdt::GDT.1.user_code_selector.0,
         crate::gdt::GDT.1.user_data_selector.0);
+    process::remove_process_from_ready(pid);
+    process::set_preemption_enabled(true);
     (pid, cr3)
 }
 
+#[cfg(feature = "legacy-desktop")]
 fn usage(pid: u64) -> (u64, u32) {
     let sched = process::SCHEDULER.lock();
     let proc = sched.get_process(pid).unwrap();
@@ -16,6 +23,7 @@ fn usage(pid: u64) -> (u64, u32) {
 }
 
 fn dispose(pid: u64) {
+    #[cfg(feature = "legacy-desktop")]
     surface::cleanup_surfaces_for_pid(pid);
     process::release_process_address_space(pid);
     let mut sched = process::SCHEDULER.lock();
@@ -29,135 +37,200 @@ fn dispose(pid: u64) {
 pub fn run() {
     crate::serial_println!("[REGRESSION] START");
     let baseline = memory::get_memory_stats().0;
-    let (a, ca) = owner();
-    let (b, cb) = owner();
-    let owners_only = memory::get_memory_stats().0;
-    let sa = surface::create_surface_for_pid(a, 64, 64).unwrap();
-    let sb = surface::create_surface_for_pid(b, 64, 64).unwrap();
-    let va = surface::USER_SURFACE_BASE;
-    let pa = memory::translate_page_in_cr3(ca, va).unwrap().as_u64();
-    let pb = memory::translate_page_in_cr3(cb, va).unwrap().as_u64();
-    assert_ne!(pa, pb, "processes must not share surface PTEs");
-    assert!(memory::translate_page_in_cr3(0, va).is_none(), "surface leaked into kernel CR3");
-    unsafe {
-        let offset = crate::gui::PHYS_OFFSET;
-        core::ptr::write_volatile((offset + pa) as *mut u32, 0xaabbccdd);
-        core::ptr::write_volatile((offset + pb) as *mut u32, 0x11223344);
-        assert_eq!(core::ptr::read_volatile((offset + pa) as *const u32), 0xaabbccdd);
-    }
-    assert!(surface::destroy_surface_for_pid(b, sa).is_err());
-    surface::destroy_surface_for_pid(a, sa).unwrap();
-    assert!(memory::translate_page_in_cr3(ca, va).is_none());
-    assert_eq!(memory::translate_page_in_cr3(cb, va).unwrap().as_u64(), pb);
-    surface::destroy_surface_for_pid(b, sb).unwrap();
-    assert_eq!(usage(a), (0, 0));
-    assert_eq!(usage(b), (0, 0));
-    assert_eq!(memory::get_memory_stats().0, owners_only);
-    crate::serial_println!("[REGRESSION] PASS surface isolation, ownership and reclaim");
 
-    // Fail before backing allocation, during page-table creation, and after
-    // the first 512 pages have been mapped. Each must roll back PTEs and quotas.
-    for remaining in [0, 1, 3] {
-        memory::fail_allocation_after(remaining);
-        let result = surface::create_surface_for_pid(a, 1280, 720);
-        memory::fail_allocation_after(-1);
-        assert!(result.is_err(), "injected allocation failure was ignored");
-        assert_eq!(usage(a), (0, 0));
-        assert_eq!(memory::get_memory_stats().0, owners_only);
-        assert!(memory::translate_page_in_cr3(ca, va).is_none());
-    }
-    crate::serial_println!("[REGRESSION] PASS OOM rollback including partial mapping");
-
-    memory::map_user_page_in_cr3(ca, va + 4096, true).unwrap();
-    let existing = memory::translate_page_in_cr3(ca, va + 4096).unwrap();
-    let collision_baseline = memory::get_memory_stats().0;
-    assert!(surface::create_surface_for_pid(a, 64, 32).is_err());
-    assert_eq!(memory::translate_page_in_cr3(ca, va + 4096), Some(existing));
-    assert!(memory::translate_page_in_cr3(ca, va).is_none());
-    assert_eq!(memory::get_memory_stats().0, collision_baseline);
-    assert_eq!(usage(a), (0, 0));
-    dispose(a);
-    dispose(b);
-    assert_eq!(memory::get_memory_stats().0, baseline);
-    crate::serial_println!("[REGRESSION] PASS mapping collision rollback and CR3 cleanup");
-
-    let (pid, _) = owner();
-    let before_surface = memory::get_memory_stats().0;
+    #[cfg(feature = "legacy-desktop")]
     {
-        let mut sched = process::SCHEDULER.lock();
-        let p = sched.get_process_mut(pid).unwrap();
-        p.resource_limits.max_surfaces = 1;
-    }
-    let id = surface::create_surface_for_pid(pid, 1, 1).unwrap();
-    assert_eq!(usage(pid), (4096, 1));
-    assert!(surface::create_surface_for_pid(pid, 1, 1).is_err());
-    assert_eq!(usage(pid), (4096, 1));
-    surface::destroy_surface_for_pid(pid, id).unwrap();
-    for _ in 0..24 {
-        let id = surface::create_surface_for_pid(pid, 1280, 720).unwrap();
+        let (a, ca) = owner();
+        let (b, cb) = owner();
+        let owners_only = memory::get_memory_stats().0;
+        let sa = surface::create_surface_for_pid(a, 64, 64).unwrap();
+        let sb = surface::create_surface_for_pid(b, 64, 64).unwrap();
+        let va = surface::USER_SURFACE_BASE;
+        let pa = memory::translate_page_in_cr3(ca, va).unwrap().as_u64();
+        let pb = memory::translate_page_in_cr3(cb, va).unwrap().as_u64();
+        assert_ne!(pa, pb, "processes must not share surface PTEs");
+        assert!(memory::translate_page_in_cr3(0, va).is_none(), "surface leaked into kernel CR3");
+        unsafe {
+            let offset = crate::memory::PHYS_OFFSET;
+            core::ptr::write_volatile((offset + pa) as *mut u32, 0xaabbccdd);
+            core::ptr::write_volatile((offset + pb) as *mut u32, 0x11223344);
+            assert_eq!(core::ptr::read_volatile((offset + pa) as *const u32), 0xaabbccdd);
+        }
+        assert!(surface::destroy_surface_for_pid(b, sa).is_err());
+        surface::destroy_surface_for_pid(a, sa).unwrap();
+        assert!(memory::translate_page_in_cr3(ca, va).is_none());
+        assert_eq!(memory::translate_page_in_cr3(cb, va).unwrap().as_u64(), pb);
+        surface::destroy_surface_for_pid(b, sb).unwrap();
+        assert_eq!(usage(a), (0, 0));
+        assert_eq!(usage(b), (0, 0));
+        assert_eq!(memory::get_memory_stats().0, owners_only);
+        crate::serial_println!("[REGRESSION] PASS surface isolation, ownership and reclaim");
+
+        // Fail before backing allocation, during page-table creation, and after
+        // the first 512 pages have been mapped. Each must roll back PTEs and quotas.
+        for remaining in [0, 1, 3] {
+            memory::fail_allocation_after(remaining);
+            let result = surface::create_surface_for_pid(a, 1280, 720);
+            memory::fail_allocation_after(-1);
+            assert!(result.is_err(), "injected allocation failure was ignored");
+            assert_eq!(usage(a), (0, 0));
+            assert_eq!(memory::get_memory_stats().0, owners_only);
+            assert!(memory::translate_page_in_cr3(ca, va).is_none());
+        }
+        crate::serial_println!("[REGRESSION] PASS OOM rollback including partial mapping");
+
+        memory::map_user_page_in_cr3(ca, va + 4096, true).unwrap();
+        let existing = memory::translate_page_in_cr3(ca, va + 4096).unwrap();
+        let collision_baseline = memory::get_memory_stats().0;
+        assert!(surface::create_surface_for_pid(a, 64, 32).is_err());
+        assert_eq!(memory::translate_page_in_cr3(ca, va + 4096), Some(existing));
+        assert!(memory::translate_page_in_cr3(ca, va).is_none());
+        assert_eq!(memory::get_memory_stats().0, collision_baseline);
+        assert_eq!(usage(a), (0, 0));
+        dispose(a);
+        dispose(b);
+        assert_eq!(memory::get_memory_stats().0, baseline);
+        crate::serial_println!("[REGRESSION] PASS mapping collision rollback and CR3 cleanup");
+
+        let (pid, _) = owner();
+        let before_surface = memory::get_memory_stats().0;
+        {
+            let mut sched = process::SCHEDULER.lock();
+            let p = sched.get_process_mut(pid).unwrap();
+            p.resource_limits.max_surfaces = 1;
+        }
+        let id = surface::create_surface_for_pid(pid, 1, 1).unwrap();
+        assert_eq!(usage(pid), (4096, 1));
+        assert!(surface::create_surface_for_pid(pid, 1, 1).is_err());
+        assert_eq!(usage(pid), (4096, 1));
         surface::destroy_surface_for_pid(pid, id).unwrap();
-        assert_eq!(memory::get_memory_stats().0, before_surface);
-        assert_eq!(usage(pid), (0, 0));
-    }
-    dispose(pid);
-    assert_eq!(memory::get_memory_stats().0, baseline);
-    crate::serial_println!("[REGRESSION] PASS quota rollback and repeated large surface reuse");
+        for _ in 0..24 {
+            let id = surface::create_surface_for_pid(pid, 1280, 720).unwrap();
+            surface::destroy_surface_for_pid(pid, id).unwrap();
+            assert_eq!(memory::get_memory_stats().0, before_surface);
+            assert_eq!(usage(pid), (0, 0));
+        }
+        dispose(pid);
+        assert_eq!(memory::get_memory_stats().0, baseline);
+        crate::serial_println!("[REGRESSION] PASS quota rollback and repeated large surface reuse");
 
-    let processes_before = process::get_system_metrics_snapshot().len();
-    for remaining in [0, 1, 2, 4, 7, 9, 10, 11] {
-        memory::fail_allocation_after(remaining);
-        let result = crate::terminal_app::spawn_terminal_app("regression-failed-launch");
-        memory::fail_allocation_after(-1);
-        assert!(result.is_err(), "launch must report injected OOM");
-        assert_eq!(memory::get_memory_stats().0, baseline, "failed launch leaked frames");
-        assert_eq!(process::get_system_metrics_snapshot().len(), processes_before);
-    }
-    crate::serial_println!("[REGRESSION] PASS failed app launch rolls back PCB, CR3 and backing");
+        let processes_before = process::get_system_metrics_snapshot().len();
+        for remaining in [0, 1, 2, 4, 7, 9, 10, 11] {
+            memory::fail_allocation_after(remaining);
+            let result = crate::terminal_app::spawn_terminal_app("regression-failed-launch");
+            memory::fail_allocation_after(-1);
+            assert!(result.is_err(), "launch must report injected OOM");
+            assert_eq!(memory::get_memory_stats().0, baseline, "failed launch leaked frames");
+            assert_eq!(process::get_system_metrics_snapshot().len(), processes_before);
+        }
+        crate::serial_println!("[REGRESSION] PASS failed app launch rolls back PCB, CR3 and backing");
 
-    // Exercise production application allocation, maximize/restore, rendering,
-    // window close and process cleanup, rather than a duplicate mock WM.
-    for _ in 0..8 {
-        let pid = crate::terminal_app::spawn_terminal_app("regression-terminal").unwrap();
-        let mut wm = wm::WM.lock();
-        let wid = wm.windows.iter().find(|w| w.owner_pid == pid).unwrap().window_id;
-        wm.toggle_maximize_window(pid, wid).unwrap();
-        wm.toggle_maximize_window(pid, wid).unwrap();
-        wm.composite_desktop(0, 0);
-        wm.destroy_window(pid, wid).unwrap();
-        drop(wm);
-        assert!(!surface::SURFACE_REGISTRY.read().iter().any(|s| s.owner_pid == pid));
-        assert!(process::SCHEDULER.lock().get_process(pid).is_none());
-        assert_eq!(memory::get_memory_stats().0, baseline, "window close leaked physical frames");
+        // Exercise production application allocation, maximize/restore, rendering,
+        // window close and process cleanup, rather than a duplicate mock WM.
+        for _ in 0..8 {
+            let pid = crate::terminal_app::spawn_terminal_app("regression-terminal").unwrap();
+            let mut wm = wm::WM.lock();
+            let wid = wm.windows.iter().find(|w| w.owner_pid == pid).unwrap().window_id;
+            wm.toggle_maximize_window(pid, wid).unwrap();
+            wm.toggle_maximize_window(pid, wid).unwrap();
+            wm.composite_desktop(0, 0);
+            wm.destroy_window(pid, wid).unwrap();
+            drop(wm);
+            assert!(!surface::SURFACE_REGISTRY.read().iter().any(|s| s.owner_pid == pid));
+            assert!(process::SCHEDULER.lock().get_process(pid).is_none());
+            assert_eq!(memory::get_memory_stats().0, baseline, "window close leaked physical frames");
+        }
+        crate::serial_println!("[REGRESSION] PASS real terminal open, resize, composite and close x8");
     }
-    crate::serial_println!("[REGRESSION] PASS real terminal open, resize, composite and close x8");
+
+    #[cfg(not(feature = "legacy-desktop"))]
+    {
+        let (pid, cr3) = owner();
+        let user_va = memory::USER_ADDR_BASE + 0x10_000;
+        assert!(memory::map_user_page_in_cr3(cr3, user_va, true).is_ok());
+        let pa = memory::translate_page_in_cr3(cr3, user_va).expect("mapped user page");
+        assert!(memory::translate_page_in_cr3(0, user_va).is_none(), "user page leaked into kernel CR3");
+        unsafe {
+            let offset = crate::memory::PHYS_OFFSET;
+            core::ptr::write_volatile((offset + pa.as_u64()) as *mut u64, 0x1234_5678_9abc_def0);
+            assert_eq!(core::ptr::read_volatile((offset + pa.as_u64()) as *const u64), 0x1234_5678_9abc_def0);
+        }
+        dispose(pid);
+        assert_eq!(memory::get_memory_stats().0, baseline, "headless process cleanup leaked memory");
+        crate::serial_println!("[REGRESSION] PASS headless user process CR3 isolation and page mapping");
+    }
 
     let hello = include_bytes!("../../fixtures/hello.elf");
     for _ in 0..2 {
         let pid = process::exec_elf_proc("regression-hello", hello).unwrap();
-        process::enter_service(pid);
-        assert!(x86_64::instructions::interrupts::are_enabled(), "service return left interrupts disabled");
+        let status = process::waitpid(pid).unwrap();
+        assert_eq!(status, 0);
+        assert!(x86_64::instructions::interrupts::are_enabled(), "waitpid return left interrupts disabled");
         assert!(process::SCHEDULER.lock().get_process(pid).unwrap().exited);
         assert_eq!(process::SCHEDULER.lock().get_process(pid).unwrap().exit_code, 0);
         assert_eq!(memory::get_memory_stats().0, baseline);
         dispose(pid);
     }
     crate::serial_println!("[REGRESSION] PASS ELF Ring-3 write/exit and address-space reclaim x2");
-    let pid = process::exec_elf_proc("regression-surface-syscalls", include_bytes!("../../fixtures/surface_probe.elf")).unwrap();
-    process::enter_service(pid);
-    assert!(x86_64::instructions::interrupts::are_enabled());
-    assert_eq!(process::SCHEDULER.lock().get_process(pid).unwrap().exit_code, 0);
-    assert_eq!(memory::get_memory_stats().0, baseline);
-    assert_eq!(usage(pid), (0, 0));
-    dispose(pid);
-    crate::serial_println!("[REGRESSION] PASS Ring-3 surface create/write/destroy/reuse x20");
-    gui_interaction_regressions();
-    settings_interaction_regressions();
-    compositor_work_regression();
-    input_delivery_regression();
-    live_resize_regression();
+
+    #[cfg(feature = "legacy-desktop")]
+    {
+        let pid = process::exec_elf_proc("regression-surface-syscalls", include_bytes!("../../fixtures/surface_probe.elf")).unwrap();
+        let status = process::waitpid(pid).unwrap();
+        assert_eq!(status, 0);
+        assert!(x86_64::instructions::interrupts::are_enabled());
+        assert_eq!(process::SCHEDULER.lock().get_process(pid).unwrap().exit_code, 0);
+        assert_eq!(memory::get_memory_stats().0, baseline);
+        assert_eq!(usage(pid), (0, 0));
+        dispose(pid);
+        crate::serial_println!("[REGRESSION] PASS Ring-3 surface create/write/destroy/reuse x20");
+        gui_interaction_regressions();
+        settings_interaction_regressions();
+        compositor_work_regression();
+        input_delivery_regression();
+        live_resize_regression();
+    }
+
+    two_user_processes_preemptive_regression();
+
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
 
+fn two_user_processes_preemptive_regression() {
+    let baseline = memory::get_memory_stats().0;
+    let hello = include_bytes!("../../fixtures/hello.elf");
+    // İki Ring 3 kullanıcı sürecini eşzamanlı olarak hazır kuyruğuna al
+    let pid_a = process::exec_elf_proc("user-proc-a", hello).unwrap();
+    let pid_b = process::exec_elf_proc("user-proc-b", hello).unwrap();
+
+    // İkisinin de kernel stack kanaryalarını doğrula
+    {
+        let s = process::SCHEDULER.lock();
+        if let Some(p) = s.get_process(pid_a) { p.check_stack_canary(); }
+        if let Some(p) = s.get_process(pid_b) { p.check_stack_canary(); }
+    }
+
+    // İki sürecin de sırayla tamamlanmasını bekle
+    let status_a = process::waitpid(pid_a).unwrap();
+    let status_b = process::waitpid(pid_b).unwrap();
+    assert_eq!(status_a, 0);
+    assert_eq!(status_b, 0);
+    assert!(x86_64::instructions::interrupts::are_enabled());
+
+    // Çıkış sonrası kanaryaların ezilmediğini doğrula
+    {
+        let s = process::SCHEDULER.lock();
+        if let Some(p) = s.get_process(pid_a) { p.check_stack_canary(); }
+        if let Some(p) = s.get_process(pid_b) { p.check_stack_canary(); }
+    }
+
+    dispose(pid_a);
+    dispose(pid_b);
+    assert_eq!(memory::get_memory_stats().0, baseline);
+    crate::serial_println!("[REGRESSION] PASS two concurrent Ring-3 processes preemptive scheduling and TSS.rsp0 isolation");
+}
+
+#[cfg(feature = "legacy-desktop")]
 fn gui_interaction_regressions() {
     use crate::input::{dispatch_keyboard_event, MOD_ALT, MOD_CTRL};
     let baseline = memory::get_memory_stats().0;
@@ -198,7 +271,7 @@ fn gui_interaction_regressions() {
     crate::serial_println!("[REGRESSION] PASS editor repeated close/cancel/discard and launcher keyboard damage");
 }
 
-
+#[cfg(feature = "legacy-desktop")]
 fn settings_interaction_regressions() {
     use crate::settings_app::{SettingsCategory, SETTINGS_INSTANCES};
     let baseline = memory::get_memory_stats().0;
@@ -224,7 +297,7 @@ fn settings_interaction_regressions() {
         let sid = wm::WM.lock().windows.iter().find(|w| w.window_id == wid).unwrap().surface_id;
         let reg = surface::SURFACE_REGISTRY.read();
         let surf = reg.iter().find(|s| s.surface_id == sid).unwrap();
-        let pixel = unsafe { *((crate::gui::PHYS_OFFSET + surf.shmem_phys_addr) as *const u32)
+        let pixel = unsafe { *((crate::memory::PHYS_OFFSET + surf.shmem_phys_addr) as *const u32)
             .add((200 * surf.width + 300) as usize) };
         assert_eq!(pixel, background, "theme must rerender other open Settings surfaces");
     }
@@ -247,7 +320,7 @@ fn settings_interaction_regressions() {
     crate::serial_println!("[REGRESSION] PASS Settings mouse/keyboard, multi-window theme and System resize");
 }
 
-
+#[cfg(feature = "legacy-desktop")]
 fn compositor_work_regression() {
     use core::sync::atomic::Ordering;
     let pid = crate::terminal_app::spawn_terminal_app("compositor-regression").unwrap();
@@ -283,7 +356,7 @@ fn compositor_work_regression() {
     crate::serial_println!("[REGRESSION] PASS compositor pixels: bounding=445176, regions={}, windows={}, exact image and idle skip", pixels, windows);
 }
 
-
+#[cfg(feature = "legacy-desktop")]
 fn input_delivery_regression() {
     let pid = crate::terminal_app::spawn_terminal_app("input-delivery-regression").unwrap();
     let wid = wm::WM.lock().focused_window.unwrap();
@@ -305,7 +378,7 @@ fn input_delivery_regression() {
     crate::serial_println!("[REGRESSION] PASS direct built-in input avoids duplicate queues; userspace delivery preserved");
 }
 
-
+#[cfg(feature = "legacy-desktop")]
 fn live_resize_regression() {
     let baseline = memory::get_memory_stats().0;
     let pid = crate::terminal_app::spawn_terminal_app("live-resize-regression").unwrap();

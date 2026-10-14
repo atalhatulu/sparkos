@@ -412,21 +412,21 @@ extern "x86-interrupt" fn timer_handler(_stack: InterruptStackFrame) {
     // Faz 0.6: Lend Expiry hafifletildi — IRQ içinde kilit almaz, atomik bayrak koyar
     crate::cap::mark_lend_expiry_pending(current_tick);
 
-    // Preemptive timer hook: drives the round-robin process scheduler when
-    // it has been armed (default off, so existing behavior is unchanged).
-    crate::task::process::timer_tick();
-
     // Aşama 5.1: IRQ notification (IRQ 0). Bağ yoksa irq_event tek atomic load
     // ile no-op'tur — timer her tick'te boş push yapmaz. Headless QEMU regresyonu
     // için deterministik olay kaynağı da burasıdır.
     crate::ipc::irq_event(0, 0);
 
-    // Tick çıktısı kaldırıldı — debug için serial_println vardı
-
     unsafe {
         let mut eoi = Port::new(0x20u16);
         eoi.write(0x20u8);
     }
+
+    // Preemptive timer hook: drives the round-robin process scheduler when
+    // it has been armed (default off, so existing behavior is unchanged).
+    // EOI, bağlam değiştirme (switch_context) öncesinde PIC donanımına iletilmelidir,
+    // aksi halde geçiş yapılan iş parçacığı/idle döngüsü boyunca donanımsal IRQ 0 bloke kalır.
+    crate::task::process::timer_tick();
 }
 
 pub fn get_tick() -> u64 {

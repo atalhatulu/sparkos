@@ -145,9 +145,102 @@ pub enum ProcessState {
     Reaped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    Generic,
+    ChannelRecv,
+    ChannelSend,
+    Sleep(u64),
+    WaitPid(u64),
+}
+
+/// SIFIR HEAP TAHSISI (Zero Heap Allocation) Intrusive WaitQueue.
+/// Düğümler doğrudan `Process` (PCB) içerisindeki `wait_next` ve `wait_prev` alanlarıdır.
+#[derive(Debug)]
+pub struct WaitQueue {
+    pub head: Option<u64>,
+    pub tail: Option<u64>,
+}
+
+impl WaitQueue {
+    pub const fn new() -> Self {
+        Self { head: None, tail: None }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    pub fn enqueue(&mut self, pid: u64, table: &mut BTreeMap<u64, Process>) {
+        if let Some(proc) = table.get_mut(&pid) {
+            proc.wait_next = None;
+            proc.wait_prev = self.tail;
+        }
+        if let Some(old_tail) = self.tail {
+            if let Some(tail_proc) = table.get_mut(&old_tail) {
+                tail_proc.wait_next = Some(pid);
+            }
+        } else {
+            self.head = Some(pid);
+        }
+        self.tail = Some(pid);
+    }
+
+    pub fn dequeue(&mut self, table: &mut BTreeMap<u64, Process>) -> Option<u64> {
+        let head_pid = self.head?;
+        let next_pid = if let Some(proc) = table.get_mut(&head_pid) {
+            let next = proc.wait_next;
+            proc.wait_next = None;
+            proc.wait_prev = None;
+            next
+        } else {
+            None
+        };
+        self.head = next_pid;
+        if let Some(next) = next_pid {
+            if let Some(next_proc) = table.get_mut(&next) {
+                next_proc.wait_prev = None;
+            }
+        } else {
+            self.tail = None;
+        }
+        Some(head_pid)
+    }
+
+    pub fn remove(&mut self, pid: u64, table: &mut BTreeMap<u64, Process>) {
+        let (prev, next) = if let Some(proc) = table.get_mut(&pid) {
+            let p = proc.wait_prev;
+            let n = proc.wait_next;
+            proc.wait_prev = None;
+            proc.wait_next = None;
+            (p, n)
+        } else {
+            return;
+        };
+
+        if let Some(p) = prev {
+            if let Some(prev_proc) = table.get_mut(&p) {
+                prev_proc.wait_next = next;
+            }
+        } else if self.head == Some(pid) {
+            self.head = next;
+        }
+
+        if let Some(n) = next {
+            if let Some(next_proc) = table.get_mut(&n) {
+                next_proc.wait_prev = prev;
+            }
+        } else if self.tail == Some(pid) {
+            self.tail = prev;
+        }
+    }
+}
+
 /// Fixed-layout register set saved on a kernel-level context switch; must
+pub const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
 /// match the naked asm in [`switch_context`].
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct RegisterContext {
     pub rbx: u64,
@@ -163,6 +256,25 @@ pub struct RegisterContext {
     /// Physical CR3 to load when resuming (0 == keep current, used by kernel
     /// threads / idle whose address space is the shared kernel table).
     pub cr3: u64,
+    /// Saved RFLAGS register (offset 72).
+    pub rflags: u64,
+}
+
+impl Default for RegisterContext {
+    fn default() -> Self {
+        Self {
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rsp: 0,
+            rip: 0,
+            cr3: 0,
+            rflags: 0x202,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,10 +392,19 @@ pub struct Process {
     pub blocked_signals: u32,
     /// Sinyal işleyicileri (sig_num -> Ring 3 handler RIP)
     pub signal_handlers: BTreeMap<u32, u64>,
+    /// Bloklanma nedeni (None == çalışıyor veya hazır)
+    pub block_reason: Option<BlockReason>,
+    /// WaitQueue intrusive çift yönlü bağlı liste işaretçileri
+    pub wait_next: Option<u64>,
+    pub wait_prev: Option<u64>,
 }
 
 impl Process {
     fn new(name: &str) -> Self {
+        let mut kstack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+        if kstack.len() >= 8 {
+            kstack[0..8].copy_from_slice(&STACK_CANARY.to_ne_bytes());
+        }
         Process {
             pid: 0,
             name: String::from(name),
@@ -295,7 +416,7 @@ impl Process {
             resource_usage: ProcessResourceUsage::new(),
             resource_limits: ProcessResourceLimits::default_ui(),
             ctx: RegisterContext::default(),
-            kernel_stack: alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice(),
+            kernel_stack: kstack,
             entry: None,
             user_cr3: 0,
             user_rsp: 0,
@@ -314,6 +435,22 @@ impl Process {
             pending_signals: 0,
             blocked_signals: 0,
             signal_handlers: BTreeMap::new(),
+            block_reason: None,
+            wait_next: None,
+            wait_prev: None,
+        }
+    }
+
+    #[inline]
+    pub fn kernel_stack_top(&self) -> u64 {
+        (self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64) & !0xFu64
+    }
+
+    #[inline]
+    pub fn check_stack_canary(&self) {
+        if self.kernel_stack.len() >= 8 {
+            let canary = u64::from_ne_bytes(self.kernel_stack[0..8].try_into().unwrap());
+            assert_eq!(canary, STACK_CANARY, "KERNEL STACK CORRUPTION DETECTED! Canary corrupted for PID {}", self.pid);
         }
     }
 
@@ -508,8 +645,20 @@ impl Scheduler {
         self.table.remove(&pid);
     }
 
+    pub fn remove_from_ready(&mut self, pid: u64) {
+        self.ready.retain(|&p| p != pid);
+    }
+
     pub fn is_exited(&self, pid: u64) -> bool {
         self.table.get(&pid).map(|p| p.exited || p.reaped || p.state == ProcessState::Exited || p.state == ProcessState::Terminated).unwrap_or(true)
+    }
+}
+
+pub fn remove_process_from_ready(pid: u64) {
+    let mut s = SCHEDULER.lock();
+    s.remove_from_ready(pid);
+    if let Some(p) = s.get_process_mut(pid) {
+        p.state = ProcessState::Blocked;
     }
 }
 
@@ -535,6 +684,7 @@ fn kernel_thread_stub() -> ! {
         }
     };
     if let Some(e) = entry {
+        x86_64::instructions::interrupts::enable();
         e();
     }
     exit_current();
@@ -543,6 +693,7 @@ fn kernel_thread_stub() -> ! {
 /// Trampoline for entering a user process: goes to Ring 3; control returns to
 /// the kernel through syscall/interrupt traps.
 fn user_process_stub() -> ! {
+    crate::serial_println!("[USER_STUB] trampoline entered!");
     enter_user_current();
 }
 
@@ -574,6 +725,10 @@ extern "C" fn switch_context(current: *mut RegisterContext, next: *const Registe
             "mov [rdi + 24], r13",
             "mov [rdi + 32], r14",
             "mov [rdi + 40], r15",
+            // Save RFLAGS (offset 72) without affecting stack pointer
+            "pushfq",
+            "pop rax",
+            "mov [rdi + 72], rax",
             // rsp points at the return address pushed by `call switch_context`.
             "mov rax, [rsp]",
             "lea rbx, [rsp + 8]",
@@ -588,6 +743,10 @@ extern "C" fn switch_context(current: *mut RegisterContext, next: *const Registe
             "mov r15, [rsi + 40]",
             "mov rdx, [rsi + 48]", // pre-load next RSP
             "mov rcx, [rsi + 56]", // pre-load next RIP
+            // Restore RFLAGS
+            "mov rax, [rsi + 72]",
+            "push rax",
+            "popfq",
             // Load the next process's address space (CR3) if set (nonzero).
             "mov rax, [rsi + 64]",
             "test rax, rax",
@@ -611,6 +770,9 @@ extern "C" fn jump_to_initial(next: *const RegisterContext) -> ! {
             "mov r13, [rdi + 24]",
             "mov r14, [rdi + 32]",
             "mov r15, [rdi + 40]",
+            "mov rax, [rdi + 72]",
+            "push rax",
+            "popfq",
             "mov rax, [rdi + 64]",
             "test rax, rax",
             "jz 1f",
@@ -643,8 +805,19 @@ fn insert_process(name: &str) -> u64 {
 pub struct PendingProcess { pid: Option<u64> }
 
 impl PendingProcess {
-    pub fn new(pid: u64) -> Self { Self { pid: Some(pid) } }
-    pub fn commit(mut self) { self.pid = None; }
+    pub fn new(pid: u64) -> Self {
+        remove_process_from_ready(pid);
+        Self { pid: Some(pid) }
+    }
+    pub fn commit(mut self) {
+        if let Some(pid) = self.pid.take() {
+            let mut s = SCHEDULER.lock();
+            if let Some(p) = s.table.get_mut(&pid) {
+                p.state = ProcessState::Ready;
+                s.ready.push_back(pid);
+            }
+        }
+    }
 }
 
 impl Drop for PendingProcess {
@@ -652,9 +825,11 @@ impl Drop for PendingProcess {
         let Some(pid) = self.pid else { return; };
         #[cfg(feature = "legacy-desktop")]
         crate::surface::cleanup_surfaces_for_pid(pid);
-        if !release_process_address_space(pid) { return; }
+        let _ = release_process_address_space(pid);
         let mut sched = SCHEDULER.lock();
+        sched.ready.retain(|&x| x != pid);
         if let Some(p) = sched.get_process_mut(pid) {
+            p.state = ProcessState::Terminated;
             crate::cap::destroy_process_cspace(&mut p.cap_table);
         }
         sched.purge_pid(pid);
@@ -662,34 +837,52 @@ impl Drop for PendingProcess {
     }
 }
 
-/// Wait for a child process to terminate and reap its exit status (Faz 8).
+/// Wait for a child process to terminate and reap its exit status.
 pub fn waitpid(child_pid: u64) -> Result<u64, &'static str> {
-    let mut s = SCHEDULER.lock();
-    let curr = s.current;
-    let (is_reaped, is_term, exit_code) = {
-        let p = s.table.get(&child_pid).ok_or("Process not found")?;
-        (p.state == ProcessState::Reaped || p.reaped, p.state == ProcessState::Terminated || p.exited, p.exit_code)
-    };
+    loop {
+        let mut s = SCHEDULER.lock();
+        let curr = s.current;
+        let (is_reaped, is_term, exit_code) = {
+            let p = s.table.get(&child_pid).ok_or("Process not found")?;
+            (
+                p.state == ProcessState::Reaped || p.reaped,
+                p.state == ProcessState::Terminated || p.exited,
+                p.exit_code,
+            )
+        };
 
-    if is_reaped {
-        return Err("Already reaped");
-    }
-
-    if is_term {
-        if let Some(p) = s.table.get_mut(&child_pid) {
-            p.state = ProcessState::Reaped;
-            p.reaped = true;
+        if is_reaped {
+            return Err("Already reaped");
         }
-        return Ok(exit_code);
-    }
 
-    // Çocuk henüz sonlanmadı: parent'ı Blocked yap
-    if let Some(parent_pid) = curr {
-        if let Some(parent) = s.table.get_mut(&parent_pid) {
-            parent.state = ProcessState::Blocked;
+        if is_term {
+            if let Some(p) = s.table.get_mut(&child_pid) {
+                p.state = ProcessState::Reaped;
+                p.reaped = true;
+            }
+            return Ok(exit_code);
+        }
+
+        // Çocuk henüz sonlanmadı: parent'ı Blocked yap ve schedule et
+        if let Some(parent_pid) = curr {
+            crate::serial_println!("[WAITPID] child={} not term, blocking parent={} and scheduling", child_pid, parent_pid);
+            if let Some(parent) = s.table.get_mut(&parent_pid) {
+                parent.state = ProcessState::Blocked;
+                parent.block_reason = Some(BlockReason::WaitPid(child_pid));
+            }
+            if let Some(child) = s.table.get_mut(&child_pid) {
+                if child.parent_pid.is_none() {
+                    child.parent_pid = Some(parent_pid);
+                }
+            }
+            schedule_internal(s);
+            crate::serial_println!("[WAITPID] parent={} resumed after schedule_internal", parent_pid);
+        } else {
+            crate::serial_println!("[WAITPID] child={} curr is None, calling schedule", child_pid);
+            drop(s);
+            schedule();
         }
     }
-    Ok(exit_code)
 }
 
 /// Send a POSIX signal to a target process.
@@ -810,6 +1003,7 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
             rsp: kstack_top - 8,
             rip: kernel_thread_stub as *const () as usize as u64,
             cr3: 0, // kernel threads run in the shared kernel address space
+            rflags: 0x202,
         };
         s.ready.push_back(pid);
     }
@@ -881,6 +1075,7 @@ pub fn create_user_process_with_caps(
             rsp: kstack_top - 8,
             rip: user_process_stub as *const () as usize as u64,
             cr3: 0, // kernel CR3 during trampoline; enter_user_current loads user_cr3 right before iretq
+            rflags: 0x202,
         };
         s.ready.push_back(pid);
     }
@@ -1081,32 +1276,127 @@ pub fn timer_tick() {
         TICKS_LEFT.store(left - 1, Ordering::Relaxed);
         return;
     }
-    if SCHEDULER.is_locked() {
+    // Faz 0.6 / Madde 1: is_locked() TOCTOU açığı yerine atomik try_lock()
+    if let Some(s) = SCHEDULER.try_lock() {
+        schedule_internal(s);
+    } else {
         TICKS_SKIPPED.fetch_add(1, Ordering::Relaxed);
-        return;
     }
-    schedule();
 }
 
 // ---------------------------------------------------------------------------
 // Scheduling core
 // ---------------------------------------------------------------------------
 
+pub static SLEEP_QUEUE: IrqMutex<WaitQueue> = IrqMutex::new(WaitQueue::new());
+
+/// Mevcut thread'i bir WaitQueue uzerinde bloklayip baska bir thread'e baglam degistirir.
+pub fn block_current_on(wait_queue: &mut WaitQueue, reason: BlockReason) {
+    let mut s = SCHEDULER.lock();
+    let cur_pid = match s.current {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(proc) = s.table.get_mut(&cur_pid) {
+        proc.state = ProcessState::Blocked;
+        proc.block_reason = Some(reason);
+    }
+    wait_queue.enqueue(cur_pid, &mut s.table);
+    schedule_internal(s);
+}
+
+/// WaitQueue'dan bir thread'i cikarip Ready durumuna getirir.
+/// Eger thread o anda zaten calisiyorsa (current), ready kuyruguna ASLA eklenmez.
+pub fn wake_one_locked(s: &mut Scheduler, wait_queue: &mut WaitQueue) -> Option<u64> {
+    let pid = wait_queue.dequeue(&mut s.table)?;
+    if s.current == Some(pid) {
+        if let Some(proc) = s.table.get_mut(&pid) {
+            proc.state = ProcessState::Running;
+            proc.block_reason = None;
+        }
+    } else {
+        if let Some(proc) = s.table.get_mut(&pid) {
+            if proc.state == ProcessState::Blocked {
+                proc.state = ProcessState::Ready;
+                proc.block_reason = None;
+                s.ready.push_back(pid);
+            }
+        }
+    }
+    Some(pid)
+}
+
+pub fn wake_one(wait_queue: &mut WaitQueue) -> Option<u64> {
+    let mut s = SCHEDULER.lock();
+    wake_one_locked(&mut s, wait_queue)
+}
+
+pub fn wake_all(wait_queue: &mut WaitQueue) -> usize {
+    let mut s = SCHEDULER.lock();
+    let mut count = 0;
+    while wake_one_locked(&mut s, wait_queue).is_some() {
+        count += 1;
+    }
+    count
+}
+
+/// Preemptive thread uyutma: belirtilen milisaniye kadar thread'i bloke eder.
+pub fn sleep_ms(ms: u64) {
+    let target_tick = crate::interrupts::get_tick().saturating_add(ms);
+    let mut s = SCHEDULER.lock();
+    let cur_pid = match s.current {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(proc) = s.table.get_mut(&cur_pid) {
+        proc.state = ProcessState::Blocked;
+        proc.block_reason = Some(BlockReason::Sleep(target_tick));
+    }
+    SLEEP_QUEUE.lock().enqueue(cur_pid, &mut s.table);
+    schedule_internal(s);
+}
+
+fn poll_sleeping_processes_locked(s: &mut Scheduler, current_tick: u64) {
+    let mut sq = SLEEP_QUEUE.lock();
+    let mut curr = sq.head;
+    while let Some(pid) = curr {
+        let (next, should_wake) = if let Some(p) = s.table.get(&pid) {
+            let wake = match p.block_reason {
+                Some(BlockReason::Sleep(target)) => current_tick >= target,
+                _ => false,
+            };
+            (p.wait_next, wake)
+        } else {
+            (None, false)
+        };
+        if should_wake {
+            sq.remove(pid, &mut s.table);
+            if let Some(proc) = s.table.get_mut(&pid) {
+                proc.state = ProcessState::Ready;
+                proc.block_reason = None;
+                s.ready.push_back(pid);
+            }
+        }
+        curr = next;
+    }
+}
+
 /// Full preemptive round-robin switch. Requeues the current process, picks the
 /// next ready one, saves the current kernel context and resumes the next.
-///
-/// Called from `timer_tick` while inside the timer IRQ. It abandons the
-/// interrupted context (the switch never returns in the preempting invocation).
-/// When the preempted process is later switched back to, it resumes
-/// mid-`switch_context` and returns normally, unwinding the timer IRQ and
-/// restoring the exact state.
 pub fn schedule() {
-    // Faz 0.6: Timer IRQ'sunda ertelenen ödünç capability iadelerini işle
+    debug_assert_eq!(crate::sync::irq_locks_held(), 0, "Hiyerarsi ihlali: schedule() cagirilirken baska hicbir IrqMutex tutulamaz!");
+    // Faz 0.6: Timer IRQ'sunda ertelenen ödünç capability iadelerini SCHEDULER kilidi öncesinde işle
     crate::cap::poll_pending_lend_expiries();
+    let s = SCHEDULER.lock();
+    schedule_internal(s);
+}
+
+fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
+    // Faz 2.2: Uyanma zamanı gelmiş thread'leri uyandır
+    poll_sleeping_processes_locked(&mut s, crate::interrupts::get_tick());
 
     // Requeue current to the back and pick the next ready process.
     let (cur_ctx, next_ctx) = {
-        let mut s = SCHEDULER.lock();
         // Raw pointer to the old current process's saved context (stable in
         // the static table); null if there was no current process yet.
         let cur_raw = match s.current {
@@ -1117,6 +1407,7 @@ pub fn schedule() {
         };
         if let Some(cur) = s.current {
             if let Some(p) = s.table.get_mut(&cur) {
+                p.check_stack_canary();
                 if p.state == ProcessState::Running && !p.exited && !p.reaped {
                     p.state = ProcessState::Ready;
                     s.ready.push_back(cur);
@@ -1143,6 +1434,8 @@ pub fn schedule() {
                 None => {
                     // Nothing runnable: CPU idles via the idle process (pid 0).
                     if let Some(idle_proc) = s.table.get(&0) {
+                        idle_proc.check_stack_canary();
+                        crate::gdt::set_tss_rsp0(idle_proc.kernel_stack_top());
                         let idle_ctx: *const RegisterContext = &idle_proc.ctx;
                         drop(s);
                         jump_to_initial(idle_ctx);
@@ -1159,6 +1452,8 @@ pub fn schedule() {
         set_cpu_current_pid(0, Some(next));
         if let Some(p) = s.table.get_mut(&next) {
             p.state = ProcessState::Running;
+            p.check_stack_canary();
+            crate::gdt::set_tss_rsp0(p.kernel_stack_top());
         }
         let ports = s.table.get(&next).and_then(|p| p.allowed_ports);
         if let Some((start, end)) = ports {
@@ -1179,9 +1474,8 @@ pub fn schedule() {
         crate::ktrace::log_trace(crate::klog::LogLevel::Debug, format_args!("PROC_SWITCH next={}", next));
         (cur_raw.unwrap_or(core::ptr::null_mut()), next_raw)
     };
+    drop(s);
 
-    // `cur_ctx` may be null if there is no real previous process (first
-    // switch); in that case there is nothing meaningful to save into.
     if cur_ctx.is_null() {
         switch_context_null_save(next_ctx);
     } else {
@@ -1207,6 +1501,9 @@ extern "C" fn switch_context_null_save(next: *const RegisterContext) {
             "mov r15, [rdi + 40]",
             "mov rdx, [rdi + 48]", // pre-load next RSP
             "mov rcx, [rdi + 56]", // pre-load next RIP
+            "mov rax, [rdi + 72]", // restore RFLAGS
+            "push rax",
+            "popfq",
             "mov rax, [rdi + 64]", // pre-load next CR3
             "test rax, rax",
             "jz 1f",
@@ -1226,6 +1523,19 @@ pub fn release_process_address_space(pid: u64) -> bool {
     }
     let cr3 = SCHEDULER.lock().get_process(pid).map(|p| p.user_cr3).unwrap_or(0);
     if cr3 == 0 { return true; }
+    let (cur_cr3_frame, _) = x86_64::registers::control::Cr3::read();
+    if cur_cr3_frame.start_address().as_u64() == cr3 {
+        if let Some(kcr3) = SHARED_KERNEL_CR3.get().copied() {
+            unsafe {
+                x86_64::registers::control::Cr3::write(
+                    x86_64::structures::paging::PhysFrame::containing_address(
+                        x86_64::PhysAddr::new(kcr3),
+                    ),
+                    x86_64::registers::control::Cr3Flags::empty(),
+                );
+            }
+        }
+    }
     if let Err(e) = crate::memory::destroy_user_address_space(cr3) {
         crate::serial_println!("[MEMORY] PID {} address-space cleanup deferred: {}", pid, e);
         return false;
@@ -1264,10 +1574,17 @@ pub fn exit_current() -> ! {
             crate::input::cleanup_input_for_pid(pid);
         }
         release_process_address_space(pid);
+        crate::ipc::hangup_channel_for_pid(pid as u32);
+        let mut caps = {
+            let mut s = SCHEDULER.lock();
+            s.table.get_mut(&pid).map(|p| core::mem::take(&mut p.cap_table)).unwrap_or_default()
+        };
+        crate::cap::destroy_process_cspace(&mut caps);
     }
 
     let exec_ctx: Option<RegisterContext> = EXECUTOR_RESUME.lock().take();
     if let Some(mut ctx) = exec_ctx {
+        let mut killed_pid = None;
         {
             let mut s = SCHEDULER.lock();
             if let Some(pid) = s.current {
@@ -1275,8 +1592,6 @@ pub fn exit_current() -> ! {
                     p.state = ProcessState::Terminated;
                     p.exited = true;
                     crate::ktrace::log_trace(crate::klog::LogLevel::Info, format_args!("PROC_EXIT pid={}", pid));
-                    crate::cap::destroy_process_cspace(&mut p.cap_table);
-                    crate::ipc::hangup_channel_for_pid(pid as u32);
                     p.allowed_ports = None;
                     (p.parent_pid, p.is_user)
                 } else {
@@ -1292,12 +1607,15 @@ pub fn exit_current() -> ! {
                     }
                 }
                 if !is_user {
-                    crate::task::KILLED_PROCESSES.lock().push(pid);
+                    killed_pid = Some(pid);
                 }
             }
             // Executor is not a process; nothing is "current" after the resume.
             s.current = None;
             set_cpu_current_pid(0, None);
+        }
+        if let Some(kpid) = killed_pid {
+            crate::task::KILLED_PROCESSES.lock().push(kpid);
         }
         // Görev C (CAP_INV-14): Executor'a dönerken tüm IO portlarını sıfırla/kapat
         crate::gdt::reset_io_bitmap();
@@ -1315,14 +1633,13 @@ pub fn exit_current() -> ! {
         jump_to_initial(&ctx);
     }
 
+    let mut killed_pid = None;
     let next_ctx: *const RegisterContext = {
         let mut s = SCHEDULER.lock();
         if let Some(pid) = s.current {
             let (parent_pid, is_user) = if let Some(p) = s.table.get_mut(&pid) {
                 p.state = ProcessState::Terminated;
                 p.exited = true;
-                crate::cap::destroy_process_cspace(&mut p.cap_table);
-                crate::ipc::hangup_channel_for_pid(pid as u32);
                 p.allowed_ports = None;
                 (p.parent_pid, p.is_user)
             } else {
@@ -1338,7 +1655,7 @@ pub fn exit_current() -> ! {
                 }
             }
             if !is_user {
-                crate::task::KILLED_PROCESSES.lock().push(pid);
+                killed_pid = Some(pid);
             }
         }
         match s.ready.pop_front() {
@@ -1347,6 +1664,8 @@ pub fn exit_current() -> ! {
                 set_cpu_current_pid(0, Some(pid));
                 if let Some(p) = s.table.get_mut(&pid) {
                     p.state = ProcessState::Running;
+                    p.check_stack_canary();
+                    crate::gdt::set_tss_rsp0(p.kernel_stack_top());
                 }
                 let ports = s.table.get(&pid).and_then(|p| p.allowed_ports);
                 if let Some((start, end)) = ports {
@@ -1362,10 +1681,17 @@ pub fn exit_current() -> ! {
                 s.current = Some(0);
                 set_cpu_current_pid(0, Some(0));
                 crate::gdt::reset_io_bitmap();
+                if let Some(p) = s.table.get(&0) {
+                    p.check_stack_canary();
+                    crate::gdt::set_tss_rsp0(p.kernel_stack_top());
+                }
                 &s.table[&0].ctx as *const RegisterContext
             }
         }
     };
+    if let Some(kpid) = killed_pid {
+        crate::task::KILLED_PROCESSES.lock().push(kpid);
+    }
     jump_to_initial(next_ctx);
 }
 
@@ -1439,6 +1765,7 @@ pub fn fork_current() -> i64 {
         rsp: np.kernel_stack.as_ptr() as u64 + np.kernel_stack.len() as u64,
         rip: user_process_stub as *const () as usize as u64,
         cr3: child_cr3, // child runs in its cloned address space
+        rflags: 0x202,
     };
     {
         let mut s = SCHEDULER.lock();
@@ -2691,20 +3018,40 @@ fn alloc_idle() {
         rsp: stack_top,
         rip: kernel_thread_stub as *const () as usize as u64,
         cr3: 0, // idle runs in the shared kernel address space
+        rflags: 0x202,
     };
     let mut s = SCHEDULER.lock();
     if !s.table.contains_key(&0) {
         s.table.insert(0, p);
-        s.ready.push_back(0);
     }
 }
 
-/// Prepare the scheduler: create the idle process and reset the quantum.
-/// Safe to call multiple times (idle is created only once). This does not
-/// start preemption; call [`set_preemption_enabled(true)`] to arm the timer.
+fn init_bootstrap_process() {
+    let mut s = SCHEDULER.lock();
+    if s.current.is_some() {
+        return;
+    }
+    let pid = 1;
+    if !s.table.contains_key(&pid) {
+        let mut p = Process::new("init");
+        p.pid = pid;
+        p.state = ProcessState::Running;
+        s.table.insert(pid, p);
+    }
+    s.current = Some(pid);
+    set_cpu_current_pid(0, Some(pid));
+    if NEXT_PID.load(Ordering::Relaxed) <= 1 {
+        NEXT_PID.store(2, Ordering::Relaxed);
+    }
+}
+
+/// Prepare the scheduler: create the idle process, register bootstrap process, and reset the quantum.
+/// Safe to call multiple times (idle is created only once).
 pub fn init_preemptive() {
     alloc_idle();
+    init_bootstrap_process();
     arm_quantum();
+    set_preemption_enabled(true);
 }
 
 /// Turn the preemptive scheduler on/off.
@@ -3202,3 +3549,67 @@ pub fn spawn_desktop_v1_apps() -> Result<(u64, u64, u64), &'static str> {
 
     Ok((pid_term, pid_files, 0))
 }
+
+// ---------------------------------------------------------------------------
+// Faz 0: Deadlock Stres Testi (60 sn)
+// ---------------------------------------------------------------------------
+
+static STRESS_DURATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(60);
+
+extern "C" fn deadlock_stress_runner() {
+    let duration_secs = STRESS_DURATION.load(Ordering::Relaxed);
+    let start_tick = crate::interrupts::get_tick();
+    crate::serial_println!("[DEADLOCK-STRESS] runner entered tick={}", start_tick);
+    let target_ticks = duration_secs * 1000;
+    let mut last_report_sec = 0u64;
+    let mut metrics_calls = 0u64;
+    let mut spawn_cycles = 0u64;
+
+    set_preemption_enabled(true);
+
+    while crate::interrupts::get_tick().saturating_sub(start_tick) < target_ticks {
+        // Is parcacigi A: snapshot ve current_pid
+        let _ = get_system_metrics_snapshot();
+        let _ = current_pid();
+        metrics_calls += 1;
+
+        // Is parcacigi B: spawn ve purge
+        let pid = insert_process("stress-proc");
+        {
+            let mut sched = SCHEDULER.lock();
+            if let Some(proc) = sched.get_process_mut(pid) {
+                crate::cap::destroy_process_cspace(&mut proc.cap_table);
+            }
+            sched.purge_pid(pid);
+        }
+        spawn_cycles += 1;
+
+        // Watchdog & Heartbeat izleme
+        let elapsed_ticks = crate::interrupts::get_tick().saturating_sub(start_tick);
+        let current_sec = elapsed_ticks / 1000;
+        if current_sec > last_report_sec {
+            last_report_sec = current_sec;
+            let skipped = TICKS_SKIPPED.load(Ordering::Relaxed);
+            crate::serial_println!(
+                "[DEADLOCK-STRESS] sec={}/{} tick={} metrics_calls={} spawns={} ticks_skipped={}",
+                current_sec, duration_secs, elapsed_ticks, metrics_calls, spawn_cycles, skipped
+            );
+        }
+    }
+
+    set_preemption_enabled(false);
+    let final_skipped = TICKS_SKIPPED.load(Ordering::Relaxed);
+    crate::serial_println!(
+        "[DEADLOCK-STRESS] ALL PASS: {}s completed without deadlock. Total metrics_calls={}, spawns={}, ticks_skipped={}",
+        duration_secs, metrics_calls, spawn_cycles, final_skipped
+    );
+}
+
+pub fn run_deadlock_stress_test(duration_secs: u64) {
+    crate::serial_println!("[DEADLOCK-STRESS] START duration={}s", duration_secs);
+    STRESS_DURATION.store(duration_secs, Ordering::Relaxed);
+    init_preemptive();
+    let pid = create_kernel_process("stress-runner", deadlock_stress_runner);
+    let _ = waitpid(pid);
+}
+

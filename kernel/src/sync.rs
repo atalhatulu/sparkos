@@ -263,10 +263,11 @@ impl Condvar {
     }
 }
 
-/// 5. BlockingChannel — Blocking channel for IPC (IrqMutex-protected)
+/// 5. BlockingChannel — Blocking channel for IPC (IrqMutex-protected, WaitQueue-backed)
 pub struct BlockingChannel<M> {
     buffer: IrqMutex<VecDeque<M>>,
-    cond: Condvar,
+    not_empty: IrqMutex<crate::task::process::WaitQueue>,
+    not_full: IrqMutex<crate::task::process::WaitQueue>,
     capacity: usize,
 }
 
@@ -274,18 +275,28 @@ impl<M> BlockingChannel<M> {
     pub const fn new(capacity: usize) -> Self {
         BlockingChannel {
             buffer: IrqMutex::new(VecDeque::new()),
-            cond: Condvar::new(),
+            not_empty: IrqMutex::new(crate::task::process::WaitQueue::new()),
+            not_full: IrqMutex::new(crate::task::process::WaitQueue::new()),
             capacity,
         }
     }
 
     pub fn send(&self, msg: M) {
-        let mut guard = self.buffer.lock();
-        while guard.len() >= self.capacity {
-            guard = self.cond.wait_irq(guard, &self.buffer);
+        let mut pending = Some(msg);
+        loop {
+            {
+                let mut guard = self.buffer.lock();
+                if guard.len() < self.capacity {
+                    guard.push_back(pending.take().unwrap());
+                    drop(guard);
+                    let mut wq = self.not_empty.lock();
+                    crate::task::process::wake_one(&mut wq);
+                    return;
+                }
+            }
+            let mut wq = self.not_full.lock();
+            crate::task::process::block_current_on(&mut wq, crate::task::process::BlockReason::ChannelSend);
         }
-        guard.push_back(msg);
-        self.cond.notify_one();
     }
     
     pub fn try_send(&self, msg: M) -> Result<(), M> {
@@ -294,25 +305,34 @@ impl<M> BlockingChannel<M> {
             return Err(msg);
         }
         guard.push_back(msg);
-        self.cond.notify_one();
+        drop(guard);
+        let mut wq = self.not_empty.lock();
+        crate::task::process::wake_one(&mut wq);
         Ok(())
     }
 
     pub fn recv(&self) -> M {
-        let mut guard = self.buffer.lock();
         loop {
-            if let Some(msg) = guard.pop_front() {
-                self.cond.notify_one();
-                return msg;
+            {
+                let mut guard = self.buffer.lock();
+                if let Some(msg) = guard.pop_front() {
+                    drop(guard);
+                    let mut wq = self.not_full.lock();
+                    crate::task::process::wake_one(&mut wq);
+                    return msg;
+                }
             }
-            guard = self.cond.wait_irq(guard, &self.buffer);
+            let mut wq = self.not_empty.lock();
+            crate::task::process::block_current_on(&mut wq, crate::task::process::BlockReason::ChannelRecv);
         }
     }
     
     pub fn try_recv(&self) -> Option<M> {
         let mut guard = self.buffer.lock();
         if let Some(msg) = guard.pop_front() {
-            self.cond.notify_one();
+            drop(guard);
+            let mut wq = self.not_full.lock();
+            crate::task::process::wake_one(&mut wq);
             Some(msg)
         } else {
             None

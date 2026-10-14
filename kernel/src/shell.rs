@@ -517,6 +517,13 @@ impl Shell {
                 let mut port = x86_64::instructions::port::Port::new(0x604);
                 unsafe { port.write(0x2000u16); }
             }
+            "stress" | "deadlock_stress" => {
+                w.set_color(Color::Yellow, Color::Black);
+                writeln!(w, "Faz 0 Deadlock Stres Testi (60 sn) baslatiliyor...").unwrap();
+                crate::task::process::run_deadlock_stress_test(60);
+                w.set_color(Color::LightGreen, Color::Black);
+                writeln!(w, "Deadlock Stres Testi Basariyla Tamamlandi!").unwrap();
+            }
             "ps" => {
                 w.set_color(Color::Cyan, Color::Black);
                 writeln!(w, "PID\tISIM").unwrap();
