@@ -196,4 +196,5 @@ pub use ipc::{CapMessage, TransferMode, SERVICE_DEVICE_FD};
 pub use syscall::*;
 
 pub mod service;
+pub mod fs;
 

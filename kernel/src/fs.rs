@@ -114,10 +114,15 @@ pub struct BlockAllocator {
 
 impl BlockAllocator {
     pub fn new(total_blocks: u32) -> Self {
+        let mut bitmap = alloc::vec![false; total_blocks as usize];
+        if total_blocks > 0 {
+            // Blok 0 Superblock ve sentinel (null) olarak rezerve edilir
+            bitmap[0] = true;
+        }
         Self {
             total_blocks,
-            free_blocks: total_blocks,
-            bitmap: alloc::vec![false; total_blocks as usize],
+            free_blocks: total_blocks.saturating_sub(1),
+            bitmap,
         }
     }
 
@@ -1571,6 +1576,82 @@ pub fn generate_procfs_content(path: &str) -> Option<Vec<u8>> {
             }
             None
         }
+    }
+}
+
+pub use spark_abi::fs::{
+    FsRequest, FsResponse, FsStat,
+    FS_OP_OPEN, FS_OP_READ, FS_OP_WRITE, FS_OP_STAT, FS_OP_READDIR,
+    FS_OP_MKDIR, FS_OP_UNLINK, FS_OP_RENAME, FS_OP_SYNC, FS_OP_CLOSE,
+    O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND,
+};
+
+/// Ring-3 FS Servis IPC Dağıtıcısı (Faz 5.1)
+pub fn dispatch_fs_request(req: &FsRequest, data_payload: Option<&[u8]>) -> (FsResponse, Vec<u8>) {
+    match req.opcode {
+        FS_OP_OPEN => {
+            let path = req.path_str();
+            if req.flags & O_CREAT != 0 {
+                let _ = write_file_bytes(path, &[]);
+            }
+            if let Ok(content) = read_file_bytes(path) {
+                let mut resp = FsResponse::ok(1, content.len() as u64);
+                resp.size = content.len() as u64;
+                (resp, Vec::new())
+            } else {
+                (FsResponse::err(spark_abi::errno::ENOENT as u32), Vec::new())
+            }
+        }
+        FS_OP_READ => {
+            let path = req.path_str();
+            if let Ok(content) = read_file_bytes(path) {
+                let start = (req.offset as usize).min(content.len());
+                let end = (start + req.length as usize).min(content.len());
+                let slice = &content[start..end];
+                (FsResponse::ok(req.handle, slice.len() as u64), slice.to_vec())
+            } else {
+                (FsResponse::err(spark_abi::errno::ENOENT as u32), Vec::new())
+            }
+        }
+        FS_OP_WRITE => {
+            let path = req.path_str();
+            let payload = data_payload.unwrap_or(&[]);
+            if write_file_bytes(path, payload).is_ok() {
+                (FsResponse::ok(req.handle, payload.len() as u64), Vec::new())
+            } else {
+                (FsResponse::err(spark_abi::errno::EIO as u32), Vec::new())
+            }
+        }
+        FS_OP_STAT => {
+            let path = req.path_str();
+            if let Ok(content) = read_file_bytes(path) {
+                let mut resp = FsResponse::ok(0, content.len() as u64);
+                resp.size = content.len() as u64;
+                (resp, Vec::new())
+            } else {
+                (FsResponse::err(spark_abi::errno::ENOENT as u32), Vec::new())
+            }
+        }
+        FS_OP_MKDIR => {
+            let path = req.path_str();
+            if mkdir(path).is_ok() {
+                (FsResponse::ok(0, 0), Vec::new())
+            } else {
+                (FsResponse::err(spark_abi::errno::EIO as u32), Vec::new())
+            }
+        }
+        FS_OP_UNLINK => {
+            let path = req.path_str();
+            if remove(path).is_ok() {
+                (FsResponse::ok(0, 0), Vec::new())
+            } else {
+                (FsResponse::err(spark_abi::errno::ENOENT as u32), Vec::new())
+            }
+        }
+        FS_OP_CLOSE | FS_OP_SYNC => {
+            (FsResponse::ok(req.handle, 0), Vec::new())
+        }
+        _ => (FsResponse::err(spark_abi::errno::ENOSYS as u32), Vec::new()),
     }
 }
 

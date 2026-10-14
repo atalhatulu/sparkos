@@ -194,6 +194,7 @@ pub fn run() {
     two_user_processes_preemptive_regression();
     blocking_channel_stress_regression();
     service_supervisor_and_discovery_regression();
+    spfs_v1_block_engine_and_ipc_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -575,4 +576,95 @@ fn service_supervisor_and_discovery_regression() {
 
     crate::serial_println!("[REGRESSION] PASS service supervisor dependency ordering, crash recovery, reconnect and flapping defense");
 }
+
+fn spfs_v1_block_engine_and_ipc_regression() {
+    use crate::fs::{SpfsV2Engine, InodeV2, dispatch_fs_request, FsRequest, O_CREAT, O_RDWR};
+
+    // 1. SpfsV2Engine dinamik blok tahsisatı ve dolaylı blok testi (Direct + Indirect)
+    let total_blocks = 256u32;
+    let mut engine = SpfsV2Engine::new(total_blocks);
+    let mut inode = InodeV2 {
+        inode_id: 1,
+        file_type: 1, // Regular
+        flags: 3,     // RW
+        permissions: 0o644,
+        uid: 0,
+        gid: 0,
+        size: 0,
+        block_count: 0,
+        direct_blocks: [0; 6],
+        indirect_block: 0,
+        double_indirect: 0,
+        _reserved: [0; 12],
+    };
+
+    let initial_free = engine.allocator.free_blocks;
+
+    // 6 direct blok (6 * 512 = 3072 byte) + 2 indirect blok (2 * 512 = 1024 byte) = 4096 byte veri
+    let test_payload = alloc::vec![0x5A; 4096];
+    let written = engine.write_file_transactional(&mut inode, &test_payload).unwrap();
+    assert_eq!(written, 4096);
+    assert_eq!(inode.size, 4096);
+    assert_eq!(inode.block_count, 8); // 8 veri bloğu
+    assert!(inode.indirect_block != 0, "Indirect block table must be allocated for >3KB file");
+    for blk in &inode.direct_blocks {
+        assert!(*blk != 0, "Direct blocks must be non-zero since block 0 is reserved");
+    }
+    assert_eq!(engine.allocator.free_blocks, initial_free - 9, "8 data blocks + 1 indirect table = 9 blocks used");
+
+    // 2. Blok temizleme ve geri alma (Zero Orphan / No leak)
+    engine.truncate_and_reclaim(&mut inode);
+    assert_eq!(inode.size, 0);
+    assert_eq!(engine.allocator.free_blocks, initial_free, "All blocks must be reclaimed on truncation");
+
+    // 3. ENOSPC Durumunda Transactional Rollback (Sıfır sızıntı)
+    let huge_payload = alloc::vec![0x77; (total_blocks as usize + 10) * 512];
+    let err = engine.write_file_transactional(&mut inode, &huge_payload);
+    assert!(err.is_err(), "Must fail with NoSpace when blocks exceed capacity");
+    assert_eq!(engine.allocator.free_blocks, initial_free, "Failed allocation must rollback all staged blocks");
+
+    // 4. Ring-3 FS Servisi IPC Protokolü Testi (Open -> Write -> Stat -> Read -> Unlink)
+    let test_file = "/spfs_ipc_test.txt";
+    let file_data = b"SPFS v1 IPC Zero-Copy Bridge Payload";
+
+    // OPEN (O_CREAT)
+    let req_open = FsRequest::new_open(test_file, O_CREAT | O_RDWR, 0o644);
+    let (resp_open, _) = dispatch_fs_request(&req_open, None);
+    assert!(resp_open.is_ok(), "FS IPC OPEN must succeed");
+
+    // WRITE
+    let mut req_write = FsRequest::new_write(resp_open.handle, 0, file_data.len() as u64);
+    req_write.set_path(test_file);
+    let (resp_write, _) = dispatch_fs_request(&req_write, Some(file_data));
+    assert!(resp_write.is_ok(), "FS IPC WRITE must succeed");
+    assert_eq!(resp_write.bytes_transferred, file_data.len() as u64);
+
+    // STAT
+    let req_stat = FsRequest::new_stat(test_file);
+    let (resp_stat, _) = dispatch_fs_request(&req_stat, None);
+    assert!(resp_stat.is_ok(), "FS IPC STAT must succeed");
+    assert_eq!(resp_stat.size, file_data.len() as u64);
+
+    // READ
+    let mut req_read = FsRequest::new_read(resp_open.handle, 0, file_data.len() as u64);
+    req_read.set_path(test_file);
+    let (resp_read, read_bytes) = dispatch_fs_request(&req_read, None);
+    assert!(resp_read.is_ok(), "FS IPC READ must succeed");
+    assert_eq!(&read_bytes[..], file_data, "Read payload must match written payload");
+
+    // UNLINK
+    let mut req_unlink = FsRequest::empty();
+    req_unlink.opcode = crate::fs::FS_OP_UNLINK;
+    req_unlink.set_path(test_file);
+    let (resp_unlink, _) = dispatch_fs_request(&req_unlink, None);
+    assert!(resp_unlink.is_ok(), "FS IPC UNLINK must succeed");
+
+    // STAT after UNLINK -> ENOENT
+    let (resp_stat_after, _) = dispatch_fs_request(&req_stat, None);
+    assert!(!resp_stat_after.is_ok(), "Deleted file must fail stat");
+    assert_eq!(resp_stat_after.status, spark_abi::errno::ENOENT as u32);
+
+    crate::serial_println!("[REGRESSION] PASS SPFS dynamic block engine, indirect blocks, rollback and IPC protocol");
+}
+
 
