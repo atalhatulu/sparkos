@@ -251,24 +251,45 @@ impl WaitQueue {
         unsafe {
             let head_ptr = self.head.get();
             let tail_ptr = self.tail.get();
-            let head_pid = (*head_ptr)?;
-            let next_pid = if let Some(proc) = s.table.get_mut(&head_pid) {
-                let next = proc.wait_next;
-                proc.wait_next = None;
-                proc.wait_prev = None;
-                next
-            } else {
-                None
-            };
-            *head_ptr = next_pid;
-            if let Some(next) = next_pid {
-                if let Some(next_proc) = s.table.get_mut(&next) {
-                    next_proc.wait_prev = None;
+            while let Some(head_pid) = *head_ptr {
+                if let Some(proc) = s.table.get_mut(&head_pid) {
+                    let next_pid = proc.wait_next;
+                    proc.wait_next = None;
+                    proc.wait_prev = None;
+                    *head_ptr = next_pid;
+                    if let Some(next) = next_pid {
+                        if let Some(next_proc) = s.table.get_mut(&next) {
+                            next_proc.wait_prev = None;
+                        }
+                    } else {
+                        *tail_ptr = None;
+                    }
+                    return Some(head_pid);
+                } else {
+                    // Head PID tabloda yoksa kuyruğu koparma:
+                    if *head_ptr == *tail_ptr {
+                        *head_ptr = None;
+                        *tail_ptr = None;
+                        return None;
+                    }
+                    let mut found_next = None;
+                    for (&candidate_pid, candidate_proc) in s.table.iter() {
+                        if candidate_proc.wait_prev == Some(head_pid) {
+                            found_next = Some(candidate_pid);
+                            break;
+                        }
+                    }
+                    *head_ptr = found_next;
+                    if let Some(next) = found_next {
+                        if let Some(next_proc) = s.table.get_mut(&next) {
+                            next_proc.wait_prev = None;
+                        }
+                    } else {
+                        *tail_ptr = None;
+                    }
                 }
-            } else {
-                *tail_ptr = None;
             }
-            Some(head_pid)
+            None
         }
     }
 
@@ -667,6 +688,7 @@ pub struct Scheduler {
     table: BTreeMap<u64, Process>,
     ready: VecDeque<u64>,
     current: Option<u64>,
+    pub sleep_queue: WaitQueue,
 }
 
 impl Scheduler {
@@ -675,6 +697,60 @@ impl Scheduler {
             table: BTreeMap::new(),
             ready: VecDeque::new(),
             current: None,
+            sleep_queue: WaitQueue::new(),
+        }
+    }
+
+    pub fn enqueue_sleep(&mut self, pid: u64, target_tick: u64) {
+        unsafe {
+            let tail_ptr = self.sleep_queue.tail.get();
+            let head_ptr = self.sleep_queue.head.get();
+            if let Some(proc) = self.table.get_mut(&pid) {
+                proc.wait_next = None;
+                proc.wait_prev = *tail_ptr;
+                proc.state = ProcessState::Blocked;
+                proc.block_reason = Some(BlockReason::Sleep(target_tick));
+            }
+            if let Some(old_tail) = *tail_ptr {
+                if let Some(tail_proc) = self.table.get_mut(&old_tail) {
+                    tail_proc.wait_next = Some(pid);
+                }
+            } else {
+                *head_ptr = Some(pid);
+            }
+            *tail_ptr = Some(pid);
+        }
+    }
+
+    pub fn remove_sleep(&mut self, pid: u64) {
+        unsafe {
+            let head_ptr = self.sleep_queue.head.get();
+            let tail_ptr = self.sleep_queue.tail.get();
+            let (prev, next) = if let Some(proc) = self.table.get_mut(&pid) {
+                let p = proc.wait_prev;
+                let n = proc.wait_next;
+                proc.wait_prev = None;
+                proc.wait_next = None;
+                (p, n)
+            } else {
+                return;
+            };
+
+            if let Some(p) = prev {
+                if let Some(prev_proc) = self.table.get_mut(&p) {
+                    prev_proc.wait_next = next;
+                }
+            } else if *head_ptr == Some(pid) {
+                *head_ptr = next;
+            }
+
+            if let Some(n) = next {
+                if let Some(next_proc) = self.table.get_mut(&n) {
+                    next_proc.wait_prev = prev;
+                }
+            } else if *tail_ptr == Some(pid) {
+                *tail_ptr = prev;
+            }
         }
     }
 
@@ -1360,8 +1436,6 @@ pub fn timer_tick() {
 // Scheduling core
 // ---------------------------------------------------------------------------
 
-pub static SLEEP_QUEUE: WaitQueue = WaitQueue::new();
-
 /// Mevcut thread'i bir WaitQueue uzerinde bloklayip baska bir thread'e baglam degistirir.
 pub fn block_current_on(wait_queue: &WaitQueue, reason: BlockReason) {
     {
@@ -1388,15 +1462,19 @@ pub fn sleep_ms(ms: u64) {
     let target_tick = crate::interrupts::get_tick().saturating_add(ms);
     {
         let mut s = SCHEDULER.lock();
-        SLEEP_QUEUE.prepare_wait(&mut s, BlockReason::Sleep(target_tick));
+        if let Some(cur) = s.current {
+            s.enqueue_sleep(cur, target_tick);
+        }
     }
     schedule();
     let mut s = SCHEDULER.lock();
-    SLEEP_QUEUE.finish_wait(&mut s);
+    if let Some(cur) = s.current {
+        s.remove_sleep(cur);
+    }
 }
 
 fn poll_sleeping_processes_locked(s: &mut crate::sync::IrqGuard<'static, Scheduler>, current_tick: u64) {
-    let mut curr = SLEEP_QUEUE.head(s);
+    let mut curr = unsafe { *s.sleep_queue.head.get() };
     while let Some(pid) = curr {
         let (next, should_wake) = if let Some(p) = s.table.get(&pid) {
             let wake = match p.block_reason {
@@ -1408,7 +1486,7 @@ fn poll_sleeping_processes_locked(s: &mut crate::sync::IrqGuard<'static, Schedul
             (None, false)
         };
         if should_wake {
-            SLEEP_QUEUE.remove_internal(pid, s);
+            s.remove_sleep(pid);
             if let Some(proc) = s.table.get_mut(&pid) {
                 proc.state = ProcessState::Ready;
                 proc.block_reason = None;
