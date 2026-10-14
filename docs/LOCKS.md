@@ -1,97 +1,76 @@
 # SparkOS Kilit Envanteri ve Kilit Disiplini
 
-Bu doküman, Faz 0.3 kapsamında çekirdekteki tüm statik eşzamanlılık kilitlerinin (`Mutex`, `RwLock`, `Spinlock`) envanterini, IRQ erişim durumlarını ve kilit hiyerarşisi seviyelerini belgeler.
+Bu doküman, çekirdekteki tüm statik eşzamanlılık kilitlerinin (`IrqMutex`, `Spinlock`, `RwLock`) envanterini, IRQ erişim durumlarını ve kilit hiyerarşisi seviyelerini belgeler.
 
 ## 1. Kilit Sırası Hiyerarşisi
 
 Deadlock oluşumunu engellemek için kilitler yalnızca hiyerarşide yukarıdan aşağıya (düşük seviye numarasından yüksek seviye numarasına) doğru alınabilir. Ters sırada kilit edinimi KESİNLİKLE YASAKTIR.
 
+**ÖNEMLİ KURAL (SCHEDULER YAPRAK KİLİT):**
+`SCHEDULER` kilit hiyerarşisinde en dipteki **YAPRAK (LEAF)** kilittir (Seviye 7). `SCHEDULER` kilidi tutulurken başka hiçbir kilit (`IrqMutex`, `SpinMutex`, vb.) ALINAMAZ. `schedule()` çağrısı girişinde bu invaryant `debug_assert_eq!(irq_locks_held(), 0)` ile donanımsal/yazılımsal olarak denetlenir.
+
 ```
-Seviye 1: Süreç ve Çizelgeleyici (ProcessTable / Scheduler)
+Seviye 1: Günlükleme ve Çıktı (Serial / VGA Write Lock / Logs)
    │
    ▼
-Seviye 2: İş Kuyrukları ve İşlemci Durumu (RunQueue / CPU State)
+Seviye 2: Masaüstü ve Pencere Yöneticisi (WM / Surfaces / Apps)
    │
    ▼
-Seviye 3: Yetki Tabloları ve Güvenlik (CapTable / Security)
+Seviye 3: Bellek, Dosya Sistemi ve Donanım (Memory / FramePool / VFS / Drivers / Mouse)
    │
    ▼
-Seviye 4: İletişim Kanalları ve Tutamaçlar (IPC / FD / Sockets)
+Seviye 4: İletişim Kanalları ve Girdi Dağıtımı (IPC Endpoints / Input Queues / Sockets / FD)
    │
    ▼
-Seviye 5: Bellek, Dosya Sistemi ve Ham Donanım (Memory / VFS / Drivers)
+Seviye 5: Yetki Tabloları ve Güvenlik (Cap Core State / Lend Expiries / Security)
    │
    ▼
-Seviye 6: Masaüstü ve Pencere Yöneticisi (WM / Surfaces / Apps)
+Seviye 6: İşlemci Durumu ve SMP İş Kuyrukları (CPU State / RunQueue)
    │
    ▼
-Seviye 7: Seri Port ve Günlükleme (Serial / VGA / Logs)
+Seviye 7: Çizelgeleyici ve İş Parçacığı Tablosu (SCHEDULER - YAPRAK KİLİT)
+          [En son alınır; elde tutulurken hiçbir kilit alınamaz!]
 ```
 
 ## 2. Kilit Envanter Tablosu
 
-| Kilit Adı | Dosya | Tür | IRQ Erişimi (Doğrudan/Dolaylı) | Alındığı Bağlamlar | Sıra Seviyesi | IrqMutex Gereksinimi |
+| Kilit Adı | Dosya | Tür | IRQ Erişimi (Doğrudan/Dolaylı) | Alındığı Bağlamlar | Sıra Seviyesi | IrqMutex Durumu |
 |---|---|---|---|---|:---:|:---:|
-| `SCHEDULER` | `src/task/process.rs` | `Mutex<Scheduler>` | Evet (Timer IRQ `timer_tick`) | Timer, Syscall, Thread switch, Process spawn/exit | 1 | **ZORUNLU** |
-| `PER_CPU_SCHEDULER` | `src/task/process.rs` | `spin::Mutex<[..]>` | Evet (Timer IRQ) | SMP çizelgeleme, tick | 1 | **ZORUNLU** |
-| `EXECUTOR_RESUME` | `src/task/process.rs` | `Mutex<Option<Regs>>` | Evet (Fault/Timer recovery) | Servis exit, fault kurtarma | 1 | **ZORUNLU** |
-| `PROCESS_LIST` | `src/task/mod.rs` | `Mutex<BTreeMap<..>>` | Hayır | Syscall, Task yöneticisi | 1 | Opsiyonel |
-| `KILLED_PROCESSES` | `src/task/mod.rs` | `Mutex<Vec<u64>>` | Evet (Fault recovery) | `exit_current`, fault recovery | 1 | **ZORUNLU** |
-| `RUN_QUEUES` | `src/smp.rs` | `[Mutex<RunQueue>; 8]` | Evet (Reschedule IPI/Timer) | SMP work stealing, enqueue/dequeue | 2 | **ZORUNLU** |
-| `CPU_STATES` | `src/smp.rs` | `Mutex<[PerCpuState]>` | Evet (Timer/Watchdog) | Heartbeat, APIC keşfi | 2 | **ZORUNLU** |
-| `TLB_SHOOTDOWN_LOCK`| `src/smp.rs` | `Mutex<()>` | Evet (TLB IPI) | Sayfa unmap, adres alanı temizliği | 2 | **ZORUNLU** |
-| `BSP_LAPIC` | `src/smp.rs` | `Mutex<Option<LocalApic>>`| Hayır | Boot init, timer kalibrasyonu | 2 | Standart |
-| `STATE` (Cap Core)| `src/cap.rs` | `Mutex<Option<CoreState>>`| Evet (Timer `expire_lent_capabilities` -> `revoke`) | Cap create, transfer, lend, grant, revoke, syscall | 3 | **ZORUNLU** |
-| `LEND_EXPIRIES` | `src/cap.rs` | `Mutex<BTreeMap<..>>` | Evet (Timer IRQ) | `lend`, `expire_lent_capabilities` | 3 | **ZORUNLU** |
-| `DEVICE_PORT_BINDINGS`| `src/cap.rs` | `Mutex<BTreeMap<..>>` | Hayır | `create_device_ports`, `sys_ioperm` | 3 | Standart |
-| `DMA_REGIONS` | `src/dma_region.rs` | `Mutex<BTreeMap<..>>` | Hayır | DMA alloc, free, IOMMU map | 3 | Standart |
-| `SLOT_MAP` | `src/dma_region.rs` | `Mutex<BTreeMap<..>>` | Hayır | DMA yetki denetimi | 3 | Standart |
-| `SECURITY` | `src/security.rs` | `Mutex<SecurityManager>` | Hayır | Güvenlik politikaları | 3 | Standart |
-| `AUTH_MANAGER` | `src/auth.rs` | `Mutex<AuthManager>` | Hayır | Kullanıcı kimlik doğrulama | 3 | Standart |
-| `PERMISSION_MANAGER`| `src/permission.rs` | `Mutex<PermissionManager>` | Hayır | Uygulama izinleri | 3 | Standart |
-| `ENDPOINTS` | `src/ipc.rs` | `Mutex<BTreeMap<..>>` | Hayır (Lock-free ArrayQueue kullanılır) | IPC send, recv, endpoint create | 4 | Standart |
-| `ENDPOINT_OWNERS` | `src/ipc.rs` | `Mutex<BTreeMap<..>>` | Hayır | Endpoint transfer, mülkiyet sorgusu | 4 | Standart |
-| `IRQ_BINDINGS` | `src/ipc.rs` | `Mutex<BTreeMap<..>>` | Hayır (IRQ tetiklemesi `IRQ_EVENTS` atomik kuyruğunda) | `bind_irq`, `unbind_irq` | 4 | Standart |
-| `FD_TABLE` | `src/fd.rs` | `Mutex<FdTable>` | Hayır | Syscall open/close/read/write | 4 | Standart |
-| `SOCKET_TABLE` | `src/net_socket.rs` | `Mutex<SocketTable>` | Hayır | Ağ soket syscall'ları | 4 | Standart |
-| `INPUT_QUEUES` | `src/input.rs` | `Mutex<BTreeMap<..>>` | Evet (Mouse/Keyboard yönlendirme) | Girdi olay dağıtımı | 4 | **ZORUNLU** |
-| `KERNEL_INPUT_OWNERS`| `src/input.rs` | `Mutex<BTreeSet<..>>` | Evet (Input dispatch) | Giriş odağı | 4 | **ZORUNLU** |
-| `EVENT_BUS` | `src/event.rs` | `Mutex<EventBus>` | Hayır | Sistem olay abonelikleri | 4 | Standart |
-| `USER_FRAME_ALLOC`| `src/memory.rs` | `Mutex<Option<FramePool>>`| Evet (Page fault CoW işleme) | User frame alloc, free, stats | 5 | **ZORUNLU** |
-| `COW_PAGES` | `src/memory.rs` | `spin::Mutex<BTreeMap<..>>`| Evet (Page fault handler CoW yolu) | CoW fault, register_cow_page | 5 | **ZORUNLU** |
-| `KERNEL_HEAP_RANGE`| `src/allocator.rs` | `spin::Mutex<(u64, u64)>` | Hayır | Boot heap init | 5 | Standart |
-| `VFS` | `src/fs.rs` | `Mutex<FsNode>` | Hayır | Dosya sistemi işlemleri | 5 | Standart |
-| `BLOCK_CACHE` | `src/fs.rs` | `Mutex<BlockCache>` | Hayır | Disk blok önbelleği | 5 | Standart |
-| `BLOB_STORE` | `src/fs.rs` | `Mutex<Vec<..>>` | Hayır | Basit ikili depolama | 5 | Standart |
-| `DATA_DRIVE` | `src/ata.rs` | `Mutex<AtaDrive>` | Hayır | ATA PIO disk okuma/yazma | 5 | Standart |
-| `IOMMU_DOMAIN1_PML4`| `src/iommu.rs` | `Mutex<Option<u64>>` | Hayır | IOMMU sayfa tablosu | 5 | Standart |
-| `ARP_CACHE` | `src/net.rs` | `Mutex<Vec<ArpEntry>>` | Hayır | ARP çözümleme | 5 | Standart |
-| `KEYBOARD` | `src/keyboard.rs` | `Mutex<Keyboard>` | Hayır (Klavye IRQ'su ArrayQueue'ye yazar) | Kullanıcı alanı okuma | 5 | Standart |
-| `MOUSE` | `src/mouse.rs` | `Mutex<MouseState>` | Evet (Mouse IRQ 12) | Mouse interrupt işleme | 5 | **ZORUNLU** |
-| `CURSOR` | `src/cursor.rs` | `Mutex<CursorState>` | Evet (Mouse IRQ 12) | Mouse imleç koordinat güncellemesi | 5 | **ZORUNLU** |
-| `SURFACE_REGISTRY`| `src/surface.rs` | `RwLock<Vec<SurfaceInfo>>` | Hayır | Yüzey tahsisi, serbest bırakma | 6 | Standart |
-| `WM` | `src/wm.rs` | `Mutex<WindowManager>` | Evet (Clock task / Hud damage / Mouse click) | Pencere yönetimi, kompozisyon | 6 | **ZORUNLU** |
-| `GPU_MANAGER` | `src/gpu.rs` | `Mutex<GpuManager>` | Hayır | GPU arayüzü | 6 | Standart |
-| `VIRTIO_GPU` | `src/gpu_virtio.rs` | `Mutex<VirtioGpuDevice>` | Hayır | Virtio GPU MMIO/PCI | 6 | Standart |
-| `APP_MANAGER` | `src/app_manager.rs` | `Mutex<ApplicationManager>`| Hayır | Uygulama yaşam döngüsü | 6 | Standart |
-| `NOTIFICATION_MANAGER`| `src/notification.rs` | `Mutex<NotificationManager>`| Hayır | Bildirim servisi | 6 | Standart |
-| `CLIPBOARD` | `src/clipboard.rs` | `Mutex<Clipboard>` | Hayır | Pano verisi | 6 | Standart |
-| `THEME_MANAGER` | `src/theme.rs` | `Mutex<ThemeManager>` | Hayır | Masaüstü teması | 6 | Standart |
-| `FONT_MANAGER` | `src/font.rs` | `Mutex<FontManager>` | Hayır | Yazı tipi render | 6 | Standart |
-| Uygulama Durumları (`*_INSTANCES`)| `src/*_app.rs` | `Mutex<BTreeMap<..>>` | Hayır | Uygulama yerel durumları | 6 | Standart |
-| `SYSTEM_BAR` | `src/system_bar.rs` | `Mutex<SystemBar>` | Hayır | Sistem çubuğu render | 6 | Standart |
-| `DESKTOP_ENV` | `src/desktop.rs` | `Mutex<DesktopEnvironment>` | Hayır | Masaüstü durumu | 6 | Standart |
-| `WRITE_LOCK` | `src/vga_buffer.rs` | `spin::Mutex<VgaWriter>` | Evet (Panic, Clock task, VGA log) | Ekrana yazı yazma | 7 | **ZORUNLU** |
-| `SERIAL` | `src/serial.rs` | `Mutex<Option<SerialPort>>`| Evet (Panic dump, debug logları) | COM1 seri port çıktısı | 7 | **ZORUNLU** |
-| `TRACE_RING` | `src/ktrace.rs` | `Mutex<RingBuffer>` | Evet (User-fault loglama) | Çekirdek izleme halkası | 7 | **ZORUNLU** |
-| `CRASH_REPORTER` | `src/crash_reporter.rs` | `Mutex<CrashReporter>` | Evet (Panic crash dump) | Çökme kaydı | 7 | **ZORUNLU** |
-| `STATS` (Perf) | `src/perf.rs` | `spin::Mutex<[Histogram]>` | Hayır | F9/F10 performans profilleme | 7 | Standart |
+| `WRITE_LOCK` | `src/vga_buffer.rs` | `spin::Mutex<VgaWriter>` | Evet (Panic, Clock task, VGA log) | Ekrana yazı yazma | 1 | Standart (Spin) |
+| `SERIAL` | `src/serial.rs` | `IrqMutex<Option<SerialPort>>`| Evet (Panic dump, debug logları) | COM1 seri port çıktısı | 1 | **ZORUNLU (IrqMutex)** |
+| `TRACE_RING` | `src/ktrace.rs` | `IrqMutex<RingBuffer>` | Evet (User-fault loglama) | Çekirdek izleme halkası | 1 | **ZORUNLU (IrqMutex)** |
+| `CRASH_REPORTER` | `src/crash_reporter.rs` | `IrqMutex<CrashReporter>` | Evet (Panic crash dump) | Çökme kaydı | 1 | **ZORUNLU (IrqMutex)** |
+| `WM` | `src/wm.rs` | `IrqMutex<WindowManager>` | Evet (Mouse click, desktop damage) | Pencere yönetimi, kompozisyon | 2 | **ZORUNLU (IrqMutex)** |
+| `SURFACE_REGISTRY`| `src/surface.rs` | `RwLock<Vec<SurfaceInfo>>` | Hayır | Yüzey tahsisi, serbest bırakma | 2 | Standart |
+| `GPU_MANAGER` | `src/gpu.rs` | `IrqMutex<GpuManager>` | Hayır | GPU arayüzü | 2 | Standart |
+| `VIRTIO_GPU` | `src/gpu_virtio.rs` | `IrqMutex<VirtioGpuDevice>` | Hayır | Virtio GPU MMIO/PCI | 2 | Standart |
+| `APP_MANAGER` | `src/app_manager.rs` | `IrqMutex<ApplicationManager>`| Hayır | Uygulama yaşam döngüsü | 2 | Standart |
+| `USER_FRAME_ALLOC`| `src/memory.rs` | `IrqMutex<Option<FramePool>>`| Evet (Page fault CoW işleme) | User frame alloc, free, stats | 3 | **ZORUNLU (IrqMutex)** |
+| `COW_PAGES` | `src/memory.rs` | `IrqMutex<BTreeMap<..>>` | Evet (Page fault handler CoW yolu) | CoW fault, register_cow_page | 3 | **ZORUNLU (IrqMutex)** |
+| `VFS` | `src/fs.rs` | `IrqMutex<FsNode>` | Hayır | Dosya sistemi işlemleri | 3 | Standart |
+| `BLOCK_CACHE` | `src/fs.rs` | `IrqMutex<BlockCache>` | Hayır | Disk blok önbelleği | 3 | Standart |
+| `DATA_DRIVE` | `src/ata.rs` | `IrqMutex<AtaDrive>` | Hayır | ATA PIO disk okuma/yazma | 3 | Standart |
+| `MOUSE` | `src/mouse.rs` | `IrqMutex<MouseState>` | Evet (Mouse IRQ 12) | Mouse interrupt işleme | 3 | **ZORUNLU (IrqMutex)** |
+| `CURSOR` | `src/cursor.rs` | `IrqMutex<CursorState>` | Evet (Mouse IRQ 12) | Mouse imleç koordinat güncellemesi | 3 | **ZORUNLU (IrqMutex)** |
+| `ENDPOINTS` | `src/ipc.rs` | `IrqMutex<BTreeMap<..>>` | Evet (Syscall / IRQ notify) | IPC send, recv, endpoint create | 4 | **ZORUNLU (IrqMutex)** |
+| `ENDPOINT_OWNERS` | `src/ipc.rs` | `IrqMutex<BTreeMap<..>>` | Hayır | Endpoint transfer, mülkiyet sorgusu | 4 | **ZORUNLU (IrqMutex)** |
+| `IRQ_BINDINGS` | `src/ipc.rs` | `IrqMutex<BTreeMap<..>>` | Hayır (IRQ tetiklemesi `IRQ_EVENTS` atomik kuyruğunda) | `bind_irq`, `unbind_irq` | 4 | **ZORUNLU (IrqMutex)** |
+| `INPUT_QUEUES` | `src/input.rs` | `IrqMutex<BTreeMap<..>>` | Evet (Mouse/Keyboard yönlendirme) | Girdi olay dağıtımı | 4 | **ZORUNLU (IrqMutex)** |
+| `KERNEL_INPUT_OWNERS`| `src/input.rs` | `IrqMutex<BTreeSet<..>>` | Evet (Input dispatch) | Giriş odağı | 4 | **ZORUNLU (IrqMutex)** |
+| `FD_TABLE` | `src/fd.rs` | `IrqMutex<FdTable>` | Hayır | Syscall open/close/read/write | 4 | Standart |
+| `SOCKET_TABLE` | `src/net_socket.rs` | `IrqMutex<SocketTable>` | Hayır | Ağ soket syscall'ları | 4 | Standart |
+| `STATE` (Cap Core)| `src/cap.rs` | `IrqMutex<Option<CoreState>>`| Evet (Timer `expire_lent_capabilities` -> `revoke`) | Cap create, transfer, lend, grant, revoke, syscall | 5 | **ZORUNLU (IrqMutex)** |
+| `LEND_EXPIRIES` | `src/cap.rs` | `IrqMutex<BTreeMap<..>>` | Evet (Timer IRQ) | `lend`, `expire_lent_capabilities` | 5 | **ZORUNLU (IrqMutex)** |
+| `RUN_QUEUES` | `src/smp.rs` | `[IrqMutex<RunQueue>; 8]` | Evet (Reschedule IPI/Timer) | SMP work stealing, enqueue/dequeue | 6 | **ZORUNLU (IrqMutex)** |
+| `CPU_STATES` | `src/smp.rs` | `IrqMutex<[PerCpuState]>` | Evet (Timer/Watchdog) | Heartbeat, APIC keşfi | 6 | **ZORUNLU (IrqMutex)** |
+| `PER_CPU_SCHEDULER`| `src/task/process.rs`| `IrqMutex<[..]>` | Evet (Timer IRQ) | SMP çizelgeleme, tick | 6 | **ZORUNLU (IrqMutex)** |
+| `SCHEDULER` | `src/task/process.rs` | `IrqMutex<Scheduler>` | Evet (Timer IRQ `timer_tick`) | Thread switch, process spawn/exit, sleep queue | 7 | **ZORUNLU (IrqMutex - YAPRAK)** |
 
-## 3. Bulgular ve Risk Değerlendirmesi
+## 3. Bulgular ve Güvenlik İlkeleri
 
-1. **Deadlock Riski Yüksek Olan Kilitler:**
-   - `SCHEDULER`, `STATE` (Cap Core), `LEND_EXPIRIES`: Timer IRQ doğrudan bu kilitleri alır. Preemption açıkken veya çekirdek iş parçacığı bu kilidi tutarken kesme gelmesi doğrudan deadlock üretir.
-   - `MOUSE` ve `CURSOR`: IRQ 12 her fare paketinde doğrudan `MOUSE.lock()` ve `CURSOR.lock()` çağırır.
-   - `WRITE_LOCK` ve `SERIAL`: Çekirdek panik veya fault anında IRQ içinden seri port veya VGA kilidine eriştiğinde, ana iş parçacığı log yazarken kesilirse deadlock olur.
-2. **Sonuç:**
-   - Tabloda "ZORUNLU" olarak işaretlenen tüm kilitler, Faz 0.4'te yazılacak `IrqMutex<T>` ile korunmalıdır.
+1. **SCHEDULER Yaprak Kilit İlkesi:**
+   `SCHEDULER` kilidi tutulduğu anda başka hiçbir alt sistem kilidi alınamaz. Bu nedenle `exit_current()` içindeki kaynak temizleme işlemleri (`destroy_process_cspace`, `hangup_channel_for_pid`, adres alanı imhası) `SCHEDULER` kilidi bırakıldıktan sonra çağrılmalıdır.
+2. **Kayıp Uyanma ve Kilit Sıralaması:**
+   Koşul kilitleri (`IrqMutex`) tutulurken `SCHEDULER.lock()` alınarak süreç `WaitQueue`'ya kaydedilir (`prepare_wait`), ardından önce `SCHEDULER`, sonra koşul kilidi bırakılır ve `schedule()` çağrılır. Bu sıra hiyerarşiye (Seviye 2/3/4 -> Seviye 7) tam uyumludur.
+3. **Assert Doğrulaması:**
+   `schedule()` fonksiyonuna giriş yapıldığında `irq_locks_held() == 0` olduğu assert edilerek yaprak kilit kuralının çiğnenmediği her context switch'te matematiksel olarak doğrulanır.
