@@ -652,7 +652,7 @@ impl Shell {
                 w.set_color(Color::White, Color::Black);
                 writeln!(w, "User Mode (Ring 3) ELF yukleniyor...").unwrap();
                 drop(w);
-                let hello_elf = include_bytes!("../../scratch/hello.elf");
+                let hello_elf = include_bytes!("../../fixtures/hello.elf");
                 if let Err(e) = crate::user::exec_elf(hello_elf) {
                     w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
                     w.set_color(Color::LightRed, Color::Black);
