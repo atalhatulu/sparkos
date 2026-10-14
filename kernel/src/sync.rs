@@ -149,6 +149,103 @@ impl<T> Mutex<T> {
     }
 }
 
+/// 2.1. SleepMutex — Gerçek uyku tabanlı (WaitQueue destekli) kilit.
+/// Kilit meşgulse çağıran iş parçacığı bloklanır ve zamanlayıcı CPU'yu başka bir sürece verir.
+/// Kesmeler açıkken ve hiçbir IrqMutex tutulmuyorken kullanılmalıdır.
+pub struct SleepMutex<T> {
+    locked: core::sync::atomic::AtomicBool,
+    queue: crate::task::process::WaitQueue,
+    data: core::cell::UnsafeCell<T>,
+}
+
+unsafe impl<T: Send> Sync for SleepMutex<T> {}
+unsafe impl<T: Send> Send for SleepMutex<T> {}
+
+pub struct SleepMutexGuard<'a, T> {
+    mutex: &'a SleepMutex<T>,
+}
+
+unsafe impl<T: Send> Sync for SleepMutexGuard<'_, T> {}
+unsafe impl<T: Send> Send for SleepMutexGuard<'_, T> {}
+
+impl<T> core::ops::Deref for SleepMutexGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.mutex.data.get() }
+    }
+}
+
+impl<T> core::ops::DerefMut for SleepMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.mutex.data.get() }
+    }
+}
+
+impl<T> Drop for SleepMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        self.mutex.locked.store(false, Ordering::Release);
+        let mut s = crate::task::process::SCHEDULER.lock();
+        self.mutex.queue.wake_one(&mut s);
+    }
+}
+
+impl<T> SleepMutex<T> {
+    pub const fn new(data: T) -> Self {
+        Self {
+            locked: core::sync::atomic::AtomicBool::new(false),
+            queue: crate::task::process::WaitQueue::new(),
+            data: core::cell::UnsafeCell::new(data),
+        }
+    }
+
+    pub fn try_lock(&self) -> Option<SleepMutexGuard<'_, T>> {
+        if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            Some(SleepMutexGuard { mutex: self })
+        } else {
+            None
+        }
+    }
+
+    pub fn lock(&self) -> SleepMutexGuard<'_, T> {
+        // 1. Kısa süreli spin
+        let mut spins = 0;
+        while spins < 32 {
+            if self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                return SleepMutexGuard { mutex: self };
+            }
+            core::hint::spin_loop();
+            spins += 1;
+        }
+
+        // 2. Kilit alınamadı; eğer kesmeler açıksa WaitQueue üzerinde uyu
+        loop {
+            if self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                return SleepMutexGuard { mutex: self };
+            }
+
+            if crate::sync::irq_locks_held() == 0 && x86_64::instructions::interrupts::are_enabled() {
+                {
+                    let mut s = crate::task::process::SCHEDULER.lock();
+                    self.queue.prepare_wait(&mut s, crate::task::process::BlockReason::Generic);
+                }
+                // Yarış durumu kontrolü: prepare_wait ile kilit boşalmış olabilir
+                if self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                    let mut s = crate::task::process::SCHEDULER.lock();
+                    self.queue.finish_wait(&mut s);
+                    return SleepMutexGuard { mutex: self };
+                }
+                crate::task::process::schedule();
+                {
+                    let mut s = crate::task::process::SCHEDULER.lock();
+                    self.queue.finish_wait(&mut s);
+                }
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
 /// 3. Semaphore — Atomic counter with a WaitQueue
 pub struct Semaphore {
     count: AtomicUsize,

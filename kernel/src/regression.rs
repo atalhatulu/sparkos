@@ -201,6 +201,7 @@ pub fn run() {
     mem_object_lifecycle_and_refcount_regression();
     semaphore_race_regression();
     ipc_destroy_waiter_regression();
+    sleep_mutex_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -902,6 +903,26 @@ fn ipc_destroy_waiter_regression() {
     assert!(res.is_err());
     let _ = crate::cap::close(root_cap);
     crate::serial_println!("[REGRESSION] PASS IPC hangup wakes waiters and cleans endpoints");
+}
+
+fn sleep_mutex_regression() {
+    let mutex = crate::sync::SleepMutex::new(42u32);
+    // 1. Temel kilit alma ve veri mutasyonu
+    {
+        let mut guard = mutex.lock();
+        assert_eq!(*guard, 42);
+        *guard = 100;
+    }
+    // 2. Kilit bırakıldıktan sonra tekrar alma ve try_lock
+    {
+        let guard = mutex.try_lock().expect("try_lock should succeed when unlocked");
+        assert_eq!(*guard, 100);
+        // İkinci deneme kilit meşgulken None dönmeli
+        assert!(mutex.try_lock().is_none());
+    }
+    // 3. Drop sonrası kilit tekrar açılmış olmalı
+    assert!(mutex.try_lock().is_some());
+    crate::serial_println!("[REGRESSION] PASS SleepMutex lock, try_lock and drop semantics");
 }
 
 
