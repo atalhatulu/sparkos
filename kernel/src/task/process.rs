@@ -139,6 +139,7 @@ pub enum ProcessState {
     Ready,
     Running,
     Blocked,
+    Exiting,
     Crashed,
     Terminated,
     Exited,
@@ -202,22 +203,25 @@ impl WaitQueue {
     }
 
     pub fn wake_one(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) -> Option<u64> {
-        let pid = self.dequeue_internal(s)?;
-        if s.current == Some(pid) {
-            if let Some(proc) = s.table.get_mut(&pid) {
-                proc.state = ProcessState::Running;
-                proc.block_reason = None;
-            }
-        } else {
-            if let Some(proc) = s.table.get_mut(&pid) {
+        while let Some(pid) = self.dequeue_internal(s) {
+            if s.current == Some(pid) {
+                if let Some(proc) = s.table.get_mut(&pid) {
+                    if proc.state == ProcessState::Blocked || proc.block_reason.is_some() {
+                        proc.state = ProcessState::Running;
+                        proc.block_reason = None;
+                        return Some(pid);
+                    }
+                }
+            } else if let Some(proc) = s.table.get_mut(&pid) {
                 if proc.state == ProcessState::Blocked {
                     proc.state = ProcessState::Ready;
                     proc.block_reason = None;
                     s.ready.push_back(pid);
+                    return Some(pid);
                 }
             }
         }
-        Some(pid)
+        None
     }
 
     pub fn wake_all(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) -> usize {
@@ -1051,12 +1055,19 @@ pub fn send_signal(target_pid: u64, sig: u32) -> Result<(), &'static str> {
             p.state = ProcessState::Terminated;
             p.exited = true;
             p.exit_code = 128 + sig as u64; // Standard Unix exit code convention
+            let parent_pid = p.parent_pid;
+            s.remove_sleep(target_pid);
             // Notify parent if waiting
-            if let Some(parent_pid) = p.parent_pid {
+            if let Some(parent_pid) = parent_pid {
                 let mut wake_parent = false;
                 if let Some(parent) = s.table.get_mut(&parent_pid) {
-                    if parent.state == ProcessState::Blocked {
+                    let should_wake = match parent.block_reason {
+                        Some(BlockReason::WaitPid(waited_child)) => waited_child == target_pid,
+                        _ => parent.state == ProcessState::Blocked,
+                    };
+                    if should_wake {
                         parent.state = ProcessState::Ready;
+                        parent.block_reason = None;
                         wake_parent = true;
                     }
                     // Deliver SIGCHLD to parent
@@ -1687,7 +1698,16 @@ pub fn exit_current() -> ! {
 
     // Resource teardown takes its own scheduler/registry locks. Keep the PCB
     // alive until it finishes, but never hold SCHEDULER across those calls.
-    let exiting_pid = SCHEDULER.lock().current;
+    let exiting_pid = {
+        let mut s = SCHEDULER.lock();
+        if let Some(pid) = s.current {
+            if let Some(p) = s.table.get_mut(&pid) {
+                p.state = ProcessState::Exiting;
+            }
+            s.remove_sleep(pid);
+        }
+        s.current
+    };
     if let Some(pid) = exiting_pid {
         #[cfg(feature = "legacy-desktop")]
         {
@@ -1723,8 +1743,13 @@ pub fn exit_current() -> ! {
 
                 if let Some(parent_pid) = parent_pid {
                     if let Some(parent) = s.table.get_mut(&parent_pid) {
-                        if parent.state == ProcessState::Blocked {
+                        let should_wake = match parent.block_reason {
+                            Some(BlockReason::WaitPid(waited_child)) => waited_child == pid,
+                            _ => parent.state == ProcessState::Blocked,
+                        };
+                        if should_wake {
                             parent.state = ProcessState::Ready;
+                            parent.block_reason = None;
                             s.ready.push_back(parent_pid);
                         }
                     }
@@ -1771,8 +1796,13 @@ pub fn exit_current() -> ! {
 
             if let Some(parent_pid) = parent_pid {
                 if let Some(parent) = s.table.get_mut(&parent_pid) {
-                    if parent.state == ProcessState::Blocked {
+                    let should_wake = match parent.block_reason {
+                        Some(BlockReason::WaitPid(waited_child)) => waited_child == pid,
+                        _ => parent.state == ProcessState::Blocked,
+                    };
+                    if should_wake {
                         parent.state = ProcessState::Ready;
+                        parent.block_reason = None;
                         s.ready.push_back(parent_pid);
                     }
                 }
