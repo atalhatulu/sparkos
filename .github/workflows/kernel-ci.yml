@@ -19,7 +19,7 @@ jobs:
       - name: Install QEMU and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 python3
+          sudo apt-get install -y qemu-system-x86 qemu-utils libslirp0 python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -68,15 +68,12 @@ jobs:
             --output scratch/ci_test \
             --regression \
             --timeout 180 || {
-              echo "### QEMU Smoke Test Failed" >> $GITHUB_STEP_SUMMARY
-              echo '#### Serial Log (last 100 lines)' >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              tail -n 100 scratch/ci_test/serial.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo '#### QEMU Log' >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              cat scratch/ci_test/qemu.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
-              echo '```' >> $GITHUB_STEP_SUMMARY
+              ERR=$(head -n 5 scratch/ci_test/qemu.log 2>/dev/null | tr '\n' ' ')
+              echo "::error::QEMU failed: $ERR"
+              echo "### QEMU Log:"
+              cat scratch/ci_test/qemu.log 2>/dev/null || true
+              echo "### Serial Log (tail):"
+              tail -n 100 scratch/ci_test/serial.log 2>/dev/null || true
               exit 1
             }
 

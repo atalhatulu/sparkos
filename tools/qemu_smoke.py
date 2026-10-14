@@ -58,7 +58,8 @@ def main():
                     print(f'Screenshot: {screenshot}')
                     return
                 if proc.poll() is not None:
-                    raise RuntimeError(f'QEMU exited ({proc.returncode}); see {args.output / "qemu.log"}')
+                    qemu_err = (args.output / 'qemu.log').read_text(errors='replace') if (args.output / 'qemu.log').exists() else ''
+                    raise RuntimeError(f'QEMU exited ({proc.returncode}); log:\n{qemu_err}')
                 time.sleep(.1)
             raise RuntimeError(f'Boot/regression timeout; see {log}\n{serial[-5000:]}')
         finally:
