@@ -30,6 +30,63 @@ impl PerCpuState {
 
 pub static CPU_STATES: crate::sync::IrqMutex<[PerCpuState; MAX_CPUS]> = crate::sync::IrqMutex::new([PerCpuState::empty(); MAX_CPUS]);
 
+#[repr(C, align(64))]
+pub struct PerCpuBlock {
+    pub cpu_id: usize,
+    pub apic_id: u8,
+    pub current_pid: core::sync::atomic::AtomicU64,
+    pub ticks: core::sync::atomic::AtomicU64,
+    pub heartbeat: core::sync::atomic::AtomicU64,
+    pub online: core::sync::atomic::AtomicBool,
+}
+
+impl PerCpuBlock {
+    pub const fn new(cpu_id: usize) -> Self {
+        Self {
+            cpu_id,
+            apic_id: 0,
+            current_pid: core::sync::atomic::AtomicU64::new(0),
+            ticks: core::sync::atomic::AtomicU64::new(0),
+            heartbeat: core::sync::atomic::AtomicU64::new(0),
+            online: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+pub static PER_CPU_BLOCKS: [PerCpuBlock; MAX_CPUS] = [
+    PerCpuBlock::new(0),
+    PerCpuBlock::new(1),
+    PerCpuBlock::new(2),
+    PerCpuBlock::new(3),
+    PerCpuBlock::new(4),
+    PerCpuBlock::new(5),
+    PerCpuBlock::new(6),
+    PerCpuBlock::new(7),
+];
+
+#[inline(always)]
+pub fn this_cpu() -> &'static PerCpuBlock {
+    let addr = x86_64::registers::model_specific::GsBase::read().as_u64();
+    if addr != 0 {
+        unsafe { &*(addr as *const PerCpuBlock) }
+    } else {
+        &PER_CPU_BLOCKS[0]
+    }
+}
+
+pub fn setup_per_cpu_for(cpu_id: usize, apic_id: u8) {
+    if cpu_id < MAX_CPUS {
+        unsafe {
+            let block_ptr = &PER_CPU_BLOCKS[cpu_id] as *const _ as *mut PerCpuBlock;
+            (*block_ptr).apic_id = apic_id;
+            (*block_ptr).online.store(true, core::sync::atomic::Ordering::SeqCst);
+        }
+        x86_64::registers::model_specific::GsBase::write(
+            x86_64::VirtAddr::new(&PER_CPU_BLOCKS[cpu_id] as *const _ as u64)
+        );
+    }
+}
+
 pub struct LocalApic {
     base_addr: u64,
 }
@@ -235,19 +292,9 @@ pub fn run_live_tlb_shootdown_adversarial_demo() {
 
 pub static BSP_LAPIC: Mutex<Option<LocalApic>> = Mutex::new(None);
 
+#[inline(always)]
 pub fn current_cpu_id() -> usize {
-    let mut guard = BSP_LAPIC.lock();
-    if let Some(ref mut lapic) = *guard {
-        let apic_id = lapic.read_apic_id();
-        drop(guard);
-        let states = CPU_STATES.lock();
-        for state in states.iter() {
-            if state.apic_id == apic_id && state.online {
-                return state.cpu_id;
-            }
-        }
-    }
-    0
+    this_cpu().cpu_id
 }
 
 /// Sets up the complete 16-bit real mode -> 32-bit protected mode -> 64-bit long mode AP trampoline at 0x8000.
@@ -466,6 +513,7 @@ pub fn start_ap(cpu_id: usize, apic_id: u8, trampoline_addr: u32) {
 
     crate::serial_println!("[SMP] CPU {}: AP online (apic_id={})", cpu_id, apic_id);
     crate::serial_println!("[SMP] CPU {}: long mode initialized", cpu_id);
+    setup_per_cpu_for(cpu_id, apic_id);
     crate::serial_println!("[SMP] CPU {}: per-cpu state initialized", cpu_id);
     unsafe {
         let tss_addr = &raw const crate::gdt::PER_CPU_TSS[cpu_id] as u64;
@@ -480,6 +528,7 @@ pub fn ap_startup_long_mode(cpu_id: usize) {
     if cpu_id < MAX_CPUS {
         states[cpu_id].long_mode_initialized = true;
         states[cpu_id].online = true;
+        setup_per_cpu_for(cpu_id, states[cpu_id].apic_id);
     }
     drop(states);
 
@@ -504,6 +553,7 @@ pub fn init_smp() {
     *BSP_LAPIC.lock() = Some(LocalApic::new(lapic_base_virt));
     
     crate::serial_println!("SMP: Local APIC initialized at {:#x}, BSP APIC ID: {}", lapic_base_virt, bsp_apic_id);
+    setup_per_cpu_for(0, bsp_apic_id);
 
     let mut cpu_count = 0;
     let mut ap_list = alloc::vec::Vec::new();

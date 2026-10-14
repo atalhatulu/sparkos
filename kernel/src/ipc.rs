@@ -40,7 +40,7 @@ impl<M> CapChannel<M> {
         msg: M,
         attached_cap: Option<CapHandle>,
         mode: TransferMode,
-    ) -> cap::Result<()> {
+    ) -> cap::Result<Option<u64>> {
         // Kanal Endpoint WRITE ve nesne kimliği kontrolü (Confused Deputy koruması)
         cap::check_rights_for_object(sender_cap, self.endpoint_cap, Rights::WRITE)?;
 
@@ -64,8 +64,8 @@ impl<M> CapChannel<M> {
             transfer_mode: mode,
         };
 
-        self.inner.send(envelope);
-        Ok(())
+        let woken = self.inner.send(envelope);
+        Ok(woken)
     }
 
     /// Mesaj alımı: Alıcının kanal üzerinde READ (1) yetkisi doğrulanır.
@@ -205,7 +205,6 @@ pub fn hangup_channel_for_pid(pid: u32) {
     }
 }
 
-/// Syscall için ham bayt IPC gönderimi
 pub fn raw_ipc_send(
     ep_id: u32,
     sender_cap: CapHandle,
@@ -213,9 +212,16 @@ pub fn raw_ipc_send(
     attached_cap: Option<CapHandle>,
     mode: TransferMode,
 ) -> cap::Result<()> {
-    let guard = ENDPOINTS.lock();
-    let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
-    channel.send(sender_cap, data.to_vec(), attached_cap, mode)
+    let woken = {
+        let guard = ENDPOINTS.lock();
+        let channel = guard.get(&ep_id).ok_or(CapError::NotFound)?;
+        channel.send(sender_cap, data.to_vec(), attached_cap, mode)?
+    };
+    if let Some(target_pid) = woken {
+        // Hızlı IPC Yolu (Faz 4.6): Alıcı hazırsa doğrudan alıcıya bağlam devret
+        crate::task::process::yield_to(target_pid);
+    }
+    Ok(())
 }
 
 /// Syscall için ham bayt IPC alımı — BLOCKING.

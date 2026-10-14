@@ -258,7 +258,7 @@ impl<M> BlockingChannel<M> {
         &self.not_empty
     }
 
-    pub fn send(&self, msg: M) {
+    pub fn send(&self, msg: M) -> Option<u64> {
         let mut pending = Some(msg);
         loop {
             let mut guard = self.buffer.lock();
@@ -266,8 +266,8 @@ impl<M> BlockingChannel<M> {
                 guard.push_back(pending.take().unwrap());
                 drop(guard);
                 let mut s = crate::task::process::SCHEDULER.lock();
-                self.not_empty.wake_one(&mut s);
-                return;
+                let woken = self.not_empty.wake_one(&mut s);
+                return woken;
             }
             {
                 let mut s = crate::task::process::SCHEDULER.lock();

@@ -668,30 +668,10 @@ pub struct PerCpuScheduler {
     pub run_queue: VecDeque<u64>,
 }
 
-impl PerCpuScheduler {
-    pub const fn new(cpu_id: usize) -> Self {
-        Self {
-            cpu_id,
-            current_pid: None,
-            run_queue: VecDeque::new(),
-        }
-    }
-}
-
-pub static PER_CPU_SCHEDULER: IrqMutex<[PerCpuScheduler; crate::gdt::MAX_CPUS]> = IrqMutex::new([
-    PerCpuScheduler::new(0),
-    PerCpuScheduler::new(1),
-    PerCpuScheduler::new(2),
-    PerCpuScheduler::new(3),
-    PerCpuScheduler::new(4),
-    PerCpuScheduler::new(5),
-    PerCpuScheduler::new(6),
-    PerCpuScheduler::new(7),
-]);
-
 pub fn get_cpu_current_pid(cpu_id: usize) -> Option<u64> {
     if cpu_id < crate::gdt::MAX_CPUS {
-        PER_CPU_SCHEDULER.lock()[cpu_id].current_pid
+        let pid = crate::smp::PER_CPU_BLOCKS[cpu_id].current_pid.load(core::sync::atomic::Ordering::Relaxed);
+        if pid == 0 { None } else { Some(pid) }
     } else {
         None
     }
@@ -699,7 +679,7 @@ pub fn get_cpu_current_pid(cpu_id: usize) -> Option<u64> {
 
 pub fn set_cpu_current_pid(cpu_id: usize, pid: Option<u64>) {
     if cpu_id < crate::gdt::MAX_CPUS {
-        PER_CPU_SCHEDULER.lock()[cpu_id].current_pid = pid;
+        crate::smp::PER_CPU_BLOCKS[cpu_id].current_pid.store(pid.unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1513,23 +1493,52 @@ pub fn schedule() {
     schedule_internal(s);
 }
 
-static CURRENT_IOPB_PORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+/// Hızlı IPC Yolu: Kalan zaman dilimini doğrudan hedef alıcı thread'e devreder (Faz 4.6).
+pub fn yield_to(target_pid: u64) {
+    debug_assert_eq!(crate::sync::irq_locks_held(), 0, "schedule hiyerarşi ihlali: yield_to()");
+    let mut s = SCHEDULER.lock();
+    if let Some(target_proc) = s.table.get_mut(&target_pid) {
+        if target_proc.state == ProcessState::Ready && !target_proc.exited && !target_proc.reaped {
+            s.ready.retain(|&p| p != target_pid);
+            s.ready.push_front(target_pid);
+        }
+    }
+    schedule_internal(s);
+}
 
-pub fn sync_iopb_for_process(ports: Option<(u16, u16)>) {
+static CURRENT_IOPB_PORTS: [core::sync::atomic::AtomicU32; crate::gdt::MAX_CPUS] = [
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+];
+
+pub fn sync_iopb_for_process_for_cpu(cpu_id: usize, ports: Option<(u16, u16)>) {
+    if cpu_id >= crate::gdt::MAX_CPUS { return; }
     let encoded = match ports {
         Some((start, end)) => (start as u32) | ((end as u32) << 16),
         None => u32::MAX,
     };
-    let prev = CURRENT_IOPB_PORTS.swap(encoded, core::sync::atomic::Ordering::Relaxed);
+    let prev = CURRENT_IOPB_PORTS[cpu_id].swap(encoded, core::sync::atomic::Ordering::Relaxed);
     if prev != encoded {
-        crate::gdt::reset_io_bitmap();
+        crate::gdt::reset_io_bitmap_for_cpu(cpu_id);
         if let Some((start, end)) = ports {
-            crate::gdt::allow_port_range(start, end);
+            crate::gdt::allow_port_range_for_cpu(cpu_id, start, end);
         }
     }
 }
 
+pub fn sync_iopb_for_process(ports: Option<(u16, u16)>) {
+    sync_iopb_for_process_for_cpu(crate::smp::current_cpu_id(), ports);
+}
+
 fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
+    let cpu_id = crate::smp::current_cpu_id();
+
     // Faz 2.2: Uyanma zamanı gelmiş thread'leri uyandır
     poll_sleeping_processes_locked(&mut s, crate::interrupts::get_tick());
 
@@ -1557,9 +1566,9 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                 Some(candidate) => {
                     if let Some(p) = s.table.get(&candidate) {
                         if !p.exited && !p.reaped && p.state != ProcessState::Terminated && p.state != ProcessState::Exited {
-                            // Faz 34: CPU Affinity kontrolü (0 numaralı BSP çekirdeği için kontrol)
+                            // Faz 34: CPU Affinity kontrolü
                             if let Some(aff_cpu) = p.cpu_affinity {
-                                if aff_cpu != 0 {
+                                if aff_cpu != cpu_id {
                                     // Başka bir CPU'ya sabitlenmiş; hazır kuyruğunun arkasına bırakıp sonrakine bak
                                     s.ready.push_back(candidate);
                                     continue;
@@ -1573,7 +1582,7 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
                     // Nothing runnable: CPU idles via the idle process (pid 0).
                     if let Some(idle_proc) = s.table.get(&0) {
                         idle_proc.check_stack_canary();
-                        crate::gdt::set_tss_rsp0(idle_proc.kernel_stack_top());
+                        crate::gdt::set_tss_rsp0_for_cpu(cpu_id, idle_proc.kernel_stack_top());
                         let idle_ctx: *const RegisterContext = &idle_proc.ctx;
                         drop(s);
                         jump_to_initial(idle_ctx);
@@ -1587,14 +1596,14 @@ fn schedule_internal(mut s: crate::sync::IrqGuard<'static, Scheduler>) {
             }
         };
         s.current = Some(next);
-        set_cpu_current_pid(0, Some(next));
+        set_cpu_current_pid(cpu_id, Some(next));
         if let Some(p) = s.table.get_mut(&next) {
             p.state = ProcessState::Running;
             p.check_stack_canary();
-            crate::gdt::set_tss_rsp0(p.kernel_stack_top());
+            crate::gdt::set_tss_rsp0_for_cpu(cpu_id, p.kernel_stack_top());
         }
         let ports = s.table.get(&next).and_then(|p| p.allowed_ports);
-        sync_iopb_for_process(ports);
+        sync_iopb_for_process_for_cpu(cpu_id, ports);
 
         arm_quantum();
         let next_raw = if let Some(p) = s.table.get(&next) {
@@ -3156,10 +3165,10 @@ pub fn preemption_enabled() -> bool {
     PREEMPTION_ENABLED.load(Ordering::Relaxed)
 }
 
-/// Current running pid (0 == none/idle), resolved per-CPU with global fallback.
+#[inline(always)]
 pub fn current_pid() -> u64 {
-    let cpu_id = crate::smp::current_cpu_id();
-    if let Some(pid) = get_cpu_current_pid(cpu_id) {
+    let pid = crate::smp::this_cpu().current_pid.load(Ordering::Relaxed);
+    if pid != 0 {
         pid
     } else {
         SCHEDULER.lock().current.unwrap_or(0)
