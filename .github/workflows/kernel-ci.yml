@@ -59,11 +59,19 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           }
+          echo "Created binaries:"
+          find target -name "*.bin" || true
 
       - name: Run QEMU headless regression smoke test
         run: |
+          BIN_PATH=$(find target kernel/target -name "bootimage-*.bin" 2>/dev/null | head -n 1)
+          if [ -z "$BIN_PATH" ]; then
+            echo "::error::No bootimage binary found in target directories"
+            exit 1
+          fi
+          echo "Using bootimage: $BIN_PATH"
           python3 tools/qemu_smoke.py \
-            --image target/x86_64-unknown-none/debug/bootimage-sparkos.bin \
+            --image "$BIN_PATH" \
             --disk disk.img \
             --output scratch/ci_test \
             --regression \
