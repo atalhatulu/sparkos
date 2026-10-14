@@ -196,78 +196,48 @@ impl Semaphore {
 }
 
 /// 4. Condvar — Condition variable compatible with spin::MutexGuard
+/// 4. Condvar — WaitQueue-backed Condition Variable
 pub struct Condvar {
-    wakers: SpinMutex<VecDeque<Waker>>,
-    generation: AtomicUsize,
+    queue: crate::task::process::WaitQueue,
 }
 
 impl Condvar {
     pub const fn new() -> Self {
         Condvar {
-            wakers: SpinMutex::new(VecDeque::new()),
-            generation: AtomicUsize::new(0),
+            queue: crate::task::process::WaitQueue::new(),
         }
     }
 
-    pub fn wait<'a, T>(&self, guard: spin::MutexGuard<'a, T>, mutex: &'a spin::Mutex<T>) -> spin::MutexGuard<'a, T> {
-        let gen = self.generation.load(Ordering::SeqCst);
-        
+    pub fn wait<'a, T>(&self, guard: IrqGuard<'a, T>, mutex: &'a IrqMutex<T>) -> IrqGuard<'a, T> {
+        {
+            let mut s = crate::task::process::SCHEDULER.lock();
+            self.queue.prepare_wait(&mut s, crate::task::process::BlockReason::Condvar);
+        }
         drop(guard);
-        
-        // Wait for condition to change (spurious wakeups possible and handled by users)
-        loop {
-            if self.generation.load(Ordering::SeqCst) != gen {
-                break;
-            }
-            x86_64::instructions::hlt();
+        crate::task::process::schedule();
+        {
+            let mut s = crate::task::process::SCHEDULER.lock();
+            self.queue.finish_wait(&mut s);
         }
-        
-        loop {
-            if let Some(g) = mutex.try_lock() {
-                return g;
-            }
-            x86_64::instructions::hlt();
-        }
-    }
-
-    pub fn wait_irq<'a, T>(&self, guard: IrqGuard<'a, T>, mutex: &'a IrqMutex<T>) -> IrqGuard<'a, T> {
-        let gen = self.generation.load(Ordering::SeqCst);
-        drop(guard);
-        loop {
-            if self.generation.load(Ordering::SeqCst) != gen {
-                break;
-            }
-            x86_64::instructions::hlt();
-        }
-        loop {
-            if let Some(g) = mutex.try_lock() {
-                return g;
-            }
-            x86_64::instructions::hlt();
-        }
+        mutex.lock()
     }
 
     pub fn notify_one(&self) {
-        if let Some(waker) = self.wakers.lock().pop_front() {
-            waker.wake();
-        }
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut s = crate::task::process::SCHEDULER.lock();
+        self.queue.wake_one(&mut s);
     }
 
     pub fn notify_all(&self) {
-        let mut wakers = self.wakers.lock();
-        while let Some(waker) = wakers.pop_front() {
-            waker.wake();
-        }
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut s = crate::task::process::SCHEDULER.lock();
+        self.queue.wake_all(&mut s);
     }
 }
 
 /// 5. BlockingChannel — Blocking channel for IPC (IrqMutex-protected, WaitQueue-backed)
 pub struct BlockingChannel<M> {
     buffer: IrqMutex<VecDeque<M>>,
-    not_empty: IrqMutex<crate::task::process::WaitQueue>,
-    not_full: IrqMutex<crate::task::process::WaitQueue>,
+    not_empty: crate::task::process::WaitQueue,
+    not_full: crate::task::process::WaitQueue,
     capacity: usize,
 }
 
@@ -275,8 +245,8 @@ impl<M> BlockingChannel<M> {
     pub const fn new(capacity: usize) -> Self {
         BlockingChannel {
             buffer: IrqMutex::new(VecDeque::new()),
-            not_empty: IrqMutex::new(crate::task::process::WaitQueue::new()),
-            not_full: IrqMutex::new(crate::task::process::WaitQueue::new()),
+            not_empty: crate::task::process::WaitQueue::new(),
+            not_full: crate::task::process::WaitQueue::new(),
             capacity,
         }
     }
@@ -284,18 +254,24 @@ impl<M> BlockingChannel<M> {
     pub fn send(&self, msg: M) {
         let mut pending = Some(msg);
         loop {
-            {
-                let mut guard = self.buffer.lock();
-                if guard.len() < self.capacity {
-                    guard.push_back(pending.take().unwrap());
-                    drop(guard);
-                    let mut wq = self.not_empty.lock();
-                    crate::task::process::wake_one(&mut wq);
-                    return;
-                }
+            let mut guard = self.buffer.lock();
+            if guard.len() < self.capacity {
+                guard.push_back(pending.take().unwrap());
+                drop(guard);
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.not_empty.wake_one(&mut s);
+                return;
             }
-            let mut wq = self.not_full.lock();
-            crate::task::process::block_current_on(&mut wq, crate::task::process::BlockReason::ChannelSend);
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.not_full.prepare_wait(&mut s, crate::task::process::BlockReason::ChannelSend);
+            }
+            drop(guard);
+            crate::task::process::schedule();
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.not_full.finish_wait(&mut s);
+            }
         }
     }
     
@@ -306,24 +282,30 @@ impl<M> BlockingChannel<M> {
         }
         guard.push_back(msg);
         drop(guard);
-        let mut wq = self.not_empty.lock();
-        crate::task::process::wake_one(&mut wq);
+        let mut s = crate::task::process::SCHEDULER.lock();
+        self.not_empty.wake_one(&mut s);
         Ok(())
     }
 
     pub fn recv(&self) -> M {
         loop {
-            {
-                let mut guard = self.buffer.lock();
-                if let Some(msg) = guard.pop_front() {
-                    drop(guard);
-                    let mut wq = self.not_full.lock();
-                    crate::task::process::wake_one(&mut wq);
-                    return msg;
-                }
+            let mut guard = self.buffer.lock();
+            if let Some(msg) = guard.pop_front() {
+                drop(guard);
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.not_full.wake_one(&mut s);
+                return msg;
             }
-            let mut wq = self.not_empty.lock();
-            crate::task::process::block_current_on(&mut wq, crate::task::process::BlockReason::ChannelRecv);
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.not_empty.prepare_wait(&mut s, crate::task::process::BlockReason::ChannelRecv);
+            }
+            drop(guard);
+            crate::task::process::schedule();
+            {
+                let mut s = crate::task::process::SCHEDULER.lock();
+                self.not_empty.finish_wait(&mut s);
+            }
         }
     }
     
@@ -331,8 +313,8 @@ impl<M> BlockingChannel<M> {
         let mut guard = self.buffer.lock();
         if let Some(msg) = guard.pop_front() {
             drop(guard);
-            let mut wq = self.not_full.lock();
-            crate::task::process::wake_one(&mut wq);
+            let mut s = crate::task::process::SCHEDULER.lock();
+            self.not_full.wake_one(&mut s);
             Some(msg)
         } else {
             None

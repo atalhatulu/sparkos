@@ -192,6 +192,7 @@ pub fn run() {
     }
 
     two_user_processes_preemptive_regression();
+    blocking_channel_stress_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -228,6 +229,62 @@ fn two_user_processes_preemptive_regression() {
     dispose(pid_b);
     assert_eq!(memory::get_memory_stats().0, baseline);
     crate::serial_println!("[REGRESSION] PASS two concurrent Ring-3 processes preemptive scheduling and TSS.rsp0 isolation");
+}
+
+static CONSUMER_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static PRODUCER_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static TOTAL_RECEIVED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TEST_CHAN: crate::sync::BlockingChannel<u32> = crate::sync::BlockingChannel::new(4);
+
+extern "C" fn blocking_consumer_entry() {
+    crate::serial_println!("[TEST-CHAN] Consumer started, waiting on empty channel...");
+    for expected in 0..1000 {
+        let val = TEST_CHAN.recv();
+        assert_eq!(val, expected);
+        TOTAL_RECEIVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    CONSUMER_DONE.store(true, core::sync::atomic::Ordering::SeqCst);
+    crate::serial_println!("[TEST-CHAN] Consumer finished 1000 items successfully");
+}
+
+extern "C" fn blocking_producer_entry() {
+    crate::serial_println!("[TEST-CHAN] Producer started sending...");
+    for i in 0..1000 {
+        // Lost-wakeup ve preemption penceresini zorlamak için yapay döngü varyantı
+        if i % 10 == 0 {
+            for _ in 0..200 {
+                core::hint::spin_loop();
+            }
+        }
+        TEST_CHAN.send(i);
+    }
+    PRODUCER_DONE.store(true, core::sync::atomic::Ordering::SeqCst);
+    crate::serial_println!("[TEST-CHAN] Producer finished 1000 sends");
+}
+
+fn blocking_channel_stress_regression() {
+    let baseline = memory::get_memory_stats().0;
+    CONSUMER_DONE.store(false, core::sync::atomic::Ordering::SeqCst);
+    PRODUCER_DONE.store(false, core::sync::atomic::Ordering::SeqCst);
+    TOTAL_RECEIVED.store(0, core::sync::atomic::Ordering::SeqCst);
+
+    // Tüketici thread'i önce oluştur ve hazır kuyruğuna al (kanal henüz boşken bloklanacak)
+    let c_pid = process::create_kernel_process("block-consumer", blocking_consumer_entry);
+    let p_pid = process::create_kernel_process("block-producer", blocking_producer_entry);
+
+    let status_c = process::waitpid(c_pid).unwrap();
+    let status_p = process::waitpid(p_pid).unwrap();
+    assert_eq!(status_c, 0);
+    assert_eq!(status_p, 0);
+
+    assert_eq!(TOTAL_RECEIVED.load(core::sync::atomic::Ordering::Relaxed), 1000);
+    assert!(CONSUMER_DONE.load(core::sync::atomic::Ordering::SeqCst));
+    assert!(PRODUCER_DONE.load(core::sync::atomic::Ordering::SeqCst));
+
+    dispose(c_pid);
+    dispose(p_pid);
+    assert_eq!(memory::get_memory_stats().0, baseline);
+    crate::serial_println!("[REGRESSION] PASS blocking channel 1000 rounds consumer-first under -smp 1");
 }
 
 #[cfg(feature = "legacy-desktop")]

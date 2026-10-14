@@ -150,88 +150,157 @@ pub enum BlockReason {
     Generic,
     ChannelRecv,
     ChannelSend,
+    Condvar,
     Sleep(u64),
     WaitPid(u64),
 }
 
 /// SIFIR HEAP TAHSISI (Zero Heap Allocation) Intrusive WaitQueue.
 /// Düğümler doğrudan `Process` (PCB) içerisindeki `wait_next` ve `wait_prev` alanlarıdır.
+///
+/// INVARYANT: WaitQueue üzerindeki düğüm zinciri (head/tail/wait_next/wait_prev),
+/// yalnızca SCHEDULER kilidi (&mut IrqGuard<'static, Scheduler>) elde tutulduğu
+/// sürece erişilebilir ve mutasyona uğratılabilir.
 #[derive(Debug)]
 pub struct WaitQueue {
-    pub head: Option<u64>,
-    pub tail: Option<u64>,
+    pub head: core::cell::UnsafeCell<Option<u64>>,
+    pub tail: core::cell::UnsafeCell<Option<u64>>,
 }
+
+unsafe impl Sync for WaitQueue {}
+unsafe impl Send for WaitQueue {}
 
 impl WaitQueue {
     pub const fn new() -> Self {
-        Self { head: None, tail: None }
+        Self {
+            head: core::cell::UnsafeCell::new(None),
+            tail: core::cell::UnsafeCell::new(None),
+        }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.head.is_none()
+    pub fn head(&self, _s: &crate::sync::IrqGuard<'static, Scheduler>) -> Option<u64> {
+        unsafe { *self.head.get() }
     }
 
-    pub fn enqueue(&mut self, pid: u64, table: &mut BTreeMap<u64, Process>) {
-        if let Some(proc) = table.get_mut(&pid) {
-            proc.wait_next = None;
-            proc.wait_prev = self.tail;
-        }
-        if let Some(old_tail) = self.tail {
-            if let Some(tail_proc) = table.get_mut(&old_tail) {
-                tail_proc.wait_next = Some(pid);
-            }
-        } else {
-            self.head = Some(pid);
-        }
-        self.tail = Some(pid);
+    pub fn is_empty(&self, _s: &crate::sync::IrqGuard<'static, Scheduler>) -> bool {
+        unsafe { (*self.head.get()).is_none() }
     }
 
-    pub fn dequeue(&mut self, table: &mut BTreeMap<u64, Process>) -> Option<u64> {
-        let head_pid = self.head?;
-        let next_pid = if let Some(proc) = table.get_mut(&head_pid) {
-            let next = proc.wait_next;
-            proc.wait_next = None;
-            proc.wait_prev = None;
-            next
-        } else {
-            None
-        };
-        self.head = next_pid;
-        if let Some(next) = next_pid {
-            if let Some(next_proc) = table.get_mut(&next) {
-                next_proc.wait_prev = None;
-            }
-        } else {
-            self.tail = None;
+    pub fn prepare_wait(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>, reason: BlockReason) {
+        let cur = s.current.expect("prepare_wait requires current running process");
+        self.enqueue_internal(cur, s);
+        if let Some(proc) = s.table.get_mut(&cur) {
+            proc.state = ProcessState::Blocked;
+            proc.block_reason = Some(reason);
         }
-        Some(head_pid)
     }
 
-    pub fn remove(&mut self, pid: u64, table: &mut BTreeMap<u64, Process>) {
-        let (prev, next) = if let Some(proc) = table.get_mut(&pid) {
-            let p = proc.wait_prev;
-            let n = proc.wait_next;
-            proc.wait_prev = None;
-            proc.wait_next = None;
-            (p, n)
-        } else {
-            return;
-        };
-
-        if let Some(p) = prev {
-            if let Some(prev_proc) = table.get_mut(&p) {
-                prev_proc.wait_next = next;
-            }
-        } else if self.head == Some(pid) {
-            self.head = next;
+    pub fn finish_wait(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) {
+        if let Some(cur) = s.current {
+            self.remove_internal(cur, s);
         }
+    }
 
-        if let Some(n) = next {
-            if let Some(next_proc) = table.get_mut(&n) {
-                next_proc.wait_prev = prev;
+    pub fn wake_one(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) -> Option<u64> {
+        let pid = self.dequeue_internal(s)?;
+        if s.current == Some(pid) {
+            if let Some(proc) = s.table.get_mut(&pid) {
+                proc.state = ProcessState::Running;
+                proc.block_reason = None;
             }
-        } else if self.tail == Some(pid) {
-            self.tail = prev;
+        } else {
+            if let Some(proc) = s.table.get_mut(&pid) {
+                if proc.state == ProcessState::Blocked {
+                    proc.state = ProcessState::Ready;
+                    proc.block_reason = None;
+                    s.ready.push_back(pid);
+                }
+            }
+        }
+        Some(pid)
+    }
+
+    pub fn wake_all(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) -> usize {
+        let mut count = 0;
+        while self.wake_one(s).is_some() {
+            count += 1;
+        }
+        count
+    }
+
+    fn enqueue_internal(&self, pid: u64, s: &mut crate::sync::IrqGuard<'static, Scheduler>) {
+        unsafe {
+            let tail_ptr = self.tail.get();
+            let head_ptr = self.head.get();
+            if let Some(proc) = s.table.get_mut(&pid) {
+                proc.wait_next = None;
+                proc.wait_prev = *tail_ptr;
+            }
+            if let Some(old_tail) = *tail_ptr {
+                if let Some(tail_proc) = s.table.get_mut(&old_tail) {
+                    tail_proc.wait_next = Some(pid);
+                }
+            } else {
+                *head_ptr = Some(pid);
+            }
+            *tail_ptr = Some(pid);
+        }
+    }
+
+    fn dequeue_internal(&self, s: &mut crate::sync::IrqGuard<'static, Scheduler>) -> Option<u64> {
+        unsafe {
+            let head_ptr = self.head.get();
+            let tail_ptr = self.tail.get();
+            let head_pid = (*head_ptr)?;
+            let next_pid = if let Some(proc) = s.table.get_mut(&head_pid) {
+                let next = proc.wait_next;
+                proc.wait_next = None;
+                proc.wait_prev = None;
+                next
+            } else {
+                None
+            };
+            *head_ptr = next_pid;
+            if let Some(next) = next_pid {
+                if let Some(next_proc) = s.table.get_mut(&next) {
+                    next_proc.wait_prev = None;
+                }
+            } else {
+                *tail_ptr = None;
+            }
+            Some(head_pid)
+        }
+    }
+
+    pub fn remove_internal(&self, pid: u64, s: &mut crate::sync::IrqGuard<'static, Scheduler>) {
+        unsafe {
+            let head_ptr = self.head.get();
+            let tail_ptr = self.tail.get();
+            let (prev, next) = if let Some(proc) = s.table.get_mut(&pid) {
+                let p = proc.wait_prev;
+                let n = proc.wait_next;
+                proc.wait_prev = None;
+                proc.wait_next = None;
+                (p, n)
+            } else {
+                return;
+            };
+
+            if let Some(p) = prev {
+                if let Some(prev_proc) = s.table.get_mut(&p) {
+                    prev_proc.wait_next = next;
+                }
+            } else if *head_ptr == Some(pid) {
+                *head_ptr = next;
+            }
+
+            if let Some(n) = next {
+                if let Some(next_proc) = s.table.get_mut(&n) {
+                    next_proc.wait_prev = prev;
+                }
+            } else if *tail_ptr == Some(pid) {
+                *tail_ptr = prev;
+            }
         }
     }
 }
@@ -875,8 +944,9 @@ pub fn waitpid(child_pid: u64) -> Result<u64, &'static str> {
                     child.parent_pid = Some(parent_pid);
                 }
             }
-            schedule_internal(s);
-            crate::serial_println!("[WAITPID] parent={} resumed after schedule_internal", parent_pid);
+            drop(s);
+            schedule();
+            crate::serial_println!("[WAITPID] parent={} resumed after schedule", parent_pid);
         } else {
             crate::serial_println!("[WAITPID] child={} curr is None, calling schedule", child_pid);
             drop(s);
@@ -989,7 +1059,9 @@ pub fn create_kernel_process(name: &str, entry: extern "C" fn()) -> u64 {
     let pid = insert_process(name);
     {
         let mut s = SCHEDULER.lock();
+        let cur = s.current;
         let p = s.table.get_mut(&pid).unwrap();
+        p.parent_pid = cur;
         p.entry = Some(entry);
         p.state = ProcessState::Ready;
         let kstack_top = (p.kernel_stack.as_ptr() as u64 + p.kernel_stack.len() as u64) & !0xFu64;
@@ -1288,77 +1360,43 @@ pub fn timer_tick() {
 // Scheduling core
 // ---------------------------------------------------------------------------
 
-pub static SLEEP_QUEUE: IrqMutex<WaitQueue> = IrqMutex::new(WaitQueue::new());
+pub static SLEEP_QUEUE: WaitQueue = WaitQueue::new();
 
 /// Mevcut thread'i bir WaitQueue uzerinde bloklayip baska bir thread'e baglam degistirir.
-pub fn block_current_on(wait_queue: &mut WaitQueue, reason: BlockReason) {
-    let mut s = SCHEDULER.lock();
-    let cur_pid = match s.current {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(proc) = s.table.get_mut(&cur_pid) {
-        proc.state = ProcessState::Blocked;
-        proc.block_reason = Some(reason);
+pub fn block_current_on(wait_queue: &WaitQueue, reason: BlockReason) {
+    {
+        let mut s = SCHEDULER.lock();
+        wait_queue.prepare_wait(&mut s, reason);
     }
-    wait_queue.enqueue(cur_pid, &mut s.table);
-    schedule_internal(s);
+    schedule();
+    let mut s = SCHEDULER.lock();
+    wait_queue.finish_wait(&mut s);
 }
 
-/// WaitQueue'dan bir thread'i cikarip Ready durumuna getirir.
-/// Eger thread o anda zaten calisiyorsa (current), ready kuyruguna ASLA eklenmez.
-pub fn wake_one_locked(s: &mut Scheduler, wait_queue: &mut WaitQueue) -> Option<u64> {
-    let pid = wait_queue.dequeue(&mut s.table)?;
-    if s.current == Some(pid) {
-        if let Some(proc) = s.table.get_mut(&pid) {
-            proc.state = ProcessState::Running;
-            proc.block_reason = None;
-        }
-    } else {
-        if let Some(proc) = s.table.get_mut(&pid) {
-            if proc.state == ProcessState::Blocked {
-                proc.state = ProcessState::Ready;
-                proc.block_reason = None;
-                s.ready.push_back(pid);
-            }
-        }
-    }
-    Some(pid)
+pub fn wake_one(wait_queue: &WaitQueue) -> Option<u64> {
+    let mut s = SCHEDULER.lock();
+    wait_queue.wake_one(&mut s)
 }
 
-pub fn wake_one(wait_queue: &mut WaitQueue) -> Option<u64> {
+pub fn wake_all(wait_queue: &WaitQueue) -> usize {
     let mut s = SCHEDULER.lock();
-    wake_one_locked(&mut s, wait_queue)
-}
-
-pub fn wake_all(wait_queue: &mut WaitQueue) -> usize {
-    let mut s = SCHEDULER.lock();
-    let mut count = 0;
-    while wake_one_locked(&mut s, wait_queue).is_some() {
-        count += 1;
-    }
-    count
+    wait_queue.wake_all(&mut s)
 }
 
 /// Preemptive thread uyutma: belirtilen milisaniye kadar thread'i bloke eder.
 pub fn sleep_ms(ms: u64) {
     let target_tick = crate::interrupts::get_tick().saturating_add(ms);
-    let mut s = SCHEDULER.lock();
-    let cur_pid = match s.current {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(proc) = s.table.get_mut(&cur_pid) {
-        proc.state = ProcessState::Blocked;
-        proc.block_reason = Some(BlockReason::Sleep(target_tick));
+    {
+        let mut s = SCHEDULER.lock();
+        SLEEP_QUEUE.prepare_wait(&mut s, BlockReason::Sleep(target_tick));
     }
-    SLEEP_QUEUE.lock().enqueue(cur_pid, &mut s.table);
-    schedule_internal(s);
+    schedule();
+    let mut s = SCHEDULER.lock();
+    SLEEP_QUEUE.finish_wait(&mut s);
 }
 
-fn poll_sleeping_processes_locked(s: &mut Scheduler, current_tick: u64) {
-    let mut sq = SLEEP_QUEUE.lock();
-    let mut curr = sq.head;
+fn poll_sleeping_processes_locked(s: &mut crate::sync::IrqGuard<'static, Scheduler>, current_tick: u64) {
+    let mut curr = SLEEP_QUEUE.head(s);
     while let Some(pid) = curr {
         let (next, should_wake) = if let Some(p) = s.table.get(&pid) {
             let wake = match p.block_reason {
@@ -1370,7 +1408,7 @@ fn poll_sleeping_processes_locked(s: &mut Scheduler, current_tick: u64) {
             (None, false)
         };
         if should_wake {
-            sq.remove(pid, &mut s.table);
+            SLEEP_QUEUE.remove_internal(pid, s);
             if let Some(proc) = s.table.get_mut(&pid) {
                 proc.state = ProcessState::Ready;
                 proc.block_reason = None;
@@ -1388,6 +1426,13 @@ pub fn schedule() {
     // Faz 0.6: Timer IRQ'sunda ertelenen ödünç capability iadelerini SCHEDULER kilidi öncesinde işle
     crate::cap::poll_pending_lend_expiries();
     let s = SCHEDULER.lock();
+    if let Some(cur) = s.current {
+        if let Some(p) = s.table.get(&cur) {
+            if p.state == ProcessState::Running && p.block_reason.is_none() {
+                return;
+            }
+        }
+    }
     schedule_internal(s);
 }
 
