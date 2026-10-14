@@ -26,7 +26,7 @@ impl Shell {
         }
     }
 
-    pub async fn run(&mut self) {
+    pub fn run(&mut self) {
         // Flush any stale residual bytes from PS/2 keyboard
         crate::keyboard::KEYBOARD.lock().clear();
         self.len = 0;
@@ -38,8 +38,8 @@ impl Shell {
         
         loop {
             self.prompt();
-            self.read_line().await;
-            self.exec().await;
+            self.read_line();
+            self.exec();
         }
     }
 
@@ -53,7 +53,7 @@ impl Shell {
         core::fmt::Write::write_str(&mut *w, " > ").unwrap();
     }
 
-    async fn read_line(&mut self) {
+    fn read_line(&mut self) {
         use crate::keyboard::Key;
         self.len = 0;
         loop {
@@ -203,7 +203,7 @@ impl Shell {
             }
 
             if !got_input {
-                crate::task::yield_now().await;
+                crate::task::process::sleep_ms(10);
             }
         }
     }
@@ -291,7 +291,7 @@ impl Shell {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
 
-    async fn exec(&mut self) {
+    fn exec(&mut self) {
         let cmd = self.cmd().trim();
         if cmd.is_empty() { return; }
         
@@ -299,7 +299,7 @@ impl Shell {
             let file_name = file_name.trim();
             let resolved = crate::fs::resolve_path(&self.cwd, file_name);
             #[cfg(feature = "legacy-desktop")]
-            crate::editor::run_editor(&resolved, file_name).await;
+            crate::editor::run_editor(&resolved, file_name);
             #[cfg(not(feature = "legacy-desktop"))]
             {
                 let _ = (resolved, file_name);
@@ -620,7 +620,7 @@ impl Shell {
                         }
                     }
 
-                    crate::task::yield_now().await;
+                    crate::task::process::sleep_ms(10);
                 }
                 
                 w = x86_64::instructions::interrupts::without_interrupts(|| WRITE_LOCK.lock());
@@ -768,7 +768,7 @@ impl Shell {
                                     break;
                                 }
                             }
-                            crate::task::yield_now().await;
+                            crate::task::process::sleep_ms(10);
                         }
                     }
                 }

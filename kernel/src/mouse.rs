@@ -154,7 +154,7 @@ pub fn handle_interrupt() {
 }
 
 
-pub async fn mouse_task() {
+pub extern "C" fn mouse_thread() {
     #[cfg(feature = "legacy-desktop")]
     {
         let mut last_x = 320;
@@ -182,13 +182,13 @@ pub async fn mouse_task() {
             last_x = cx;
             last_y = cy;
             last_click = click;
-            crate::task::yield_now().await;
+            crate::task::process::sleep_ms(16);
         }
     }
     #[cfg(not(feature = "legacy-desktop"))]
     {
         loop {
-            crate::task::yield_now().await;
+            crate::task::process::sleep_ms(100);
         }
     }
 }

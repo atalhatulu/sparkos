@@ -5,9 +5,10 @@
 
 use spin::Once;
 use crossbeam_queue::ArrayQueue;
-use core::{future::Future, pin::Pin, task::{Context, Poll}};
+use crate::task::process::{WaitQueue, SCHEDULER, BlockReason};
 
 pub static SCANCODE_QUEUE: Once<ArrayQueue<u8>> = Once::new();
+pub static KEYBOARD_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
 pub fn init() {
     SCANCODE_QUEUE.call_once(|| ArrayQueue::new(256));
@@ -22,40 +23,46 @@ pub(crate) fn add_scancode(scancode: u8) {
     } else {
         crate::serial_println!("WARNING: scancode queue uninitialized");
     }
+    // Wake any thread waiting on keyboard input
+    {
+        let mut s = SCHEDULER.lock();
+        KEYBOARD_WAIT_QUEUE.wake_one(&mut s);
+    }
     // Feed low-level ring buffer for VGA shell
     crate::keyboard::handle_key(scancode);
     // IRQ notification (IRQ 1)
     crate::ipc::irq_event(1, scancode);
 }
 
-pub struct ScancodeFuture;
-
-impl Future for ScancodeFuture {
-    type Output = u8;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<u8> {
+pub fn read_scancode() -> u8 {
+    loop {
         if let Some(queue) = SCANCODE_QUEUE.get() {
             if let Some(scancode) = queue.pop() {
-                return Poll::Ready(scancode);
+                return scancode;
             }
         }
-        Poll::Pending
+        let mut s = SCHEDULER.lock();
+        if let Some(queue) = SCANCODE_QUEUE.get() {
+            if let Some(scancode) = queue.pop() {
+                drop(s);
+                return scancode;
+            }
+        }
+        KEYBOARD_WAIT_QUEUE.prepare_wait(&mut s, BlockReason::Generic);
+        drop(s);
+        crate::task::process::schedule();
     }
 }
 
-pub async fn read_scancode() -> u8 {
-    ScancodeFuture.await
-}
-
-/// Dedicated asynchronous keyboard task running in cooperative executor context (Deadlock-Free!)
-pub async fn keyboard_task() {
+/// Dedicated preemptive keyboard kernel thread (Deadlock-Free!)
+pub extern "C" fn keyboard_thread() {
     let mut is_ctrl = false;
     let mut is_shift = false;
     let mut is_alt = false;
     let mut is_extended = false;
 
     loop {
-        let scancode = read_scancode().await;
+        let scancode = read_scancode();
         if scancode == 0xE0 {
             is_extended = true;
             continue;

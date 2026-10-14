@@ -7,7 +7,7 @@ use core::fmt::Write;
 const COLS: usize = 80;
 const ROWS: usize = 25;
 
-pub async fn run_editor(path: &str, display_name: &str) {
+pub fn run_editor(path: &str, display_name: &str) {
     let content = crate::fs::read_file(path).unwrap_or_else(|_| String::new());
     
     // Split into lines
@@ -30,7 +30,7 @@ pub async fn run_editor(path: &str, display_name: &str) {
                 break;
             }
             if key.is_none() {
-                let scancode = crate::task::keyboard::read_scancode().await;
+                let scancode = crate::task::keyboard::read_scancode();
                 crate::keyboard::KEYBOARD.lock().handle_scancode(scancode);
             }
         }

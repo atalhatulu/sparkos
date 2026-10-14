@@ -27,10 +27,10 @@ pub enum AppState {
 /// progress instead of freezing during application execution. Returns the app
 /// lifecycle result once the app exits or fails to load.
 #[allow(dead_code)]
-pub async fn run_app(elf_bytes: &[u8]) -> AppState {
+pub fn run_app(elf_bytes: &[u8]) -> AppState {
     serial_println!("[APP] Initializing user application...");
     
-    match exec_elf_async(elf_bytes).await {
+    match exec_elf_async(elf_bytes) {
         Ok(_) => {
             serial_println!("[APP] Application terminated successfully.");
             AppState::Exit(0)

@@ -2017,9 +2017,9 @@ pub fn cleanup_windows_for_pid(pid: u64) {
 /// Target frame interval for 60 FPS in milliseconds (PIT 1000 Hz timer ticks)
 pub const FRAME_INTERVAL_TICKS: u64 = 16; // ~16.67 ms (60 FPS)
 
-/// Decoupled, paced compositor task running cooperatively in SimpleExecutor.
+/// Decoupled, paced compositor thread running preemptively.
 /// Only performs rendering if damage exists and at most once every ~16 ms.
-pub async fn compositor_task() {
+pub extern "C" fn compositor_thread() {
     let mut last_render_tick = 0u64;
     let mut first_frame = true;
 
@@ -2043,7 +2043,7 @@ pub async fn compositor_task() {
             }
         }
 
-        crate::task::yield_now().await;
+        crate::task::process::sleep_ms(16);
     }
 }
 

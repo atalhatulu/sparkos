@@ -114,8 +114,7 @@ pub fn execute_ring3_app() {
 /// timer / IPC / input tasks keep making progress. With the current
 /// synchronous iretq model the user app runs to completion once launched, so
 /// the function returns `Ok(())`/`Err(..)` after the app exits.
-pub async fn exec_elf_async(elf_bytes: &[u8]) -> Result<(), &'static str> {
-    crate::task::yield_now().await;
+pub fn exec_elf_async(elf_bytes: &[u8]) -> Result<(), &'static str> {
     exec_elf(elf_bytes)
 }
 
