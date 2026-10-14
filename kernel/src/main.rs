@@ -55,6 +55,7 @@ pub mod sec_mem;
 pub mod cap;
 pub mod syscall_cap; // Asama 2 — syscall yetki kontrolü köprüsü
 pub mod dma_region;  // Asama 6.1 — Capability-gated DMA bolgesi
+pub mod mem_object;  // Faz 3.5 — MemObject soyutlaması
 pub mod acpi;
 pub mod iommu;
 pub mod smp;
@@ -499,6 +500,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     interrupts::init_idt();
     serial_println!("[OK] IDT loaded");
     
+    // CPU Güvenlik Önlemleri (SMEP/SMAP)
+    memory::init_cpu_security();
+
     // Syscall dispatcher (Linux/SysV ABI, int 0x80 üzerinden)
     syscall::init();
 

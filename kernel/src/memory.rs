@@ -161,6 +161,9 @@ pub fn map_user_page(virt: u64, writable: bool) -> Result<u64, &'static str> {
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
+        if virt >= USER_ADDR_BASE + 0x2000 || virt < USER_ADDR_BASE {
+            flags |= PageTableFlags::NO_EXECUTE;
+        }
     }
     unsafe {
         // parent_table_flags ara katman (L3/L2/L1) girişlerine yazılır; boş bırakılırsa
@@ -236,6 +239,9 @@ pub fn map_user_phys_range_in_cr3(
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
+        if virt >= USER_ADDR_BASE {
+            flags |= PageTableFlags::NO_EXECUTE;
+        }
     }
     let parent = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
 
@@ -498,6 +504,9 @@ pub fn map_user_page_in_cr3(cr3: u64, virt: u64, writable: bool) -> Result<u64, 
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::BIT_9;
     if writable {
         flags |= PageTableFlags::WRITABLE;
+        if virt >= USER_ADDR_BASE + 0x2000 || virt < USER_ADDR_BASE {
+            flags |= PageTableFlags::NO_EXECUTE;
+        }
     }
     unsafe {
         // Aynı kök neden: parent_table_flags boş kalırsa ara katman girişleri
@@ -773,3 +782,27 @@ pub fn alloc_backbuffer(
     
     Ok(start_virt.as_u64())
 }
+
+/// CPU Güvenlik Özelliklerini (SMEP/SMAP) tespit eder ve etkinleştirir.
+pub fn init_cpu_security() {
+    let res = core::arch::x86_64::__cpuid_count(7, 0);
+    let smep_supported = (res.ebx & (1 << 7)) != 0;
+    let smap_supported = (res.ebx & (1 << 20)) != 0;
+
+    if smep_supported {
+        unsafe {
+            use x86_64::registers::control::{Cr4, Cr4Flags};
+            let mut flags = Cr4::read();
+            flags.insert(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
+            Cr4::write(flags);
+        }
+        crate::serial_println!("[OK] SMEP enabled (Ring 0 execution protection active)");
+    } else {
+        crate::serial_println!("[WARN] SMEP not supported by CPU");
+    }
+
+    if smap_supported {
+        crate::serial_println!("[INFO] SMAP supported by CPU (ready for copy_from_user/stac integration)");
+    }
+}
+
