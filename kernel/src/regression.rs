@@ -196,6 +196,7 @@ pub fn run() {
     service_supervisor_and_discovery_regression();
     spfs_v1_block_engine_and_ipc_regression();
     input_service_ipc_and_event_distribution_regression();
+    network_service_ipc_and_socket_lifecycle_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -719,6 +720,44 @@ fn input_service_ipc_and_event_distribution_regression() {
 
     crate::serial_println!("[REGRESSION] PASS Input service IPC protocol and event queue distribution");
 }
+
+fn network_service_ipc_and_socket_lifecycle_regression() {
+    use crate::net_socket::{dispatch_net_request, NetRequest, IPPROTO_TCP, NET_OP_BIND, NET_OP_LISTEN};
+
+    // 1. Create TCP Socket via IPC
+    let req_sock = NetRequest::new_socket(IPPROTO_TCP);
+    let (resp_sock, _) = dispatch_net_request(&req_sock, None);
+    assert!(resp_sock.is_ok(), "Socket creation via IPC must succeed");
+    let socket_id = resp_sock.socket_id;
+
+    // 2. Bind Socket via IPC
+    let mut req_bind = NetRequest::empty();
+    req_bind.opcode = NET_OP_BIND;
+    req_bind.socket_id = socket_id;
+    req_bind.port = 8080;
+    let (resp_bind, _) = dispatch_net_request(&req_bind, None);
+    assert!(resp_bind.is_ok(), "Socket bind via IPC must succeed");
+
+    // 3. Listen Socket via IPC
+    let mut req_listen = NetRequest::empty();
+    req_listen.opcode = NET_OP_LISTEN;
+    req_listen.socket_id = socket_id;
+    let (resp_listen, _) = dispatch_net_request(&req_listen, None);
+    assert!(resp_listen.is_ok(), "Socket listen via IPC must succeed");
+
+    // 4. Close Socket via IPC
+    let req_close = NetRequest::new_close(socket_id);
+    let (resp_close, _) = dispatch_net_request(&req_close, None);
+    assert!(resp_close.is_ok(), "Socket close via IPC must succeed");
+
+    // 5. Send on closed socket must fail
+    let req_send = NetRequest::new_send(socket_id, 4);
+    let (resp_send, _) = dispatch_net_request(&req_send, Some(b"PING"));
+    assert!(!resp_send.is_ok(), "Send on closed socket must fail");
+
+    crate::serial_println!("[REGRESSION] PASS Network service IPC protocol and socket lifecycle management");
+}
+
 
 
 

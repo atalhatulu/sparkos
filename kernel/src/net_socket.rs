@@ -607,3 +607,70 @@ fn handle_incoming_tcp(packet: &[u8], src_ip: Ipv4Addr, ip_payload_start: usize)
         }
     }
 }
+
+pub use spark_abi::net::{
+    NetRequest, NetResponse,
+    NET_OP_SOCKET, NET_OP_BIND, NET_OP_LISTEN, NET_OP_CONNECT, NET_OP_SEND, NET_OP_RECV, NET_OP_CLOSE,
+    IPPROTO_TCP, IPPROTO_UDP,
+};
+
+/// Ring-3 Ağ Servisi IPC Dağıtıcısı (Faz 5.3)
+pub fn dispatch_net_request(req: &NetRequest, data_payload: Option<&[u8]>) -> (NetResponse, Vec<u8>) {
+    match req.opcode {
+        NET_OP_SOCKET => {
+            let sock_type = if req.proto == IPPROTO_TCP { SocketType::Tcp } else { SocketType::Udp };
+            if let Some(fd) = socket(sock_type) {
+                (NetResponse::ok(fd as u32, 0), Vec::new())
+            } else {
+                (NetResponse::err(spark_abi::errno::ENOMEM as u32), Vec::new())
+            }
+        }
+        NET_OP_BIND => {
+            if bind(req.socket_id as usize, req.port) {
+                (NetResponse::ok(req.socket_id, 0), Vec::new())
+            } else {
+                (NetResponse::err(spark_abi::errno::EINVAL as u32), Vec::new())
+            }
+        }
+        NET_OP_LISTEN => {
+            if listen(req.socket_id as usize) {
+                (NetResponse::ok(req.socket_id, 0), Vec::new())
+            } else {
+                (NetResponse::err(spark_abi::errno::EINVAL as u32), Vec::new())
+            }
+        }
+        NET_OP_CONNECT => {
+            let remote = SocketAddr {
+                ip: req.ip,
+                port: req.port,
+            };
+            if connect(req.socket_id as usize, remote) {
+                (NetResponse::ok(req.socket_id, 0), Vec::new())
+            } else {
+                (NetResponse::err(spark_abi::errno::EACCES as u32), Vec::new())
+            }
+        }
+        NET_OP_SEND => {
+            let payload = data_payload.unwrap_or(&[]);
+            if send(req.socket_id as usize, payload) {
+                (NetResponse::ok(req.socket_id, payload.len() as u32), Vec::new())
+            } else {
+                (NetResponse::err(spark_abi::errno::EIO as u32), Vec::new())
+            }
+        }
+        NET_OP_RECV => {
+            if let Some(data) = recv(req.socket_id as usize) {
+                let len = data.len() as u32;
+                (NetResponse::ok(req.socket_id, len), data)
+            } else {
+                (NetResponse::err(spark_abi::errno::EAGAIN as u32), Vec::new())
+            }
+        }
+        NET_OP_CLOSE => {
+            close(req.socket_id as usize);
+            (NetResponse::ok(req.socket_id, 0), Vec::new())
+        }
+        _ => (NetResponse::err(spark_abi::errno::ENOSYS as u32), Vec::new()),
+    }
+}
+
