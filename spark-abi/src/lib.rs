@@ -199,4 +199,5 @@ pub mod service;
 pub mod fs;
 pub mod input;
 pub mod net;
+pub mod compositor;
 

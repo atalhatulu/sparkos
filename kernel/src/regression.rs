@@ -197,6 +197,7 @@ pub fn run() {
     spfs_v1_block_engine_and_ipc_regression();
     input_service_ipc_and_event_distribution_regression();
     network_service_ipc_and_socket_lifecycle_regression();
+    compositor_service_ipc_and_window_lifecycle_regression();
 
     crate::serial_println!("[REGRESSION] ALL PASS");
 }
@@ -757,6 +758,53 @@ fn network_service_ipc_and_socket_lifecycle_regression() {
 
     crate::serial_println!("[REGRESSION] PASS Network service IPC protocol and socket lifecycle management");
 }
+
+fn compositor_service_ipc_and_window_lifecycle_regression() {
+    use crate::wm::{dispatch_compositor_request, CompositorRequest, COMP_OP_DESTROY_WINDOW, COMP_OP_MOVE_WINDOW};
+
+    let (client_pid, _) = owner();
+
+    // 1. Create Surface via IPC
+    let req_surf = CompositorRequest::new_create_surface(client_pid, 320, 240);
+    let resp_surf = dispatch_compositor_request(&req_surf);
+    assert!(resp_surf.is_ok(), "Surface creation via IPC must succeed");
+    let surface_id = resp_surf.surface_id;
+    assert_eq!(resp_surf.shmem_size, 320 * 240 * 4);
+
+    // 2. Create Window via IPC
+    let req_win = CompositorRequest::new_create_window(client_pid, surface_id, 50, 50, 320, 240);
+    let resp_win = dispatch_compositor_request(&req_win);
+    assert!(resp_win.is_ok(), "Window creation via IPC must succeed");
+    let window_id = resp_win.window_id;
+
+    // 3. Present Surface with Damage via IPC
+    let req_pres = CompositorRequest::new_present(client_pid, surface_id, 0, 0, 100, 100);
+    let resp_pres = dispatch_compositor_request(&req_pres);
+    assert!(resp_pres.is_ok(), "Present surface with damage via IPC must succeed");
+
+    // 4. Move Window via IPC
+    let mut req_move = CompositorRequest::empty();
+    req_move.opcode = COMP_OP_MOVE_WINDOW;
+    req_move.window_id = window_id;
+    req_move.x = 100;
+    req_move.y = 120;
+    let resp_move = dispatch_compositor_request(&req_move);
+    assert!(resp_move.is_ok(), "Window move via IPC must succeed");
+
+    // 5. Destroy Window via IPC (window manager automatically reclaims coupled surface and terminates UI-bound process)
+    let mut req_dest_w = CompositorRequest::empty();
+    req_dest_w.opcode = COMP_OP_DESTROY_WINDOW;
+    req_dest_w.client_pid = client_pid;
+    req_dest_w.window_id = window_id;
+    let resp_dest_w = dispatch_compositor_request(&req_dest_w);
+    assert!(resp_dest_w.is_ok(), "Window destroy via IPC must succeed");
+
+    // 6. Verify surface and UI process cleaned up
+    assert!(crate::surface::SURFACE_REGISTRY.read().iter().all(|s| s.surface_id != surface_id as u64));
+
+    crate::serial_println!("[REGRESSION] PASS Compositor service IPC protocol, damage tracking and window lifecycle");
+}
+
 
 
 

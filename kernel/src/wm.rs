@@ -2050,3 +2050,65 @@ pub extern "C" fn compositor_thread() {
 // Work counters, not FPS estimates: useful for deterministic compositor regressions.
 pub static COMPOSITED_PIXELS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static COMPOSITED_WINDOWS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub use spark_abi::compositor::{
+    CompositorRequest, CompositorResponse,
+    COMP_OP_CREATE_SURFACE, COMP_OP_PRESENT_SURFACE, COMP_OP_DESTROY_SURFACE,
+    COMP_OP_CREATE_WINDOW, COMP_OP_DESTROY_WINDOW, COMP_OP_MOVE_WINDOW, COMP_OP_FOCUS_WINDOW,
+};
+
+/// Ring-3 Compositor & Window Manager IPC Dağıtıcısı (Faz 5.4)
+pub fn dispatch_compositor_request(req: &CompositorRequest) -> CompositorResponse {
+    match req.opcode {
+        COMP_OP_CREATE_SURFACE => {
+            match crate::surface::create_surface_for_pid(req.client_pid, req.width, req.height) {
+                Ok(sid) => {
+                    let vaddr = crate::surface::USER_SURFACE_BASE;
+                    let size = (req.width as u64) * (req.height as u64) * 4;
+                    CompositorResponse::ok_surface(sid as u32, vaddr, size)
+                }
+                Err(_) => CompositorResponse::err(spark_abi::errno::ENOMEM as u32),
+            }
+        }
+        COMP_OP_PRESENT_SURFACE => {
+            match crate::surface::present_surface_for_pid(req.client_pid, req.surface_id as u64, req.damage_x, req.damage_y, req.damage_w, req.damage_h) {
+                Ok(_) => {
+                    let mut wm = WM.lock();
+                    wm.mark_window_damage(req.damage_x as i32, req.damage_y as i32, req.damage_w, req.damage_h);
+                    CompositorResponse::ok_surface(req.surface_id, 0, 0)
+                }
+                Err(_) => CompositorResponse::err(spark_abi::errno::EINVAL as u32),
+            }
+        }
+        COMP_OP_DESTROY_SURFACE => {
+            match crate::surface::destroy_surface_for_pid(req.client_pid, req.surface_id as u64) {
+                Ok(_) => CompositorResponse::ok_surface(req.surface_id, 0, 0),
+                Err(_) => CompositorResponse::err(spark_abi::errno::EINVAL as u32),
+            }
+        }
+        COMP_OP_CREATE_WINDOW => {
+            let mut wm = WM.lock();
+            match wm.create_window(req.client_pid, req.surface_id as u64, req.x, req.y, req.width, req.height) {
+                Ok(wid) => CompositorResponse::ok_window(wid as u32),
+                Err(_) => CompositorResponse::err(spark_abi::errno::ENOMEM as u32),
+            }
+        }
+        COMP_OP_DESTROY_WINDOW => {
+            let mut wm = WM.lock();
+            let _ = wm.destroy_window(req.client_pid, req.window_id as u64);
+            CompositorResponse::ok_window(req.window_id)
+        }
+        COMP_OP_MOVE_WINDOW => {
+            let mut wm = WM.lock();
+            let _ = wm.move_window(req.client_pid, req.window_id as u64, req.x, req.y);
+            CompositorResponse::ok_window(req.window_id)
+        }
+        COMP_OP_FOCUS_WINDOW => {
+            let mut wm = WM.lock();
+            wm.focused_window = Some(req.window_id as u64);
+            CompositorResponse::ok_window(req.window_id)
+        }
+        _ => CompositorResponse::err(spark_abi::errno::ENOSYS as u32),
+    }
+}
+

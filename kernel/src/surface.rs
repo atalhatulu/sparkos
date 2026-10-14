@@ -113,9 +113,8 @@ pub fn create_surface_for_pid(owner_pid: u64, width: u32, height: u32) -> Result
     Ok(surface_id)
 }
 
-/// Presents a dirty rectangle of the specified surface to the compositor.
-pub fn present_surface(surface_id: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), &'static str> {
-    let pid = crate::task::process::current_pid();
+/// Presents a dirty rectangle of the specified surface to the compositor for a specific PID.
+pub fn present_surface_for_pid(pid: u64, surface_id: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), &'static str> {
     let (clip_x, clip_y, clip_w, clip_h) = {
         let mut reg = SURFACE_REGISTRY.write();
 
@@ -152,6 +151,12 @@ pub fn present_surface(surface_id: u64, x: u32, y: u32, w: u32, h: u32) -> Resul
 
     Ok(())
 }
+
+/// Presents a dirty rectangle of the specified surface for the current process.
+pub fn present_surface(surface_id: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), &'static str> {
+    present_surface_for_pid(crate::task::process::current_pid(), surface_id, x, y, w, h)
+}
+
 
 fn free_backing(phys: u64, pages: u64) {
     for i in 0..pages {
