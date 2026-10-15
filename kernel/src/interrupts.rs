@@ -351,6 +351,7 @@ fn recover_user_fault(stack: &InterruptStackFrame, addr: u64, why: &str) -> ! {
         // Diverges: marks the process Terminated, pushes it to
         // KILLED_PROCESSES, and resumes the cooperative executor (or switches
         // to the next ready process under the preemptive scheduler).
+        x86_64::instructions::interrupts::enable();
         crate::task::process::exit_current();
     }
 

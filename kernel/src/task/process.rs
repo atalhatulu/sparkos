@@ -1824,6 +1824,7 @@ pub fn release_process_address_space(pid: u64) -> bool {
 
 /// Terminate the running process and switch to the next ready one (or idle). Never returns.
 pub fn exit_current() -> ! {
+    x86_64::instructions::interrupts::enable();
     // 1. Immediately reload the pristine shared kernel address space so all
     // subsequent teardown (surface cleanup, window cleanup, memory unmapping)
     // and context switches execute in kernel CR3.
