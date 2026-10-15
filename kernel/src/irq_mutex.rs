@@ -74,11 +74,9 @@ pub struct GenericIrqGuard<'a, T, C: InterruptController = NativeInterrupts> {
 pub type IrqMutex<T> = GenericIrqMutex<T, NativeInterrupts>;
 pub type IrqGuard<'a, T> = GenericIrqGuard<'a, T, NativeInterrupts>;
 
-pub static HELD_IRQ_LOCKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
 #[inline]
 pub fn irq_locks_held() -> usize {
-    HELD_IRQ_LOCKS.load(core::sync::atomic::Ordering::Relaxed)
+    crate::smp::irq_locks_held()
 }
 
 impl<T, C: InterruptController> GenericIrqMutex<T, C> {
@@ -94,7 +92,7 @@ impl<T, C: InterruptController> GenericIrqMutex<T, C> {
         C::disable();
         let start_tsc = if was_enabled { crate::perf::rdtsc() } else { 0 };
         let guard = self.inner.lock();
-        HELD_IRQ_LOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::smp::inc_irq_locks();
         GenericIrqGuard {
             guard: ManuallyDrop::new(guard),
             was_enabled,
@@ -109,7 +107,7 @@ impl<T, C: InterruptController> GenericIrqMutex<T, C> {
         C::disable();
         let start_tsc = if was_enabled { crate::perf::rdtsc() } else { 0 };
         if let Some(guard) = self.inner.try_lock() {
-            HELD_IRQ_LOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::smp::inc_irq_locks();
             Some(GenericIrqGuard {
                 guard: ManuallyDrop::new(guard),
                 was_enabled,
@@ -147,7 +145,7 @@ impl<T, C: InterruptController> DerefMut for GenericIrqGuard<'_, T, C> {
 
 impl<T, C: InterruptController> Drop for GenericIrqGuard<'_, T, C> {
     fn drop(&mut self) {
-        HELD_IRQ_LOCKS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        crate::smp::dec_irq_locks();
         // SAFETY: The inner spinlock guard is explicitly dropped before restoring
         // interrupt flags. This ensures any hardware IRQ will see the spinlock
         // fully unlocked when interrupts are re-enabled.

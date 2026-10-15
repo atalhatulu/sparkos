@@ -41,6 +41,7 @@ pub struct PerCpuBlock {
     pub online: core::sync::atomic::AtomicBool,
     pub ticks_left: core::sync::atomic::AtomicU32,
     pub preemption_enabled: core::sync::atomic::AtomicBool,
+    pub irq_locks_held: core::sync::atomic::AtomicUsize,
 }
 
 unsafe impl Sync for PerCpuBlock {}
@@ -57,6 +58,7 @@ impl PerCpuBlock {
             online: core::sync::atomic::AtomicBool::new(false),
             ticks_left: core::sync::atomic::AtomicU32::new(5),
             preemption_enabled: core::sync::atomic::AtomicBool::new(false),
+            irq_locks_held: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -88,6 +90,8 @@ pub fn this_cpu() -> &'static PerCpuBlock {
     unsafe { &*ptr }
 }
 
+pub static GS_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn setup_per_cpu_for(cpu_id: usize, apic_id: u8) {
     if cpu_id < MAX_CPUS {
         unsafe {
@@ -99,8 +103,36 @@ pub fn setup_per_cpu_for(cpu_id: usize, apic_id: u8) {
         x86_64::registers::model_specific::GsBase::write(
             x86_64::VirtAddr::new(&PER_CPU_BLOCKS[cpu_id] as *const _ as u64)
         );
+        GS_INITIALIZED.store(true, core::sync::atomic::Ordering::Release);
         let verified_id = this_cpu().cpu_id;
         crate::serial_println!("[SMP] CPU {}: this_cpu().cpu_id == {} verified (gs:[0] self-pointer active)", cpu_id, verified_id);
+    }
+}
+
+#[inline]
+pub fn inc_irq_locks() {
+    if GS_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
+        this_cpu().irq_locks_held.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        PER_CPU_BLOCKS[0].irq_locks_held.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[inline]
+pub fn dec_irq_locks() {
+    if GS_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
+        this_cpu().irq_locks_held.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        PER_CPU_BLOCKS[0].irq_locks_held.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[inline]
+pub fn irq_locks_held() -> usize {
+    if GS_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
+        this_cpu().irq_locks_held.load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        PER_CPU_BLOCKS[0].irq_locks_held.load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
