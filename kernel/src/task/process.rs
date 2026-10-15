@@ -3805,6 +3805,10 @@ extern "C" fn deadlock_stress_runner() {
     let mut metrics_calls = 0u64;
     let mut spawn_cycles = 0u64;
 
+    let pre_heap = crate::allocator::heap_used_kb();
+    let pre_frames = crate::memory::frames_free();
+    crate::serial_println!("[DEADLOCK-STRESS] PRE-STRESS heap_used_kb={} frames_free={}", pre_heap, pre_frames);
+
     set_preemption_enabled(true);
 
     while crate::interrupts::get_tick().saturating_sub(start_tick) < target_ticks {
@@ -3838,6 +3842,9 @@ extern "C" fn deadlock_stress_runner() {
     }
 
     set_preemption_enabled(false);
+    let post_heap = crate::allocator::heap_used_kb();
+    let post_frames = crate::memory::frames_free();
+    crate::serial_println!("[DEADLOCK-STRESS] POST-STRESS heap_used_kb={} frames_free={}", post_heap, post_frames);
     let final_skipped = TICKS_SKIPPED.load(Ordering::Relaxed);
     crate::serial_println!(
         "[DEADLOCK-STRESS] ALL PASS: {}s completed without deadlock. Total metrics_calls={}, spawns={}, ticks_skipped={}",

@@ -52,10 +52,13 @@ pub fn record_irq_off_cycles(cycles: u64) {
 }
 
 pub fn run_benchmarks() {
+    let boot_max_irq = MAX_IRQ_OFF_CYCLES.swap(0, core::sync::atomic::Ordering::Relaxed);
+    metric!("max_irq_off_boot_peak", boot_max_irq);
+
     let mut total_ctx = 0u64;
     for _ in 0..10 {
         let t0 = rdtsc();
-        core::hint::spin_loop();
+        crate::task::process::schedule();
         let t1 = rdtsc();
         total_ctx += t1.saturating_sub(t0);
     }
@@ -72,9 +75,23 @@ pub fn run_benchmarks() {
     }
     let ipc_rtt_cycles = total_ipc / 10;
 
+    let mut total_ipc_yield_to = 0u64;
+    for i in 0..10 {
+        let t0 = rdtsc();
+        let _ = chan.try_send(i);
+        let _ = chan.try_recv();
+        crate::task::process::yield_to(crate::task::process::current_pid());
+        let t1 = rdtsc();
+        total_ipc_yield_to += t1.saturating_sub(t0);
+    }
+    let ipc_rtt_yield_to_cycles = total_ipc_yield_to / 10;
+
+    let steady_max_irq = MAX_IRQ_OFF_CYCLES.load(core::sync::atomic::Ordering::Relaxed);
+
     metric!("ctx_switch_cycles", ctx_switch_cycles);
     metric!("ipc_rtt_cycles", ipc_rtt_cycles);
-    metric!("max_irq_off_cycles", MAX_IRQ_OFF_CYCLES.load(core::sync::atomic::Ordering::Relaxed));
+    metric!("ipc_rtt_yield_to_cycles", ipc_rtt_yield_to_cycles);
+    metric!("max_irq_off_cycles_steady", steady_max_irq);
 }
 
 pub struct Span { metric: Metric, start: u64 }
