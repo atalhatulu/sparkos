@@ -2007,7 +2007,7 @@ impl WindowManager {
     }
 }
 
-pub static WM: crate::sync::IrqMutex<WindowManager> = crate::sync::IrqMutex::new(WindowManager::new());
+pub static WM: crate::sync::Mutex<WindowManager> = crate::sync::Mutex::new(WindowManager::new());
 
 /// Public helper to clean up windows on process exit
 pub fn cleanup_windows_for_pid(pid: u64) {
