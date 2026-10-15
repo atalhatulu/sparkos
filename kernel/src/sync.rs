@@ -126,6 +126,17 @@ impl<T> Mutex<T> {
     }
 
     pub fn lock(&self) -> MutexGuard<'_, T> {
+        if crate::task::process::preemption_enabled() {
+            debug_assert!(
+                x86_64::instructions::interrupts::are_enabled(),
+                "Mutex::lock ihlali: Kesmeler kapaliyken (IF=0) Mutex alinamaz!"
+            );
+            debug_assert_eq!(
+                crate::sync::irq_locks_held(),
+                0,
+                "Mutex::lock ihlali: IrqMutex tutulurken (irq_locks_held > 0) Mutex alinamaz!"
+            );
+        }
         let mut spins = 0;
         loop {
             if let Some(guard) = self.inner.try_lock() {
